@@ -246,10 +246,6 @@ class SNPE_A:
         samples = samples.numpy()
         return samples
 
-    def get_shape_and_dtype(self):
-        """Return shape and dtype of the samples."""
-        return (self.param_dim,), 'float64'
-
     async def train(self, dataloader_train, dataloader_val, hook_fn=None):
         """Train the neural spline flow on the given data."""
         best_val_loss = float('inf')  # Best validation loss

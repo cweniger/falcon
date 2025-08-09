@@ -143,9 +143,6 @@ class Extractor:
         x = composite[self.index]
         return x
 
-    def get_shape_and_dtype(self):
-        return (20,), 'float32'
-
 
 def CompositeNode(names, module, **kwargs):
     """Auxiliary function to create a composite node with multiple child nodes."""

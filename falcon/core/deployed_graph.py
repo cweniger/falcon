@@ -7,7 +7,6 @@ import os
 import sys
 from pathlib import Path
 
-#from falcon.core.zarrstore import DatasetView
 from falcon.core.logging import initialize_logging_for
 
 class OnlineEvidenceFilter:
@@ -70,10 +69,6 @@ class MultiplexNodeWrapper:
 
     def proposal_sample(self, *args, **kwargs):
         raise NotImplementedError
-
-    def get_shape_and_dtype(self):
-        node = self.wrapped_node_list[0]  # Use first node
-        return ray.get(node.get_shape_and_dtype.remote())
 
     def shutdown(self):
         for node in self.wrapped_node_list:
@@ -151,9 +146,6 @@ class NodeWrapper:
             return 'stochastic'
         else:
             return 'deterministic'
-
-    def get_shape_and_dtype(self):
-        return self.module.get_shape_and_dtype()
 
     def sample(self, n_samples, incoming = None):
         node_type = self.get_node_type()
@@ -281,14 +273,6 @@ class DeployedGraph:
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
         ray.get([node.shutdown.remote() for node in self.wrapped_nodes_dict.values()])
-
-    def get_shapes_and_dtypes(self):
-        """Get the shapes of the output tensors of the deployed graph."""
-        # TODO: Automatize this
-        shapes_and_dtypes = {}
-        for name, node in self.wrapped_nodes_dict.items():
-            shapes_and_dtypes[name] = ray.get(node.get_shape_and_dtype.remote())
-        return shapes_and_dtypes
 
     def launch(self, dataset_manager, observations):
         asyncio.run(self._launch(dataset_manager, observations))

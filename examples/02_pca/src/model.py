@@ -17,10 +17,6 @@ NBINS = 1000000
 
 class Signal:
     """Signal generator that creates oscillating patterns based on parameters z."""
-    
-    def __init__(self):
-        pass
-
     def sample(self, num_samples, parent_conditions=[]):
         z = parent_conditions[0]
         z = torch.tensor(z)
@@ -31,32 +27,18 @@ class Signal:
         falcon.log({"Signal:std": m.std().item()})
         return m.numpy()
 
-    def get_shape_and_dtype(self):
-        return (NBINS,), 'float64'
-
 
 class Noise:
     """Gaussian noise generator."""
-    
-    def __init__(self):
-        pass
-    
     def sample(self, num_samples, parent_conditions=[]):
         result = torch.randn((num_samples, NBINS)).double() * SIGMA
         falcon.log({"Noise:mean": result.mean().item()})
         falcon.log({"Noise:std": result.std().item()})
         return result.numpy()
 
-    def get_shape_and_dtype(self):
-        return (NBINS,), 'float64'
-
 
 class Add:
     """Adds signal and noise components."""
-    
-    def __init__(self):
-        pass
-    
     def sample(self, num_samples, parent_conditions=[]):
         m, n = parent_conditions
         m = torch.tensor(m)  # Input is numpy array
@@ -65,9 +47,6 @@ class Add:
         falcon.log({"Add:mean": result.mean().item()})
         falcon.log({"Add:std": result.std().item()})
         return result.numpy()
-
-    def get_shape_and_dtype(self):
-        return (NBINS,), 'float64'
 
 
 class E(torch.nn.Module):

@@ -82,12 +82,6 @@ def launch_mode(cfg: DictConfig) -> None:
     deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get('model_path'))
 
     # 1) Prepare dataset manager for deployed graph and store initial samples
-
-    #shapes_and_dtypes = deployed_graph.get_shapes_and_dtypes()
-    #dataset_manager = falcon.get_zarr_dataset_manager(shapes_and_dtypes, Path(cfg.directories.sim_dir),
-    #        num_min_sims = cfg.training.n_train, num_max_sims = cfg.training.n_train,
-    #        num_val_sims=cfg.training.num_val_samples, num_resims = cfg.training.num_resims)
-
     dataset_manager = falcon.get_ray_dataset_manager(
             min_training_samples = cfg.training.min_training_samples,
             max_training_samples = cfg.training.max_training_samples,
