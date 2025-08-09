@@ -118,11 +118,10 @@ class NodeWrapper:
 
         batch_size = self.node.module_config.get('batch_size', 128)
 
-        active_only = False
         dataset_train = ray.get(
-            dataset_manager.get_train_dataset_view.remote(keys_train, filter=filter_train, active_only=active_only))
+            dataset_manager.get_train_dataset_view.remote(keys_train, filter=filter_train))
         dataset_val = ray.get(
-            dataset_manager.get_val_dataset_view.remote(keys_val, filter=None, active_only=active_only))
+            dataset_manager.get_val_dataset_view.remote(keys_val, filter=None))
         dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
         dataloader_val = DataLoader(dataset_val, batch_size=batch_size)
 
@@ -299,11 +298,8 @@ class DeployedGraph:
         dataset_manager = dataset_manager.dataset_manager_actor
 
         # Initial data generation
-        num_samples = ray.get(dataset_manager.get_length.remote())
-        num_min_sims = ray.get(dataset_manager.get_num_min_sims.remote())
-        if num_min_sims > num_samples:
-            #print("Generate new samples / num_active:", num_min_sims - num_samples)
-            ray.get(dataset_manager.generate_samples.remote(self, num_sims = num_min_sims - num_samples))
+        num_initial_samples = ray.get(dataset_manager.num_initial_samples.remote())
+        ray.get(dataset_manager.generate_samples.remote(self, num_sims = num_initial_samples))
 
         #num_sims = ray.get(dataset_manager.get_num_min_sims.remote())
         #samples = self.sample(num_sims)
@@ -343,15 +339,15 @@ class DeployedGraph:
             #active = ray.get(dataset_manager.is_active.remote())
             # FIX: Fix this to work adaptively again
             #generate_new_samples = not all(active[-num_sims:])  # Check if any of the last n_train samples are invalid
-            time.sleep(5)
-            num_new_samples = ray.get(dataset_manager.get_num_resims.remote())
+            time.sleep(4)
+            num_new_samples = ray.get(dataset_manager.num_resims.remote())
             if num_new_samples > 0:
                 #print("Generate new samples:", num_new_samples)
                 new_samples = self.proposal_sample(num_new_samples, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]
                 new_samples = self.sample(num_new_samples, conditions = new_samples)
-                ray.get(dataset_manager.update.remote(new_samples))
+                ray.get(dataset_manager.append.remote(new_samples))
             
             for completed_task in ready:
                 result = ray.get(completed_task)  # Retrieve the result or raise an exception

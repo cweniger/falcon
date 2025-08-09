@@ -1,15 +1,11 @@
-import ray
 import numpy as np
-from torch.utils.data import IterableDataset
-#import torch
-import random
-from pathlib import Path
-import time
 import asyncio
+from enum import IntEnum
+
+import ray
+from torch.utils.data import IterableDataset
 
 from falcon.core.logging import initialize_logging_for, log
-
-CHUNK_SIZE = 1
 
 class DatasetManager:
     """Access the DatasetManagerActor without exposing the actor interface directly."""
@@ -19,23 +15,29 @@ class DatasetManager:
     def generate_samples(self, deployed_graph, num_sims):
         ray.get(self.dataset_manager_actor.generate_samples.remote(deployed_graph, num_sims = num_sims))
 
+class SampleStatus(IntEnum):
+    VALIDATION = 0
+    TRAINING = 1
+    TOMBSTONE = 2
+    DELETED = 3
+
 @ray.remote(name='DatasetManager')
 class DatasetManagerActor:
     def __init__(self, 
-                 num_max_sims = None,   # TODO: Maximum number of simulations to store
-                 num_min_sims = None,   # TODO: Minimum number of simulations to train on
-                 num_val_sims = None,   # TODO: Number of sliding validation sims
-                 num_resims = 256,
+                 max_training_samples = None,   # TODO: Maximum number of simulations to store
+                 min_training_samples = None,   # TODO: Minimum number of simulations to train on
+                 validation_window_size = None,   # TODO: Number of sliding validation sims
+                 resample_batch_size = 256,
                  ):
-        self.num_max_sims = num_max_sims
-        self.num_val_sims = num_val_sims
-        self.num_min_sims = num_min_sims
-        self.num_resims = num_resims
+        self.max_training_samples = max_training_samples
+        self.min_training_samples = min_training_samples
+        self.validation_window_size = validation_window_size
+        self.resample_batch_size = resample_batch_size
 
         # Store
         self.ray_store = []
-        self.is_active = np.zeros(0, dtype=bool)
-        self.ref_counts = np.zeros(0)
+        self.status = np.zeros(0, dtype=int)
+        self.ref_counts = np.zeros(0, dtype=int)
 
         initialize_logging_for("Dataset")
 
@@ -43,30 +45,57 @@ class DatasetManagerActor:
 
     async def monitor(self):
         while True:
-            #print("🖥️ Monitor step")
-            self._deactivate_excess_samples(self.num_max_sims)
-            await asyncio.sleep(3.0)
+            self.garbage_collect_tombstones()
+            await asyncio.sleep(10.0)
 
-    def get_active_ids(self):
-        return np.where(self.is_active)[0]
+    def num_initial_samples(self):
+        return self.min_training_samples + self.validation_window_size
 
-    def _deactivate_excess_samples(self, max_active_samples):
-        """Deactivate samples that are older than num_min_sims + num_val_sims."""
-        active_ids = self.get_active_ids()
-        if len(active_ids) > max_active_samples:
-            self.deactivate(active_ids[:len(active_ids) - max_active_samples])
+    def num_resims(self):
+        return self.resample_batch_size
 
-    def get_num_min_sims(self):
-        return self.num_min_sims
+#    def get_active_ids(self):
+#        # Only return the last num_min_sims active IDs
+#        return np.where(self.status >= SampleStatus.TRAINING)[0]
+
+#    @property
+#    def training_ids(self):
+#        return np.where(self.status == SampleStatus.TRAINING)[0]
+#
+#    @property
+#    def validation_ids(self):
+#        return np.where(self.status == SampleStatus.VALIDATION)[0]
+#
+#    @property
+#    def tombstone_ids(self):
+#        return np.where(self.status == SampleStatus.TOMBSTONE)[0]
+
+    def rotate_sample_buffer(self):
+        """
+        Rotate samples through lifecycle: VAL -> TRAIN -> TOMBSTONE.
+        
+        Keeps most recent samples for validation, older samples for training,
+        and marks oldest samples as tombstones for deletion.
+        """
+        # Get all samples that are not expired yet
+        live_ids = np.where(self.status < SampleStatus.TOMBSTONE)[0]
+
+        # Release older samples for training
+        validation_ids = live_ids[:-self.validation_window_size]
+        self.status[validation_ids] = SampleStatus.TRAINING
+
+        # Set earliest samples to tombstone
+        tombstone_ids = live_ids[:-self.validation_window_size - self.max_training_samples]
+        self.status[tombstone_ids] = SampleStatus.TOMBSTONE
 
     def get_num_resims(self):
         return self.num_resims
 
-    def get_active_samples(self):
-        active_ids = self.get_active_ids()
-        active_ray_store = [self.ray_store[i] for i in active_ids]
-        self.ref_counts[active_ids] += 1
-        return active_ray_store, active_ids
+    def get_samples_by_status(self, status):
+        status_ids = np.where(self.status == status)[0]
+        status_samples = [self.ray_store[i] for i in status_ids]
+        self.ref_counts[status_ids] += 1
+        return status_samples, status_ids
 
     def release_samples(self, ids):
         self.ref_counts[ids] -= 1
@@ -76,38 +105,42 @@ class DatasetManagerActor:
         for i in range(num_new_samples):
             sample = {key: ray.put(value[i]) for key, value in data.items()}
             self.ray_store.append(sample)
-        self.is_active = np.append(self.is_active, np.ones(num_new_samples, dtype=bool))
+        self.status = np.append(self.status, np.full(num_new_samples, SampleStatus.VALIDATION))
         self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
-        log({"Dataset:length": len(self.ray_store)})
-        log({"Dataset:is_active": sum(self.is_active)})
 
-    def update(self, data):
-        self.append(data)
+        self.rotate_sample_buffer()
 
-    def get_length(self):
-        return len(self.ray_store)
+        log({"Dataset:total_length": len(self.ray_store)})
+        log({"Dataset:validation": sum(self.status == SampleStatus.VALIDATION)})
+        log({"Dataset:training": sum(self.status == SampleStatus.TRAINING)})
+        log({"Dataset:tombstone": sum(self.status == SampleStatus.TOMBSTONE)})
+        log({"Dataset:deleted": sum(self.status == SampleStatus.DELETED)})
 
-    def get_num_active(self):
-        return np.sum(self.is_active)
+    def garbage_collect_tombstones(self):
+        """
+        Garbage collect tombstone samples with zero references.
+        
+        Frees Ray objects and clears store entries for samples that are
+        marked as tombstones and no longer referenced by any operations.
+        """
+        unreferenced_tombstone_ids = np.where(
+            (self.status == SampleStatus.TOMBSTONE) & (self.ref_counts <= 0)
+        )[0]
+        
+        if len(unreferenced_tombstone_ids) > 0:
+            #print(f"Garbage collecting {len(unreferenced_tombstone_ids)} tombstones")
+            for i in unreferenced_tombstone_ids:
+                ray.internal.free(list(self.ray_store[i].values()))
+                self.ray_store[i] = None
+                self.status[i] = SampleStatus.DELETED
 
-    def deactivate(self, ids):
-        ids = ids[self.ref_counts[ids] <= 0]  # Only deactivate samples that are not referenced anymore
-        for i in ids:
-            self.is_active[i] = False
-            ray.internal.free(list(self.ray_store[i].values()))  # Remove all traces of the sample
-            self.ray_store[i] = None  
-
-    def get_train_dataset_view(self, keys, filter=None, active_only=False):
-        slice = [-self.num_min_sims-1,-self.num_val_sims-1]
-        dataset = DatasetView(keys, filter=filter,
-            active_only=active_only, slice=slice)
-        return dataset
-
-    def get_val_dataset_view(self, keys, filter=None, active_only=False):
-        slice = [-self.num_val_sims-1,-1]
-        dataset_train = DatasetView(keys, filter=filter,
-            active_only=active_only, slice=slice)
+    def get_train_dataset_view(self, keys, filter=None):
+        dataset_train = DatasetView(keys, filter=filter, sample_status=SampleStatus.TRAINING)
         return dataset_train
+
+    def get_val_dataset_view(self, keys, filter=None):
+        dataset_val = DatasetView(keys, filter=filter, sample_status=SampleStatus.VALIDATION)
+        return dataset_val
 
     def generate_samples(self, deployed_graph, num_sims):
         samples = deployed_graph.sample(num_sims)
@@ -119,41 +152,37 @@ class DatasetManagerActor:
 
 
 class DatasetView(IterableDataset):
-    def __init__(self, keylist, filter=None, slice=None, active_only=False, pre_load=True, shuffle=True):
+    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
         self.dataset_manager = ray.get_actor("DatasetManager")
         self.keylist = keylist
         self.filter = filter
-        self.slice = slice
+        self.sample_status = sample_status
 
     def __iter__(self):
-        active_samples, all_active_ids = ray.get(self.dataset_manager.get_active_samples.remote())
-
-        if self.slice is not None:
-            active_samples = active_samples[self.slice[0]:self.slice[1]]
-            active_ids = all_active_ids[self.slice[0]:self.slice[1]]
+        active_samples, active_ids = ray.get(self.dataset_manager.get_samples_by_status.remote(self.sample_status))
 
         perm = np.random.permutation(len(active_samples))
 
         log({"DatasetView:length": len(perm)})
+        #print("Starting iterating", len(perm))
 
-        print("Starting iterating", len(perm))
         for i in perm:
             sample = [ray.get(active_samples[i][key]) for key in self.keylist]
             if self.filter is not None:  # Online evaluation
                 sample = self.filter(sample)
             index = active_ids[i]
             yield (index, *sample)
-        print("Done iterating", len(perm))
+        #print("Done iterating", len(perm))
 
-        self.dataset_manager.release_samples.remote(all_active_ids)
+        ray.get(self.dataset_manager.release_samples.remote(active_ids))
 
-def get_ray_dataset_manager(num_min_sims=None, num_val_sims=None, num_resims=64, num_max_sims=None):
-    #shapes_and_dtypes = deployed_graph.get_shapes_and_dtypes()
+def get_ray_dataset_manager(min_training_samples=None,
+        max_training_samples=None, validation_window_size=None, resample_batch_size=64):
     dataset_manager_actor = DatasetManagerActor.remote(
-            num_min_sims=num_min_sims,
-            num_max_sims=num_max_sims,
-            num_val_sims=num_val_sims,
-            num_resims=num_resims
+            min_training_samples=min_training_samples,
+            max_training_samples=max_training_samples,
+            validation_window_size=validation_window_size,
+            resample_batch_size=resample_batch_size
     )
     dataset_manager = DatasetManager(dataset_manager_actor)
     return dataset_manager
