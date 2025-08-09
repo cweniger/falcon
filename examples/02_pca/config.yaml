@@ -18,10 +18,10 @@ directories:
 # Training parameters
 training:
   max_epochs: 200
-  min_training_samples: 1024
-  max_training_samples: 1024
+  min_training_samples: 2048
+  max_training_samples: 2048
   validation_window_size: 128
-  resample_batch_size: 256
+  resample_batch_size: 512
   num_conditional_samples: 3000
 
 # Runtime configuration
