@@ -1,4 +1,5 @@
 from .utils import LazyLoader
+from omegaconf import OmegaConf
 
 class Node:
     def __init__(self, name, create_module, parents=[], evidence=[], scaffolds=[], observed=False, module_config={}, 
@@ -182,12 +183,19 @@ def create_graph_from_config(graph_config, _cfg=None):
         scaffolds = node_config.get('scaffolds', [])
         observed = node_config.get('observed', False)
         resample = node_config.get('resample', False)
-        module_config = node_config.get('module_config', {})
         actor_config = node_config.get('ray', {})
         
         # Extract target from create_module
-        target = node_config.get('create_module')
-        
+        simulate = node_config.get("simulate")
+        if isinstance(simulate, str):
+            target = node_config.get('simulate')
+            module_config = {}
+        else:
+            target = node_config.get('simulate').get('_class_')
+            module_config = node_config.get('simulate', {})
+            module_config = OmegaConf.to_container(module_config, resolve=True)
+            module_config.pop("_class_", None)
+
         # Create the node
         node = Node(
             name=node_name,
