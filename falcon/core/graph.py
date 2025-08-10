@@ -183,7 +183,7 @@ def create_graph_from_config(graph_config, _cfg=None):
         observed = node_config.get('observed', False)
         resample = node_config.get('resample', False)
         module_config = node_config.get('module_config', {})
-        actor_config = node_config.get('actor_config', {})
+        actor_config = node_config.get('ray', {})
         
         # Extract target from create_module
         target = node_config.get('create_module')

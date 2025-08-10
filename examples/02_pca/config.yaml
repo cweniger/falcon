@@ -17,7 +17,7 @@ directories:
 
 # Training parameters
 training:
-  max_epochs: 200
+  max_epochs: 20
   min_training_samples: 2048
   max_training_samples: 2048
   validation_window_size: 128
@@ -53,7 +53,7 @@ graph:
       scheduler_patience: 16
       net_type: zuko_gf # maf, nice, sospf, naf, gf
       sample_reference_posterior: true
-    actor_config:
+    ray:
       num_gpus: 0.5
   
   m:
@@ -63,7 +63,7 @@ graph:
     resample: false
     create_module: model.Signal
     module_config: {}
-    actor_config:
+    ray:
       num_gpus: 0
 
   n:
@@ -73,7 +73,7 @@ graph:
     resample: false
     create_module: model.Noise
     module_config: {}
-    actor_config:
+    ray:
       num_gpus: 0
 
   x:
@@ -83,11 +83,11 @@ graph:
     resample: false
     create_module: model.Add
     module_config: {}
-    actor_config:
+    ray:
       num_gpus: 0
 
 # Observations configuration
 observations:
   #path: "data/observations.npz"
-  path: "data/obs_1000000.npz"
+  path: "data/obs_10000.npz"
   index: null
