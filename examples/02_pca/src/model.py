@@ -12,7 +12,7 @@ import wandb
 SIGMA = 1e-3
 MU = 0.0
 NPAR = 4
-NBINS = 1000000
+NBINS = 10000
 
 
 class Signal:

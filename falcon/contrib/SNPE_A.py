@@ -145,6 +145,7 @@ class SNPE_A:
         self._best_posterior = None
         self._best_traindist = None
         self._best_embeddings = None
+        self._embeddings = None
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
@@ -538,10 +539,10 @@ class SNPE_A:
         # Load saved states into best-fit networks
         posterior_state = torch.load(node_dir / "posterior.pth")
         traindist_state = torch.load(node_dir / "traindist.pth")
-        
+
         self._best_posterior.load_state_dict(posterior_state)
         self._best_traindist.load_state_dict(traindist_state)
-        
+
         # Load embedding networks if they exist
         if (node_dir / "embedding.pth").exists() and self._best_embeddings is not None:
             embedding_state = torch.load(node_dir / "embedding.pth")
