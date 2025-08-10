@@ -31,11 +31,8 @@ runtime:
 # Graph definition using declarative YAML
 graph:
   z:
-    parents: []
     evidence: [x]
     scaffolds: [m, n]
-    observed: false
-    resample: false
     create_module: falcon.contrib.SNPE_A
     module_config:
       priors: [['uniform', -1.0, 1.0], ['uniform', -1.0, 1.0], ['uniform', -1.0, 1.0], ['uniform', -1.0, 1.0]]
@@ -58,33 +55,15 @@ graph:
   
   m:
     parents: [z]
-    evidence: []
-    observed: false
-    resample: false
     create_module: model.Signal
-    module_config: {}
-    ray:
-      num_gpus: 0
 
   n:
-    parents: []
-    evidence: []
-    observed: false
-    resample: false
     create_module: model.Noise
-    module_config: {}
-    ray:
-      num_gpus: 0
 
   x:
     parents: [m, n]
-    evidence: []
     observed: true
-    resample: false
     create_module: model.Add
-    module_config: {}
-    ray:
-      num_gpus: 0
 
 # Observations configuration
 observations:
