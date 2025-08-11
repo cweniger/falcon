@@ -117,7 +117,7 @@ def launch_mode(cfg: DictConfig) -> None:
     falcon.finish_wandb_logger()
 
 
-def sample_mode(cfg: DictConfig, sample_type: str, num_samples: int) -> None:
+def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies."""
     # Add model path to Python path for imports
     if cfg.model_path:
@@ -127,14 +127,23 @@ def sample_mode(cfg: DictConfig, sample_type: str, num_samples: int) -> None:
     
     # Instantiate model components directly from graph
     graph = create_graph_from_config(cfg.graph, _cfg=cfg)
-    
+
+    if sample_type == 'prior':
+        sample_cfg = cfg.sampling.prior
+    elif sample_type == 'posterior':
+        sample_cfg = cfg.sampling.posterior
+    elif sample_type == 'proposal':
+        sample_cfg = cfg.sampling.proposal
+    else:
+        raise ValueError(f"Unknown sample type: {sample_type}")
+
+    num_samples = sample_cfg.get('num_samples', 42)
     print(f"Generating {num_samples} samples using {sample_type} sampling...")
     print(graph)
     
     # Deploy graph for sampling
     deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get('model_path'))
 
-    num_samples = cfg.sample.get('num_samples', 42)
     
     # Load saved models if reload is enabled
     if cfg.runtime.reload:
@@ -153,6 +162,7 @@ def sample_mode(cfg: DictConfig, sample_type: str, num_samples: int) -> None:
     elif sample_type == 'proposal':
         # Proposal sampling requires observations for conditioning
         # Load observations from config
+        deployed_graph.load(Path(cfg.directories.graph_dir))
         observations = load_observations(cfg.observations)
         samples = deployed_graph.proposal_sample(num_samples, observations)
         
@@ -168,9 +178,9 @@ def sample_mode(cfg: DictConfig, sample_type: str, num_samples: int) -> None:
         default_keys = {k for k, node in graph.node_dict.items() if node.evidence and k in samples}
     
     # Apply user overrides
-    exclude_keys = cfg.sample.exclude_keys
-    add_keys = cfg.sample.add_keys
-    
+    exclude_keys = sample_cfg.get("exclude_keys", None)
+    add_keys = sample_cfg.get("add_keys", None)
+
     if exclude_keys:
         exclude_set = set(exclude_keys.split(','))
         default_keys -= exclude_set
@@ -187,7 +197,7 @@ def sample_mode(cfg: DictConfig, sample_type: str, num_samples: int) -> None:
         print(f"  {key}: {value.shape}")
     
     # Save to NPZ file
-    output_path = cfg.sample.output_path
+    output_path = sample_cfg.output_path
     output_dir = os.path.dirname(output_path)
     if output_dir:  # Only create directory if it's not empty
         os.makedirs(output_dir, exist_ok=True)
@@ -217,73 +227,31 @@ def launch_main(cfg: DictConfig) -> None:
 def main():
     """Main CLI entry point with explicit mode dispatch."""
     
-    if len(sys.argv) < 2 or sys.argv[1] not in ['simulate', 'swarm', 'predict']:
+    if len(sys.argv) < 2 or sys.argv[1] not in ['sample', 'swarm']:
         print("Error: Must specify mode. Usage:")
-        print("  falcon simulate [hydra_options...]")
-        print("    Generate forward simulation samples")
-        print()
         print("  falcon swarm [hydra_options...]")
-        print("    Execute multi-agent adaptive SBI learning")
-        print()
-        print("  falcon predict [hydra_options...]")
-        print("    Draw posterior samples from trained networks")
+        print("  falcon sample prior [hydra_options...]")
+        print("  falcon sample proposal [hydra_options...]")
+        print("  falcon sample posterior [hydra_options...]")
         sys.exit(1)
     
     mode = sys.argv.pop(1)  # Remove mode from sys.argv
     
-    if mode == 'predict' or mode == 'simulate':
-        # Parse operational flags
-        #num_samples_str = sys.argv.pop(1)  # Remove mode from sys.argv
-        #operational_flags, get_flag_value, has_flag = parse_operational_flags()
-        
-        ## Extract sample-specific parameters
-        #sample_type = None
-        #if has_flag('--prior'):
-        #    sample_type = 'prior'
-        #elif has_flag('--posterior'):
-        #    sample_type = 'posterior'
-        #elif has_flag('--proposal'):
-        #    sample_type = 'proposal'
-            
-        #num_samples_str = get_flag_value('--num-samples')
-        #num_samples = int(num_samples_str) if num_samples_str else None
-        if mode == 'simulate':
-            sample_type = 'prior'
-        else:
-            sample_type = 'posterior'
-        #output_path = get_flag_value('--output')
-        #exclude_keys = get_flag_value('--exclude-keys')
-        #add_keys = get_flag_value('--add-keys')
-        
-        ## Validate required parameters
-        #if sample_type is None:
-        #    print("Error: Must specify sample type: --prior, --posterior, or --proposal")
-        #    sys.exit(1)
-        #if num_samples is None:
-        #    print("Error: Must specify --num-samples=N")
-        #    sys.exit(1)
-        #if output_path is None:
-        #    print("Error: Must specify --output=path")
-        #    sys.exit(1)
-        
+    if mode == 'sample':
+        sample_type = sys.argv.pop(1)
+        if sample_type not in ['prior', 'proposal', 'posterior']:
+            print(f"Error: Unknown sample type: {sample_type}")
+            sys.exit(1)
+
         # Create a modified main function that injects operational parameters
-        def make_sample_main(sample_type, num_samples, output_path, exclude_keys, add_keys):
+        def make_sample_main(sample_type):
             @hydra.main(version_base=None, config_path=os.getcwd(), config_name="config")
             def sample_main_with_params(cfg: DictConfig) -> None:
-                # Add operational parameters to cfg under 'sample' namespace
-#                OmegaConf.set_struct(cfg, False)  # Allow new keys
-#                cfg.sample = {
-#                    'type': sample_type,
-#                    #'num_samples': num_samples, 
-#                    #'output_path': output_path,
-#                    #'exclude_keys': exclude_keys,
-#                    #'add_keys': add_keys
-#                }
-                sample_mode(cfg, sample_type, num_samples)
+                sample_mode(cfg, sample_type)
             return sample_main_with_params
         
         # Create and call the sample function
-        sample_main_func = make_sample_main(sample_type, None, None, None, None)
+        sample_main_func = make_sample_main(sample_type)
         sample_main_func()
     else:  # mode == 'launch'
         launch_main()

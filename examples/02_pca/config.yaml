@@ -78,6 +78,13 @@ observations:
   index: null
 
 
-sample:
-  num_samples: 1000
-  output_path: samples.joblib
+sampling:
+  prior:
+    num_samples: 1000
+    output_path: samples_prior.joblib
+  proposal:
+    num_samples: 1000
+    output_path: samples_proposal.joblib
+  posterior:
+    num_samples: 1000
+    output_path: samples_posterior.joblib
