@@ -1,9 +1,9 @@
-from .utils import LazyLoader
 from omegaconf import OmegaConf
 
 class Node:
-    def __init__(self, name, create_module, parents=[], evidence=[], scaffolds=[], observed=False, module_config={}, 
-                 actor_config={}, resample=False, train='auto'):
+    def __init__(self, name, simulator_cls, inferrer_cls = None, 
+                 parents=[], evidence=[], scaffolds=[], observed=False, resample=False,
+                 simulator_config={}, inferrer_config = {}, actor_config={}):
         """Node definition for a graphical model.
 
         Args:
@@ -17,17 +17,27 @@ class Node:
             resample (bool): Whether to resample the node
         """
         self.name = name
-        if isinstance(create_module, str):
-            create_module = LazyLoader(create_module)
-        self.create_module = create_module
+
+#        # Obtain class definitions by auto-importing modules (is here the right place?)
+# Should go to wrapper
+#        if isinstance(simulator_cls, str):
+#            simulator_cls = LazyLoader(simulator_cls)
+#        if isinstance(inferrer_cls, str):
+#            inferrer_cls = LazyLoader(inferrer_cls)
+
+        self.simulator_cls = simulator_cls
+        self.inferrer_cls = inferrer_cls
+
         self.parents = parents
         self.evidence = evidence
         self.scaffolds = scaffolds
         self.observed = observed
-        self.actor_config = actor_config
-        self.module_config = module_config
         self.resample = resample
-        self.train = len(evidence) > 0 if train == 'auto' else train
+        self.train = self.inferrer_cls is not None
+
+        self.simulator_config = simulator_config
+        self.inferrer_config = inferrer_config
+        self.actor_config = actor_config
 
 
 class Graph:
@@ -35,7 +45,7 @@ class Graph:
         # Storing the node list
         self.node_list = node_list
         self.node_dict = {node.name: node for node in node_list}
-        self.create_module_dict = {node.name: node.create_module for node in node_list}
+        self.simulator_cls_dict = {node.name: node.simulator_cls for node in node_list}
 
         # Storing the model graph structure
         self.name_list = [node.name for node in node_list]
@@ -73,8 +83,8 @@ class Graph:
     def get_evidence(self, node_name):
         return self.evidence_dict[node_name]
 
-    def get_create_module(self, node_name):
-        return self.create_module_dict[node_name]
+    def get_simulator_cls(self, node_name):
+        return self.simulator_cls_dict[node_name]
 
     @staticmethod
     def _topological_sort(name_list, parents_dict):
@@ -126,11 +136,11 @@ class Graph:
         graph_str += f"  Node name          List of parents                                 Class name\n"
         for node in self.sorted_node_names:
             parents = self.get_parents(node)
-            create_module = self.get_create_module(node)
-            if hasattr(create_module, 'display_name'):
-                class_name = create_module.display_name
+            simulator_cls = self.get_simulator_cls(node)
+            if hasattr(simulator_cls, 'display_name'):
+                class_name = simulator_cls.display_name
             else:
-                class_name = str(create_module)
+                class_name = str(simulator_cls)
             graph_str += f"* {node:<15} <- {', '.join(parents):<45} | {class_name:<20}\n"
         return graph_str
 
@@ -157,7 +167,7 @@ def CompositeNode(names, module, **kwargs):
     # Instantiate child nodes, which extract the individual components
     nodes = []
     for i, name in enumerate(names):
-        node = Node(name, Extractor, parents=[joined_names], module_config=dict(index=i))
+        node = Node(name, Extractor, parents=[joined_names], simulator_config=dict(index=i))
         nodes.append(node)
 
     # Return composite node and child nodes, which both must be added to the graph
@@ -185,27 +195,44 @@ def create_graph_from_config(graph_config, _cfg=None):
         resample = node_config.get('resample', False)
         actor_config = node_config.get('ray', {})
         
-        # Extract target from create_module
-        simulate = node_config.get("simulate")
-        if isinstance(simulate, str):
+        # Extract target from simulator
+        simulator = node_config.get("simulate")
+        if isinstance(simulator, str):
             target = node_config.get('simulate')
-            module_config = {}
+            simulator_config = {}
         else:
             target = node_config.get('simulate').get('_class_')
-            module_config = node_config.get('simulate', {})
-            module_config = OmegaConf.to_container(module_config, resolve=True)
-            module_config.pop("_class_", None)
+            simulator_config = node_config.get('simulate', {})
+            simulator_config = OmegaConf.to_container(simulator_config, resolve=True)
+            simulator_config.pop("_class_", None)
+
+        # Extract target from infer
+        if "infer" in node_config:
+            inferrer = node_config.get("infer")
+            if isinstance(inferrer, str):
+                inferrer_cls = node_config.get('infer')
+                inferrer_config = {}
+            else:
+                inferrer_cls = node_config.get('infer').get('_class_')
+                inferrer_config = node_config.get('infer', {})
+                inferrer_config = OmegaConf.to_container(inferrer_config, resolve=True)
+                inferrer_config.pop("_class_", None)
+        else:
+            inferrer_cls = None
+            inferrer_config = {}
 
         # Create the node
         node = Node(
             name=node_name,
-            create_module=target,
+            simulator_cls=target,
+            inferrer_cls=inferrer_cls,
             parents=parents,
             evidence=evidence,
             scaffolds=scaffolds,
             observed=observed,
             resample=resample,
-            module_config=module_config,
+            simulator_config=simulator_config,
+            inferrer_config=inferrer_config,
             actor_config=actor_config
         )
         

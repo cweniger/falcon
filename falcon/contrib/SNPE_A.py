@@ -86,7 +86,7 @@ class Flow(torch.nn.Module):
 
 class SNPE_A:
     def __init__(self, 
-                 priors=[('uniform', -1., 1.)],
+                 simulator_instance,
                  embeddings=None,
                  device=None,
                  num_epochs=10, 
@@ -103,7 +103,7 @@ class SNPE_A:
                  batch_size=128,
                  ):
         # Configuration
-        self.param_dim = len(priors)
+        self.param_dim = simulator_instance.param_dim
         # Handle string embeddings by wrapping in LazyLoader
         if isinstance(embeddings, str):
             self.embeddings = LazyLoader(embeddings)
@@ -129,7 +129,7 @@ class SNPE_A:
         self.sample_reference_posterior = sample_reference_posterior
 
         # Prior distribution
-        self._prior = HypercubeMappingPrior(priors)
+        self.simulator_instance = simulator_instance
 
         # Runtime variables
         self.log_ratio_threshold = -torch.inf  # Dynamic threshold for rejection sampling
@@ -243,7 +243,7 @@ class SNPE_A:
     def sample(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
         assert parent_conditions == [], "Conditions are not supported."
-        samples = self._prior.sample(num_samples)
+        samples = self.simulator_instance.sample(num_samples)
         samples = samples.numpy()
         return samples
 
@@ -264,7 +264,7 @@ class SNPE_A:
                 log({"n_train_batch": n_train_batch})
                 n_train_batch += 1
                 _, theta, inf_conditions = batch[0], batch[1], batch[2:]
-                u = self._prior.inverse(theta)
+                u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
                     self._initialize_networks(u, inf_conditions)
                 self._optimizer.zero_grad()
@@ -311,7 +311,7 @@ class SNPE_A:
                 log({"n_val_batch": n_val_batch})
                 n_val_batch += 1
                 _, theta, inf_conditions = batch[0], batch[1], batch[2:]
-                u = self._prior.inverse(theta)
+                u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=False)
                 uc = u.to(self.device)
@@ -478,13 +478,13 @@ class SNPE_A:
 
         samples = samples_proposals[idx, torch.arange(num_samples), :]
 
-        samples = self._prior.forward(samples)
+        samples = self.simulator_instance.forward(samples)
 
         return samples.to('cpu')
 
     def discardable(self, theta, parent_conditions=[], evidence_conditions=[]):
         inf_conditions = parent_conditions + evidence_conditions
-        u = self._prior.inverse(theta)
+        u = self.simulator_instance.inverse(theta)
         inf_conditions = [c.to(self.device) for c in inf_conditions]
         s = self._summary(inf_conditions, train=False, use_best_fit=True)
         u, s = self._align_singleton_batch_dims([u, s])

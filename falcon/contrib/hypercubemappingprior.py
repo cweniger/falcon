@@ -28,7 +28,7 @@ class HypercubeMappingPrior:
     For example, a uniform prior would be ("uniform", low, high) and a triangular prior would be ("triangular", a, c, b).
     """
     
-    def __init__(self, priors, hypercube_range=[-2, 2]):
+    def __init__(self, priors = [], hypercube_range=[-2, 2]):
         """
         Initializes the HypercubeMappingPrior object.
         
@@ -38,6 +38,7 @@ class HypercubeMappingPrior:
             hypercube_range (list or tuple): The range of the hypercube domain (default: [-2, 2]).
         """
         self.priors = priors
+        self.param_dim = len(priors)
         self.hypercube_range = hypercube_range
 
     @staticmethod
@@ -196,7 +197,7 @@ class HypercubeMappingPrior:
         u = u * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
         return u
 
-    def sample(self, n_samples):
+    def sample(self, n_samples, **kwargs):
         """
         Generates a batch of samples from the target distributions.
         
@@ -209,7 +210,7 @@ class HypercubeMappingPrior:
         # Generate random samples in the hypercube_range
         u = torch.rand(n_samples, len(self.priors)) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
         u = torch.rand(n_samples, len(self.priors), dtype=torch.float64) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
-        return self.forward(u)
+        return self.forward(u).numpy()
 
 
 # ==================== Example Usage ==================== #
