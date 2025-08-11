@@ -58,8 +58,8 @@ def launch_mode(cfg: DictConfig) -> None:
             sys.path.insert(0, str(model_path))
     
     # Initialise logger (should be done before any other falcon code)
-    wandb_dir = cfg.wandb.get('dir', None)
-    falcon.start_wandb_logger(wandb_project=cfg.wandb.project, wandb_group=cfg.wandb.group, wandb_dir=wandb_dir)
+    wandb_dir = cfg.logging.get('dir', None)
+    falcon.start_wandb_logger(wandb_project=cfg.logging.project, wandb_group=cfg.logging.group, wandb_dir=wandb_dir)
 
 
     ########################
@@ -84,29 +84,21 @@ def launch_mode(cfg: DictConfig) -> None:
 
     # 1) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
-            min_training_samples = cfg.training.min_training_samples,
-            max_training_samples = cfg.training.max_training_samples,
-            validation_window_size=cfg.training.validation_window_size,
-            resample_batch_size=cfg.training.resample_batch_size
+            min_training_samples = cfg.buffer.min_training_samples,
+            max_training_samples = cfg.buffer.max_training_samples,
+            validation_window_size=cfg.buffer.validation_window_size,
+            resample_batch_size=cfg.buffer.resample_batch_size
             )
 
     # 2) Generate initial samples
-    dataset_manager.generate_samples(deployed_graph, num_sims = cfg.training.min_training_samples)
+    dataset_manager.generate_samples(deployed_graph, num_sims = cfg.buffer.min_training_samples)
 
     # 3) Train the graph
-    if cfg.runtime.reload:
-        deployed_graph.load(Path(cfg.directories.graph_dir))
-    else:
-        deployed_graph.launch(dataset_manager, observations)
-        deployed_graph.save(Path(cfg.directories.graph_dir))
-
-    ##################
-    ### Evaluation ###
-    ##################
-
-    samples = deployed_graph.conditioned_sample(cfg.training.num_conditional_samples, observations)
-    plot_samples = samples['z']
-    sbi.analysis.pairplot(plot_samples, figsize=(15, 15))
+    graph_path = Path(cfg.paths.graph)
+    if graph_path.exists():
+        deployed_graph.load(graph_path)
+    deployed_graph.launch(dataset_manager, observations)
+    deployed_graph.save(graph_path)
 
 
     ##########################
@@ -129,15 +121,15 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     graph = create_graph_from_config(cfg.graph, _cfg=cfg)
 
     if sample_type == 'prior':
-        sample_cfg = cfg.sampling.prior
+        sample_cfg = cfg.sample.prior
     elif sample_type == 'posterior':
-        sample_cfg = cfg.sampling.posterior
+        sample_cfg = cfg.sample.posterior
     elif sample_type == 'proposal':
-        sample_cfg = cfg.sampling.proposal
+        sample_cfg = cfg.sample.proposal
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    num_samples = sample_cfg.get('num_samples', 42)
+    num_samples = sample_cfg.get('n', 42)
     print(f"Generating {num_samples} samples using {sample_type} sampling...")
     print(graph)
     
@@ -146,8 +138,9 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
 
     
     # Load saved models if reload is enabled
-    if cfg.runtime.reload:
-        deployed_graph.load(Path(cfg.directories.graph_dir))
+#    graph_path = Path(cfg.paths.graph)
+#    if graph_path.exists():
+#        deployed_graph.load(graph_path)
     
     if sample_type == 'prior':
         # Generate forward samples from prior
@@ -155,14 +148,14 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
         
     elif sample_type == 'posterior':
         # TODO: Implement posterior sampling (requires trained model and observations)
-        deployed_graph.load(Path(cfg.directories.graph_dir))
+        deployed_graph.load(Path(cfg.paths.graph))
         observations = load_observations(cfg.observations)
         samples = deployed_graph.conditioned_sample(num_samples, observations)
         
     elif sample_type == 'proposal':
         # Proposal sampling requires observations for conditioning
         # Load observations from config
-        deployed_graph.load(Path(cfg.directories.graph_dir))
+        deployed_graph.load(Path(cfg.paths.graph))
         observations = load_observations(cfg.observations)
         samples = deployed_graph.proposal_sample(num_samples, observations)
         
@@ -197,7 +190,7 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
         print(f"  {key}: {value.shape}")
     
     # Save to NPZ file
-    output_path = sample_cfg.output_path
+    output_path = sample_cfg.path
     output_dir = os.path.dirname(output_path)
     if output_dir:  # Only create directory if it's not empty
         os.makedirs(output_dir, exist_ok=True)

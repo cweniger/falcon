@@ -5,28 +5,27 @@
 model_path: "src"
 
 # WandB configuration
-wandb:
+logging:
   project: falcon_pca2
   group: pca_v1
   dir: ${hydra:run.dir}
 
 # Directory configuration (relative to Hydra output directory)
-directories:
-  sim_dir: ${hydra:run.dir}/sim_dir
-  graph_dir: ${hydra:run.dir}/graph_dir
+paths:
+  buffer: ${hydra:run.dir}/sim_dir
+  graph: ${hydra:run.dir}/graph_dir
 
 # Training parameters
-training:
-  max_epochs: 200
+buffer:
   min_training_samples: 2048
   max_training_samples: 2048
   validation_window_size: 128
   resample_batch_size: 512
-  num_conditional_samples: 3000
+#  num_conditional_samples: 3000
 
-# Runtime configuration
-runtime:
-  reload: false
+## Runtime configuration
+#runtime:
+#  reload: false
 
 # Graph definition using declarative YAML
 graph:
@@ -42,20 +41,22 @@ graph:
         - ['uniform', -1.0, 1.0]
     estimator:
       _class_: falcon.contrib.SNPE_A
+
       embeddings: model.E
-      num_epochs: ${training.max_epochs}
-      discard_samples: true
-      gamma: 0.5
-      lr_decay_factor: 0.1
-      theta_norm: true
-      batch_size: 128
-      norm_momentum: 0.01
-      lr: 0.01
-      device: cuda
-      early_stop_patience: 32
-      scheduler_patience: 16
+
+      #discard_samples: true
       net_type: zuko_gf # maf, nice, sospf, naf, gf
-      sample_reference_posterior: true
+      gamma: 0.5
+      num_epochs: 200
+      batch_size: 128
+      lr: 0.01
+      early_stop_patience: 32
+      lr_decay_factor: 0.1
+      scheduler_patience: 16
+      #sample_reference_posterior: true
+      #theta_norm: true
+      #norm_momentum: 0.01
+      #device: cuda
     ray:
       num_gpus: 0.5
   
@@ -68,23 +69,22 @@ graph:
 
   x:
     parents: [m, n]
-    observed: true
     simulator: model.Add
+    observed: "data/obs_10000.npz"
 
-# Observations configuration
+## Observations configuration
 observations:
   #path: "data/observations.npz"
   path: "data/obs_10000.npz"
   index: null
 
-
-sampling:
+sample:
   prior:
-    num_samples: 1000
-    output_path: samples_prior.joblib
+    n: 1000
+    path: samples_prior.joblib
   proposal:
-    num_samples: 1000
-    output_path: samples_proposal.joblib
+    n: 1000
+    path: samples_proposal.joblib
   posterior:
-    num_samples: 10000
-    output_path: samples_posterior.joblib
+    n: 10000
+    path: samples_posterior.joblib
