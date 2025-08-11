@@ -15,17 +15,12 @@ paths:
   buffer: ${hydra:run.dir}/sim_dir
   graph: ${hydra:run.dir}/graph_dir
 
-# Training parameters
+# Training buffer parameters
 buffer:
   min_training_samples: 2048
   max_training_samples: 2048
   validation_window_size: 128
   resample_batch_size: 512
-#  num_conditional_samples: 3000
-
-## Runtime configuration
-#runtime:
-#  reload: false
 
 # Graph definition using declarative YAML
 graph:
@@ -47,7 +42,7 @@ graph:
       #discard_samples: true
       net_type: zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5
-      num_epochs: 200
+      num_epochs: 10
       batch_size: 128
       lr: 0.01
       early_stop_patience: 32
@@ -70,7 +65,6 @@ graph:
   x:
     parents: [m, n]
     simulator: model.Add
-    observed: "data/obs_10000.npz"
 
 ## Observations configuration
 observations:
