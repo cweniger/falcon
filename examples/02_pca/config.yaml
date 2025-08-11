@@ -17,7 +17,7 @@ directories:
 
 # Training parameters
 training:
-  max_epochs: 20
+  max_epochs: 10
   min_training_samples: 2048
   max_training_samples: 2048
   validation_window_size: 128
@@ -33,14 +33,14 @@ graph:
   z:
     evidence: [x]
     scaffolds: [m, n]
-    simulate: 
+    simulator: 
       _class_: falcon.contrib.HypercubeMappingPrior
       priors: 
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
-    infer:
+    estimator:
       _class_: falcon.contrib.SNPE_A
       embeddings: model.E
       num_epochs: ${training.max_epochs}
@@ -61,15 +61,15 @@ graph:
   
   m:
     parents: [z]
-    simulate: model.Signal
+    simulator: model.Signal
 
   n:
-    simulate: model.Noise
+    simulator: model.Noise
 
   x:
     parents: [m, n]
     observed: true
-    simulate: model.Add
+    simulator: model.Add
 
 # Observations configuration
 observations:

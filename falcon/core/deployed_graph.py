@@ -94,11 +94,11 @@ class NodeWrapper:
         simulator_cls = LazyLoader(node.simulator_cls)
         self.simulator_instance = simulator_cls(**node.simulator_config)
 
-        if node.inferrer_cls is not None:
-            inferrer_cls = LazyLoader(node.inferrer_cls)
-            self.inferrer_instance = inferrer_cls(self.simulator_instance, **node.inferrer_config)
+        if node.estimator_cls is not None:
+            estimator_cls = LazyLoader(node.estimator_cls)
+            self.estimator_instance = estimator_cls(self.simulator_instance, **node.estimator_config)
         else:
-            self.inferrer_instance = None
+            self.estimator_instance = None
 
         self.parents = node.parents
         self.evidence = node.evidence
@@ -121,7 +121,7 @@ class NodeWrapper:
         filter_train = OnlineEvidenceFilter(self.offline_evidence, self.resample_subgraph, self.evidence+self.scaffolds, self.graph)
         #filter_val = OnlineEvidenceFilter(self.evidence, [], self.evidence, self.graph)
 
-        batch_size = self.node.inferrer_config.get('batch_size', 128)
+        batch_size = self.node.estimator_config.get('batch_size', 128)
 
         dataset_train = ray.get(
             dataset_manager.get_train_dataset_view.remote(keys_train, filter=filter_train))
@@ -145,7 +145,7 @@ class NodeWrapper:
 #                dataset_manager.deactivate.remote(ids)
         hook_fn = None
 
-        await self.inferrer_instance.train(dataloader_train, dataloader_val, hook_fn=hook_fn)
+        await self.estimator_instance.train(dataloader_train, dataloader_val, hook_fn=hook_fn)
         print("...training complete for:", self.name)
 
 #    def get_simulator_module(self):
@@ -167,12 +167,12 @@ class NodeWrapper:
 #            raise ValueError(f"Unknown node type: {node_type}")
 
     def conditioned_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self.inferrer_instance.conditioned_sample(n_samples,
+        samples = self.estimator_instance.conditioned_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
         return samples
 
     def proposal_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self.inferrer_instance.proposal_sample(n_samples,
+        samples = self.estimator_instance.proposal_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
         return samples
 
@@ -180,8 +180,8 @@ class NodeWrapper:
         method = getattr(self.simulator_instance, method_name)
         return method(*args, **kwargs)
 
-    def call_inferrer_method(self, method_name, *args, **kwargs):
-        method = getattr(self.inferrer_instance, method_name)
+    def call_estimator_method(self, method_name, *args, **kwargs):
+        method = getattr(self.estimator_instance, method_name)
         return method(*args, **kwargs)
 
     def shutdown(self):
@@ -190,15 +190,15 @@ class NodeWrapper:
 
     def save(self, node_dir):
         # Silently ignore if the module does not have a save method
-        if hasattr(self.inferrer_instance, 'save'):
+        if hasattr(self.estimator_instance, 'save'):
             node_dir.mkdir(parents=True, exist_ok=True)
-            return self.inferrer_instance.save(node_dir)
+            return self.estimator_instance.save(node_dir)
 
     def load(self, node_dir):
         # Silently ignore if the module does not have a load method
-        if hasattr(self.inferrer_instance, 'load'):
+        if hasattr(self.estimator_instance, 'load'):
             node_dir.mkdir(parents=True, exist_ok=True)
-            return self.inferrer_instance.load(node_dir)
+            return self.estimator_instance.load(node_dir)
 
 
 class DeployedGraph:

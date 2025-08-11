@@ -1,9 +1,9 @@
 from omegaconf import OmegaConf
 
 class Node:
-    def __init__(self, name, simulator_cls, inferrer_cls = None, 
+    def __init__(self, name, simulator_cls, estimator_cls = None, 
                  parents=[], evidence=[], scaffolds=[], observed=False, resample=False,
-                 simulator_config={}, inferrer_config = {}, actor_config={}):
+                 simulator_config={}, estimator_config = {}, actor_config={}):
         """Node definition for a graphical model.
 
         Args:
@@ -22,21 +22,21 @@ class Node:
 # Should go to wrapper
 #        if isinstance(simulator_cls, str):
 #            simulator_cls = LazyLoader(simulator_cls)
-#        if isinstance(inferrer_cls, str):
-#            inferrer_cls = LazyLoader(inferrer_cls)
+#        if isinstance(estimator_cls, str):
+#            estimator_cls = LazyLoader(estimator_cls)
 
         self.simulator_cls = simulator_cls
-        self.inferrer_cls = inferrer_cls
+        self.estimator_cls = estimator_cls
 
         self.parents = parents
         self.evidence = evidence
         self.scaffolds = scaffolds
         self.observed = observed
         self.resample = resample
-        self.train = self.inferrer_cls is not None
+        self.train = self.estimator_cls is not None
 
         self.simulator_config = simulator_config
-        self.inferrer_config = inferrer_config
+        self.estimator_config = estimator_config
         self.actor_config = actor_config
 
 
@@ -196,43 +196,43 @@ def create_graph_from_config(graph_config, _cfg=None):
         actor_config = node_config.get('ray', {})
         
         # Extract target from simulator
-        simulator = node_config.get("simulate")
+        simulator = node_config.get("simulator")
         if isinstance(simulator, str):
-            target = node_config.get('simulate')
+            simulator_cls = simulator
             simulator_config = {}
         else:
-            target = node_config.get('simulate').get('_class_')
-            simulator_config = node_config.get('simulate', {})
+            simulator_cls = simulator.get('_class_')
+            simulator_config = simulator
             simulator_config = OmegaConf.to_container(simulator_config, resolve=True)
             simulator_config.pop("_class_", None)
 
         # Extract target from infer
-        if "infer" in node_config:
-            inferrer = node_config.get("infer")
-            if isinstance(inferrer, str):
-                inferrer_cls = node_config.get('infer')
-                inferrer_config = {}
+        if "estimator" in node_config:
+            estimator = node_config.get("estimator")
+            if isinstance(estimator, str):
+                estimator_cls = estimator
+                estimator_config = {}
             else:
-                inferrer_cls = node_config.get('infer').get('_class_')
-                inferrer_config = node_config.get('infer', {})
-                inferrer_config = OmegaConf.to_container(inferrer_config, resolve=True)
-                inferrer_config.pop("_class_", None)
+                estimator_cls = estimator.get('_class_')
+                estimator_config = estimator
+                estimator_config = OmegaConf.to_container(estimator_config, resolve=True)
+                estimator_config.pop("_class_", None)
         else:
-            inferrer_cls = None
-            inferrer_config = {}
+            estimator_cls = None
+            estimator_config = {}
 
         # Create the node
         node = Node(
             name=node_name,
-            simulator_cls=target,
-            inferrer_cls=inferrer_cls,
+            simulator_cls=simulator_cls,
+            estimator_cls=estimator_cls,
             parents=parents,
             evidence=evidence,
             scaffolds=scaffolds,
             observed=observed,
             resample=resample,
             simulator_config=simulator_config,
-            inferrer_config=inferrer_config,
+            estimator_config=estimator_config,
             actor_config=actor_config
         )
         
