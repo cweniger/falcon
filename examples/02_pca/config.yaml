@@ -39,7 +39,6 @@ graph:
       embedding:
          _target_: model.E
          _input_: [x, m, n]
-      embedding_keyword_order: [x, m, n]  # Transitional hack during code refactoring
       #discard_samples: true
       net_type: zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5

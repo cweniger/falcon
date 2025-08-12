@@ -94,9 +94,14 @@ class NodeWrapper:
         simulator_cls = LazyLoader(node.simulator_cls)
         self.simulator_instance = simulator_cls(**node.simulator_config)
 
+        _embedding_keywords = self.node.evidence + self.node.scaffolds
+        print("Embedding keywords:", _embedding_keywords)
+
         if node.estimator_cls is not None:
             estimator_cls = LazyLoader(node.estimator_cls)
-            self.estimator_instance = estimator_cls(self.simulator_instance, **node.estimator_config)
+            self.estimator_instance = estimator_cls(self.simulator_instance,
+                                                    _embedding_keywords=_embedding_keywords,
+                                                    **node.estimator_config)
         else:
             self.estimator_instance = None
 

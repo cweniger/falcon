@@ -103,7 +103,7 @@ class SNPE_A:
                  sample_reference_posterior=False,
                  batch_size=128,
                  embedding=None,
-                 embedding_keyword_order=[]
+                 _embedding_keywords=[]
                  ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -128,7 +128,7 @@ class SNPE_A:
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
-        self.embedding_keyword_order = embedding_keyword_order
+        self.embedding_keyword_order = _embedding_keywords
 
         # Prior distribution
         self.simulator_instance = simulator_instance
