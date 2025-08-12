@@ -9,7 +9,7 @@ import os
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from falcon.core.embedding import EmbeddingWrapper, instantiate_embedding, _collect_input_keys, _create_module_from_config
+from falcon.core.embedding import EmbeddingWrapper, instantiate_embedding, _collect_input_keys
 
 
 def test_collect_input_keys():
@@ -61,24 +61,34 @@ def test_embedding_wrapper_structure():
     """Test that EmbeddingWrapper has the right structure."""
     print("Testing EmbeddingWrapper structure...")
     
-    # Mock a simple module class
-    class MockModule:
+    # Mock a simple module class  
+    import torch.nn as nn
+    class MockModule(nn.Module):
         def __init__(self):
-            pass
+            super().__init__()
         
-        def __call__(self, x):
+        def forward(self, x):
             return x
     
     # Create wrapper
     mock_module = MockModule()
-    wrapper = EmbeddingWrapper(mock_module, ["x", "y"])
+    wrapper = EmbeddingWrapper(
+        modules=[mock_module], 
+        input_keys_list=[["x"]], 
+        output_keys=["temp_1"],
+        required_input_keys=["x", "y"]
+    )
     
     # Test methods exist
     assert hasattr(wrapper, "forward")
-    assert hasattr(wrapper, "_execute_module")
     
     # Test input_keys attribute
     assert wrapper.input_keys == ["x", "y"]
+    
+    # Test new attributes
+    assert len(wrapper.modules_list) == 1
+    assert wrapper.input_keys_list == [["x"]]
+    assert wrapper.output_keys == ["temp_1"]
     
     print("✓ EmbeddingWrapper structure tests passed")
 
