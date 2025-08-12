@@ -69,7 +69,7 @@ class E(torch.nn.Module):
     def forward(self, x, *args):
         falcon.log({f"{self.log_prefix}input_min": x.min().item()})
         falcon.log({f"{self.log_prefix}input_max": x.max().item()})
-        if len(args) > 0 and self.training:  # Scaffolds provided
+        if args[0] is not None and self.training:  # Scaffolds provided
             m, n = args
             # Update whitener with noise component
             self.whitener.update(n+m)

@@ -10,8 +10,10 @@ from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
 from falcon.core.utils import LazyLoader
+from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
+import copy
 
 class Flow(torch.nn.Module):
     def __init__(self, theta, s, theta_norm=False, log_prefix=None, norm_momentum = 3e-3, net_type = 'nsf'):
@@ -87,7 +89,6 @@ class Flow(torch.nn.Module):
 class SNPE_A:
     def __init__(self, 
                  simulator_instance,
-                 embeddings=None,
                  device=None,
                  num_epochs=10, 
                  lr_decay_factor=0.1,
@@ -101,15 +102,12 @@ class SNPE_A:
                  net_type='nsf',
                  sample_reference_posterior=False,
                  batch_size=128,
+                 embedding=None,
+                 embedding_keyword_order=[]
                  ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
-        # Handle string embeddings by wrapping in LazyLoader
-        if isinstance(embeddings, str):
-            self.embeddings = LazyLoader(embeddings)
-        else:
-            self.embeddings = embeddings
-        
+
         # Auto-detect device if not specified
         if device is None:
             self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
@@ -128,6 +126,10 @@ class SNPE_A:
         self.net_type = net_type
         self.sample_reference_posterior = sample_reference_posterior
 
+        # New embedding instantiation
+        self._embedding = instantiate_embedding(embedding).to(self.device)
+        self.embedding_keyword_order = embedding_keyword_order
+
         # Prior distribution
         self.simulator_instance = simulator_instance
 
@@ -144,18 +146,13 @@ class SNPE_A:
         # Best-fit networks (for inference only)
         self._best_posterior = None
         self._best_traindist = None
-        self._best_embeddings = None
-        self._embeddings = None
+        self._best_embedding = None
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
         inf_conditions = conditions
         print("Initializing LearnableDistribution...")
         print("GPU available:", torch.cuda.is_available())
-
-        # Initialize embedding networks
-        if self.embeddings is not None:
-            self._embeddings = self.embeddings().to(self.device)
 
         # Initialize neural spline flow for posterior distribution
         inf_conditions = [c.to(self.device) for c in inf_conditions]
@@ -178,16 +175,14 @@ class SNPE_A:
         self._best_traindist.load_state_dict(self._traindist.state_dict())
         
         # Best-fit embeddings (if applicable)
-        if hasattr(self, '_embeddings'):
-            import copy
-            self._best_embeddings = copy.deepcopy(self._embeddings)
+        if hasattr(self, '_embedding'):
+            self._best_embedding = copy.deepcopy(self._embedding)
 
         # Initialize optimizer
         parameters = list(self._posterior.parameters())
         parameters += list(self._traindist.parameters())
-        if self.embeddings is not None:
-            if hasattr(self._embeddings, "parameters"):
-                parameters += list(self._embeddings.parameters())
+        if hasattr(self._embedding, "parameters"):
+            parameters += list(self._embedding.parameters())
         self._optimizer = AdamW(parameters, lr=self.lr)
 
         # Initialize Learning Rate Scheduler
@@ -204,19 +199,16 @@ class SNPE_A:
         """Copy current posterior + embeddings state to best-fit networks."""
         cloned_state = {k: v.clone() for k, v in self._posterior.state_dict().items()}
         self._best_posterior.load_state_dict(cloned_state)
-        if hasattr(self, '_embeddings') and hasattr(self._embeddings, "state_dict"):
-            if self._best_embeddings is None:
-                import copy
-                self._best_embeddings = copy.deepcopy(self._embeddings)
-            else:
-                cloned_embeddings_state = {k: v.clone() for k, v in self._embeddings.state_dict().items()}
-                self._best_embeddings.load_state_dict(cloned_embeddings_state)
+        if self._best_embedding is None:
+            self._best_embedding = copy.deepcopy(self._embedding)
+        else:
+            cloned_embedding_state = {k: v.clone() for k, v in self._embedding.state_dict().items()}
+            self._best_embedding.load_state_dict(cloned_embedding_state)
     
     def _save_traindist_checkpoint(self):
         """Copy current traindist state to best-fit network."""
         cloned_state = {k: v.clone() for k, v in self._traindist.state_dict().items()}
         self._best_traindist.load_state_dict(cloned_state)
-    
 
     def _align_singleton_batch_dims(self, tensors, length=None):
         """Broadcast singleton batch dimensions of tensors in a list to same length."""
@@ -226,18 +218,16 @@ class SNPE_A:
 
     def _summary(self, inf_conditions, train = True, use_best_fit = False):
         """Run conditions through embedding networks and concatenate them."""
-        if self.embeddings is not None:
-            # Choose which embeddings to use
-            embeddings = self._best_embeddings if use_best_fit and self._best_embeddings is not None else self._embeddings
-            
-            if train:
-                embeddings.train()
-            else:
-                embeddings.eval()
-            s = embeddings(*inf_conditions)
+        embedding = self._best_embedding if use_best_fit and self._best_embedding is not None else self._embedding
+        
+        if train:
+            embedding.train()
         else:
-            inf_conditions = self._align_singleton_batch_dims(inf_conditions)
-            s = torch.cat(inf_conditions, dim=1)  # Concatenate all conditions into one tensor
+            embedding.eval()
+        
+        # TODO: Remove annoying hack once batches are dicts
+        inf_conditions = inf_conditions + [None]*10
+        s = self._embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
         return s
 
     def sample(self, num_samples, parent_conditions=[]):
@@ -527,8 +517,8 @@ class SNPE_A:
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
         
         # Save best-fit embedding networks if they exist
-        if self._best_embeddings is not None:
-            torch.save(self._best_embeddings.state_dict(), node_dir / "embedding.pth")
+        if self._best_embedding is not None:
+            torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
 
     def load(self, node_dir: Path):
         # Load best-fit model states from files
@@ -544,6 +534,6 @@ class SNPE_A:
         self._best_traindist.load_state_dict(traindist_state)
 
         # Load embedding networks if they exist
-        if (node_dir / "embedding.pth").exists() and self._best_embeddings is not None:
+        if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             embedding_state = torch.load(node_dir / "embedding.pth")
-            self._best_embeddings.load_state_dict(embedding_state)
+            self._best_embedding.load_state_dict(embedding_state)

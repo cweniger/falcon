@@ -36,19 +36,10 @@ graph:
         - ['uniform', -1.0, 1.0]
     estimator:
       _class_: falcon.contrib.SNPE_A
-
-      embedding: model.E
-        list_processor:
-          type: concatenate
-          inputs:
-            - _class_: falcon.contrib.CNN
-              input_dim: 1
-              output_dim: 64
-              kernel_size: 3
-              stride: 2
-              padding: 1
-              input: x
-            - z
+      embedding:
+         _target_: model.E
+         _input_: [x, m, n]
+      embedding_keyword_order: [x, m, n]  # Transitional hack during code refactoring
       #discard_samples: true
       net_type: zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5
