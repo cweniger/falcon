@@ -5,7 +5,7 @@ Integration test for the new embedding infrastructure with FALCON.
 
 import torch
 import torch.nn as nn
-from falcon.core.embedding import instantiate_embedding
+from falcon.contrib.torch_embedding import instantiate_embedding
 
 
 def test_simple_integration():

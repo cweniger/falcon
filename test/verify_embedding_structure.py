@@ -9,7 +9,7 @@ import os
 # Add current directory to path
 sys.path.insert(0, os.path.dirname(os.path.abspath(__file__)))
 
-from falcon.core.embedding import EmbeddingWrapper, instantiate_embedding, _collect_input_keys
+from falcon.contrib.torch_embedding import EmbeddingWrapper, instantiate_embedding, _collect_input_keys
 
 
 def test_collect_input_keys():

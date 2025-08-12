@@ -5,7 +5,7 @@ Demonstrate the new simplified embedding architecture and its debugging capabili
 
 import torch
 import torch.nn as nn
-from falcon.core.embedding import instantiate_embedding
+from falcon.contrib.torch_embedding import instantiate_embedding
 
 
 class Linear1(nn.Module):

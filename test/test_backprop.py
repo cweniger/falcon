@@ -5,7 +5,7 @@ Test that backpropagation works correctly through the embedding pipeline.
 
 import torch
 import torch.nn as nn
-from falcon.core.embedding import instantiate_embedding
+from falcon.contrib.torch_embedding import instantiate_embedding
 
 
 class SimpleLinear(nn.Module):

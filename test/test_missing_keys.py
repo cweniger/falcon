@@ -6,7 +6,7 @@ Test the new behavior with missing input keys.
 import torch
 import torch.nn as nn
 import warnings
-from falcon.core.embedding import instantiate_embedding
+from falcon.contrib.torch_embedding import instantiate_embedding
 
 
 class TestModule(nn.Module):

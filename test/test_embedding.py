@@ -5,7 +5,7 @@ Test script for the new embedding infrastructure.
 
 import torch
 import torch.nn as nn
-from falcon.core.embedding import instantiate_embedding
+from falcon.contrib.torch_embedding import instantiate_embedding
 
 
 class TestLinear(nn.Module):
