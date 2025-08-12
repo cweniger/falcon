@@ -1,0 +1,99 @@
+# FALCON Embedding Configuration Guide
+# 
+# This configuration system allows you to build complex neural network architectures
+# declaratively without writing custom PyTorch modules. The system automatically
+# generates standard PyTorch modules that can be trained normally.
+#
+# Key concepts:
+# - _target_: Specifies the module path (e.g., "torch.nn.Linear", "mymodule.CustomNet")
+# - _input_: Defines data dependencies (single value or list for multiple inputs)
+# - EmbeddingWrapper (EW): Generated PyTorch module that orchestrates your config
+# - Nested _target_: Creates hierarchical processing pipelines
+#
+# Reserved keywords:
+# - _target_: Module path for instantiation
+# - _input_: Data dependencies (single value or YAML list)
+#
+# Each configuration block below generates an EmbeddingWrapper that:
+# - Inherits from torch.Module (standard PyTorch)
+# - Manages all sub-modules automatically
+# - Defines get_input_keys() method to specify required data
+# - Implements forward(data_dict) method for execution
+
+# Example 1: Simple single-module embedding
+embedding:
+  _target_: module.class1
+  kw1: 321
+  _input_: x
+    
+# Generated EmbeddingWrapper:
+# - get_input_keys() returns ['x']
+# - Instantiates module.class1(kw1=321)
+# - forward(data_dict) extracts data_dict['x'] and returns class1.forward(data_dict['x'])
+#
+# Usage: embedding_wrapper({'x': tensor_data}) -> processed_tensor
+
+# Example 2: Multi-input embedding
+embedding:
+  _target_: module.combine
+  mode: concatenate
+  _input_: [x, y]
+
+# Generated EmbeddingWrapper:
+# - get_input_keys() returns ['x', 'y']
+# - Instantiates module.combine(mode='concatenate')
+# - forward(data_dict) calls combine.forward(data_dict['x'], data_dict['y'])
+#
+# Usage: embedding_wrapper({'x': tensor1, 'y': tensor2}) -> combined_tensor
+# Note: _input_ handles both single values and YAML lists automatically
+
+# Example 3: Nested embedding with preprocessing
+embedding:
+  _target_: module.combine
+  mode: add
+  _input_:
+    - x
+    - _target_: module.CNN
+      layers: 3
+      _input_: y
+
+# Generated EmbeddingWrapper:
+# - get_input_keys() returns ['x', 'y'] (automatically detected from nested structure)
+# - Instantiates module.combine(mode='add') and module.CNN(layers=3)
+# - Execution flow: y -> CNN -> CNN_output, then combine.forward(x, CNN_output)
+#
+# Usage: embedding_wrapper({'x': tensor1, 'y': image_tensor}) -> combined_tensor
+# The system automatically manages the processing pipeline
+
+# Example 4: Complex hierarchical embedding
+embedding:
+  _target_: module.combine
+  mode: add
+  _input_:
+    - _target_: module.UNet
+      configs: 321312
+      _input_: x 
+    - _target_: module.CNN
+      layers: 3
+      _input_:
+        _target_: module.Normalise
+        _input_: y
+
+# Generated EmbeddingWrapper:
+# - get_input_keys() returns ['x', 'y']
+# - Instantiates 4 modules: combine, UNet, CNN, Normalise
+# - Execution flow:
+#   1. y -> Normalise -> normalized_y
+#   2. normalized_y -> CNN -> cnn_output  
+#   3. x -> UNet -> unet_output
+#   4. combine.forward(unet_output, cnn_output) -> final_result
+#
+# Usage: embedding_wrapper({'x': input1, 'y': input2}) -> processed_tensor
+# Complex processing pipelines are handled automatically with proper dependency resolution
+#
+# Technical Notes:
+# - All generated EmbeddingWrappers are standard torch.nn.Module instances
+# - Sub-modules are registered properly for gradient computation and device placement
+# - The system handles parameter initialization, training mode, and state_dict operations
+# - Dependency resolution ensures correct execution order for nested configurations
+# - Compatible with standard PyTorch training loops, optimizers, and model saving/loading
