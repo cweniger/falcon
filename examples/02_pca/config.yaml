@@ -65,12 +65,7 @@ graph:
   x:
     parents: [m, n]
     simulator: model.Add
-
-## Observations configuration
-observations:
-  #path: "data/observations.npz"
-  path: "data/obs_10000.npz"
-  index: null
+    observed: "data/obs_10000_clean.npy"
 
 sample:
   prior:

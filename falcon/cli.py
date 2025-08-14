@@ -10,6 +10,7 @@ from pathlib import Path
 import numpy as np
 import matplotlib.pyplot as plt
 import joblib
+import torch
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -67,10 +68,10 @@ def launch_mode(cfg: DictConfig) -> None:
     ########################
 
     # Instantiate model components directly from graph
-    graph = create_graph_from_config(cfg.graph, _cfg=cfg)
-    
-    # Load observations from file path
-    observations = load_observations(cfg.observations)
+    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
+
+    # This is some hack right now
+    observations = {k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()}
 
     print(graph)
     print("Observation shapes:", {k: v.shape for k, v in observations.items()})

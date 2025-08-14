@@ -1,4 +1,6 @@
 from omegaconf import OmegaConf
+import numpy as np
+import os
 
 class Node:
     def __init__(self, name, simulator_cls, estimator_cls = None, 
@@ -185,16 +187,26 @@ def create_graph_from_config(graph_config, _cfg=None):
         Graph: The computational graph
     """
     nodes = []
+    observations = {}
     
     for node_name, node_config in graph_config.items():
         # Extract node parameters
         parents = node_config.get('parents', [])
         evidence = node_config.get('evidence', [])
         scaffolds = node_config.get('scaffolds', [])
-        observed = node_config.get('observed', False)
+        observed = node_config.get('observed', False)  # TODO: Remove from internal logic
+        data_path = node_config.get('observed', None)
         resample = node_config.get('resample', False)
         actor_config = node_config.get('ray', {})
-        
+
+        if data_path is not None:
+            # Treat it as path to a file and load it
+            if not os.path.exists(data_path):
+                raise FileNotFoundError(f"Observation file not found: {data_path}")
+            # Load from NPZ file
+            data = np.load(data_path)
+            observations[node_name] = data
+
         # Extract target from simulator
         simulator = node_config.get("simulator")
         if isinstance(simulator, str):
@@ -239,4 +251,4 @@ def create_graph_from_config(graph_config, _cfg=None):
         nodes.append(node)
     
     # Create and return the graph
-    return Graph(nodes)
+    return Graph(nodes), observations
