@@ -70,7 +70,7 @@ def launch_mode(cfg: DictConfig) -> None:
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
 
-    # This is some hack right now
+    # TODO: This is some hack right now
     observations = {k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()}
 
     print(graph)
@@ -119,7 +119,10 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
             sys.path.insert(0, str(model_path))
     
     # Instantiate model components directly from graph
-    graph = create_graph_from_config(cfg.graph, _cfg=cfg)
+    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
+
+    # TODO: This is some hack right now
+    observations = {k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()}
 
     if sample_type == 'prior':
         sample_cfg = cfg.sample.prior
@@ -150,14 +153,14 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     elif sample_type == 'posterior':
         # TODO: Implement posterior sampling (requires trained model and observations)
         deployed_graph.load(Path(cfg.paths.graph))
-        observations = load_observations(cfg.observations)
+        #observations = load_observations(cfg.observations)
         samples = deployed_graph.conditioned_sample(num_samples, observations)
         
     elif sample_type == 'proposal':
         # Proposal sampling requires observations for conditioning
         # Load observations from config
         deployed_graph.load(Path(cfg.paths.graph))
-        observations = load_observations(cfg.observations)
+        #observations = load_observations(cfg.observations)
         samples = deployed_graph.proposal_sample(num_samples, observations)
         
     else:
