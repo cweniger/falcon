@@ -28,14 +28,14 @@ graph:
     evidence: [x]
     scaffolds: [m, n]
     simulator: 
-      _class_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.contrib.HypercubeMappingPrior
       priors: 
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
     estimator:
-      _class_: falcon.contrib.SNPE_A
+      _target_: falcon.contrib.SNPE_A
       embedding:
          _target_: model.E
          _input_: [x, m, n]

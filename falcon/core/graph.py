@@ -213,10 +213,10 @@ def create_graph_from_config(graph_config, _cfg=None):
             simulator_cls = simulator
             simulator_config = {}
         else:
-            simulator_cls = simulator.get('_class_')
+            simulator_cls = simulator.get('_target_')
             simulator_config = simulator
             simulator_config = OmegaConf.to_container(simulator_config, resolve=True)
-            simulator_config.pop("_class_", None)
+            simulator_config.pop("_target_", None)
 
         # Extract target from infer
         if "estimator" in node_config:
@@ -225,10 +225,10 @@ def create_graph_from_config(graph_config, _cfg=None):
                 estimator_cls = estimator
                 estimator_config = {}
             else:
-                estimator_cls = estimator.get('_class_')
+                estimator_cls = estimator.get('_target_')
                 estimator_config = estimator
                 estimator_config = OmegaConf.to_container(estimator_config, resolve=True)
-                estimator_config.pop("_class_", None)
+                estimator_config.pop("_target_", None)
         else:
             estimator_cls = None
             estimator_config = {}
