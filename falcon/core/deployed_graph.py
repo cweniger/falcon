@@ -6,6 +6,7 @@ import torch
 import os
 import sys
 from pathlib import Path
+import numpy as np
 
 from falcon.core.logging import initialize_logging_for
 from .utils import LazyLoader
@@ -165,7 +166,13 @@ class NodeWrapper:
     def sample(self, n_samples, incoming = None):
 #        node_type = self.get_node_type()
 #        if node_type == 'stochastic':
-        return self.simulator_instance.sample(n_samples, parent_conditions = incoming)
+        if hasattr(self.simulator_instance, 'simulate_batch'):
+            return self.simulator_instance.simulate_batch(n_samples, *incoming)
+        else:
+            samples = []
+            for _ in range(n_samples):
+                samples.append(self.simulator_instance.simulate(*incoming))
+            return np.stack(samples)
 #        elif node_type == 'deterministic':
 #            return self.module.compute(incoming)
 #        else:

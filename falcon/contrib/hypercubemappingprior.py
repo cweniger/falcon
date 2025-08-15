@@ -197,19 +197,19 @@ class HypercubeMappingPrior:
         u = u * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
         return u
 
-    def sample(self, n_samples, **kwargs):
+    def simulate_batch(self, batch_size):
         """
         Generates a batch of samples from the target distributions.
         
         Args:
-            n_samples (int): Number of samples to generate.
+            batch_size (int): Number of samples to generate.
         
         Returns:
             torch.Tensor: Tensor of shape (n_samples, n_params) with samples in the target distributions.
         """
         # Generate random samples in the hypercube_range
-        u = torch.rand(n_samples, len(self.priors)) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
-        u = torch.rand(n_samples, len(self.priors), dtype=torch.float64) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
+        u = torch.rand(batch_size, len(self.priors)) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
+        u = torch.rand(batch_size, len(self.priors), dtype=torch.float64) * (self.hypercube_range[1] - self.hypercube_range[0]) + self.hypercube_range[0]
         return self.forward(u).numpy()
 
 

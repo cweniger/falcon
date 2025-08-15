@@ -17,8 +17,7 @@ NBINS = 10000
 
 class Signal:
     """Signal generator that creates oscillating patterns based on parameters z."""
-    def sample(self, num_samples, parent_conditions=[]):
-        z = parent_conditions[0]
+    def simulate_batch(self, batch_size, z):
         z = torch.tensor(z)
         y = torch.linspace(-torch.pi, torch.pi, NBINS).double()
         T = torch.stack([torch.cos(y*5)*0+1, torch.sin(y), torch.cos(2*y), torch.sin(2*y)])
@@ -30,17 +29,15 @@ class Signal:
 
 class Noise:
     """Gaussian noise generator."""
-    def sample(self, num_samples, parent_conditions=[]):
-        result = torch.randn((num_samples, NBINS)).double() * SIGMA
+    def simulate(self):
+        result = torch.randn((NBINS,)).double() * SIGMA
         falcon.log({"Noise:mean": result.mean().item()})
         falcon.log({"Noise:std": result.std().item()})
         return result.numpy()
 
-
 class Add:
     """Adds signal and noise components."""
-    def sample(self, num_samples, parent_conditions=[]):
-        m, n = parent_conditions
+    def simulate_batch(self, batch_size, m, n): 
         m = torch.tensor(m)  # Input is numpy array
         n = torch.tensor(n)  # Input is numpy array
         result = m + n
