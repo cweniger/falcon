@@ -1,73 +1,47 @@
-# Model-specific configuration using _target_ pattern
-# Self-contained configuration for this model
+graph:
+# Minimal example configuration adapted to the newer API used by examples/02_pca
 
-# Set model path to current directory (for local model.py)
+# Use local `src` directory for model components
 model_path: "src"
 
-# WandB configuration
-wandb:
-  project: falcon4
-  group: v2_frozen
+# Logging configuration (Hydra run dir will be injected at runtime)
+logging:
+  project: falcon_minimal
+  group: minimal_v1
   dir: ${hydra:run.dir}
 
-# Directory configuration (relative to Hydra output directory)
-directories:
-  sim_dir: ${hydra:run.dir}/sim_dir
-  graph_dir: ${hydra:run.dir}/graph_dir
+# Paths (relative to Hydra output dir)
+paths:
+  buffer: ${hydra:run.dir}/sim_dir
+  graph: ${hydra:run.dir}/graph_dir
 
-# Training parameters
-training:
-  max_epochs: 150
-  num_resims: 256
-  n_train: 8192
-  num_initial_samples: 8192
-  num_val_samples: 256
-  num_conditional_samples: 10000
-
-
-# Runtime configuration
-runtime:
-  reload: false
-
-# Graph definition using declarative YAML
+# Simple graph using the _target_ style and local model components
 graph:
   z:
-    parents: []
     evidence: [x]
-    observed: false
-    resample: false
-    create_module: falcon.contrib.SNPE_A
-    module_config:
-      priors: [['uniform', -100.0, 100.0], ['uniform', -100.0, 100.0], ['uniform', -100.0, 100.0]]
-      embeddings: model.E
-      num_epochs: ${training.max_epochs}
-      discard_samples: true
-      gamma: 0.5
-      lr_decay_factor: 0.1
-      lr: 0.01
-      theta_norm: true
-      norm_momentum: 0.001
-      early_stop_patience: 32
-      scheduler_patience: 16
-      net_type: zuko_nice
-    actor_config:
-      num_gpus: 1  # CPU-only for this node
+    scaffolds: []
+    simulator:
+      _target_: falcon.contrib.HypercubeMappingPrior
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.contrib.SNPE_A
+      embedding:
+        _target_: model.E
+        _input_: [x]
+      num_epochs: 10
+      batch_size: 128
   
   x:
     parents: [z]
-    evidence: []
-    observed: true
-    resample: false
-    create_module: model.Simulate
-    module_config:
-      npar: 3
-      sigma: 0.1
-    actor_config:
-      num_gpus: 0
+    simulator: model.Simulate
+    observed: "data/observations_zero.npz"
 
-
-# Observations configuration
-# index: null uses full arrays, index: 0 selects batch element 0
-observations:
-  path: "data/observations_zero.npz"
-  index: null
+sample:
+  prior:
+    n: 1000
+    path: samples_prior.joblib
+  posterior:
+    n: 10000
+    path: samples_posterior.joblib
