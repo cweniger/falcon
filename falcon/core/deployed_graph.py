@@ -7,6 +7,7 @@ import os
 import sys
 from pathlib import Path
 import numpy as np
+from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
 from .utils import LazyLoader
@@ -43,10 +44,11 @@ class OnlineEvidenceFilter:
 
 @ray.remote
 class MultiplexNodeWrapper:
-    def __init__(self, actor_configs, node, graph, model_path=None):
+    def __init__(self, actor_config, node, graph, num_actors, model_path=None):
+        self.num_actors = num_actors
         self.wrapped_node_list = [NodeWrapper.options(
-            **actor_config).remote(node, graph, model_path) for actor_config in actor_configs]
-        self.num_actors = len(self.wrapped_node_list)
+            **actor_config).remote(node, graph, model_path) for _ in range(self.num_actors)]
+        #self.num_actors = len(self.wrapped_node_list)
 
     def sample(self, n_samples, incoming = None):
         #num_samples_per_node = n_samples // self.num_actors
@@ -170,8 +172,9 @@ class NodeWrapper:
             return self.simulator_instance.simulate_batch(n_samples, *incoming)
         else:
             samples = []
-            for _ in range(n_samples):
-                samples.append(self.simulator_instance.simulate(*incoming))
+            for i in range(n_samples):
+                params = [v[i] for v in incoming]
+                samples.append(self.simulator_instance.simulate(*params))
             return np.stack(samples)
 #        elif node_type == 'deterministic':
 #            return self.module.compute(incoming)
@@ -225,8 +228,8 @@ class DeployedGraph:
         """Deploy all nodes in the graph as Ray actors."""
         ray.init(ignore_reinit_error=True)  # Initialize Ray if not already done
         for node in self.graph.node_list:
-            if isinstance(node.actor_config, list):
-                self.wrapped_nodes_dict[node.name] = MultiplexNodeWrapper.remote(node.actor_config, node, self.graph, self.model_path)
+            if node.num_actors > 1:
+                self.wrapped_nodes_dict[node.name] = MultiplexNodeWrapper.remote(node.actor_config, node, self.graph, node.num_actors, self.model_path)
             else:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(**node.actor_config).remote(node, self.graph, self.model_path)
 

@@ -5,7 +5,7 @@ import os
 class Node:
     def __init__(self, name, simulator_cls, estimator_cls = None, 
                  parents=[], evidence=[], scaffolds=[], observed=False, resample=False,
-                 simulator_config={}, estimator_config = {}, actor_config={}):
+                 simulator_config={}, estimator_config = {}, actor_config={}, num_actors = 1):
         """Node definition for a graphical model.
 
         Args:
@@ -40,6 +40,7 @@ class Node:
         self.simulator_config = simulator_config
         self.estimator_config = estimator_config
         self.actor_config = actor_config
+        self.num_actors = num_actors
 
 
 class Graph:
@@ -198,6 +199,7 @@ def create_graph_from_config(graph_config, _cfg=None):
         data_path = node_config.get('observed', None)
         resample = node_config.get('resample', False)
         actor_config = node_config.get('ray', {})
+        num_actors = node_config.get('num_actors', 1)
 
         if data_path is not None:
             # Treat it as path to a file and load it
@@ -245,7 +247,8 @@ def create_graph_from_config(graph_config, _cfg=None):
             resample=resample,
             simulator_config=simulator_config,
             estimator_config=estimator_config,
-            actor_config=actor_config
+            actor_config=actor_config,
+            num_actors=num_actors
         )
         
         nodes.append(node)
