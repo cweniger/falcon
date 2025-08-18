@@ -88,13 +88,15 @@ def launch_mode(cfg: DictConfig) -> None:
             min_training_samples = cfg.buffer.min_training_samples,
             max_training_samples = cfg.buffer.max_training_samples,
             validation_window_size=cfg.buffer.validation_window_size,
-            resample_batch_size=cfg.buffer.resample_batch_size
+            resample_batch_size=cfg.buffer.resample_batch_size,
+            initial_samples_path=cfg.buffer.get("initial_samples_path", None)
             )
 
     # 2) Generate initial samples
-    dataset_manager.generate_samples(deployed_graph, num_sims = cfg.buffer.min_training_samples)
+#    dataset_manager.generate_samples(deployed_graph, num_sims = cfg.buffer.min_training_samples,
+#                                     initial_samples_path=cfg.buffer.get("initial_samples_path", None))
 
-    # 3) Train the graph
+    # 3) Launch training & simulations
     graph_path = Path(cfg.paths.graph)
     if graph_path.exists():
         deployed_graph.load(graph_path)

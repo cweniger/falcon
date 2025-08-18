@@ -311,8 +311,7 @@ class DeployedGraph:
         dataset_manager = dataset_manager.dataset_manager_actor
 
         # Initial data generation
-        num_initial_samples = ray.get(dataset_manager.num_initial_samples.remote())
-        ray.get(dataset_manager.generate_samples.remote(self, num_sims = num_initial_samples))
+        ray.get(dataset_manager.initialize_samples.remote(self))
 
         #num_sims = ray.get(dataset_manager.get_num_min_sims.remote())
         #samples = self.sample(num_sims)
