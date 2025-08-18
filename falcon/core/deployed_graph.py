@@ -78,6 +78,12 @@ class MultiplexNodeWrapper:
         for node in self.wrapped_node_list:
             node.shutdown.remote()
 
+    def save(self, node_dir):
+        pass # Silently ignore, multiplexed nodes are never saved
+
+    def load(self, node_dir):
+        pass # Silently ignore, multiplexed nodes are never saved
+
 
 
 # This is a wrapper node that will be used to instantiate Module within ray actors
