@@ -11,6 +11,7 @@ import numpy as np
 import matplotlib.pyplot as plt
 import joblib
 import torch
+import ray
 
 import hydra
 from omegaconf import DictConfig, OmegaConf
@@ -225,6 +226,7 @@ def launch_main(cfg: DictConfig) -> None:
 
 def main():
     """Main CLI entry point with explicit mode dispatch."""
+    ray.init(address='auto')
     
     if len(sys.argv) < 2 or sys.argv[1] not in ['sample', 'swarm']:
         print("Error: Must specify mode. Usage:")

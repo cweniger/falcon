@@ -201,6 +201,9 @@ def create_graph_from_config(graph_config, _cfg=None):
         actor_config = node_config.get('ray', {})
         num_actors = node_config.get('num_actors', 1)
 
+        if actor_config != {}:
+            actor_config = OmegaConf.to_container(actor_config, resolve=True)
+
         if data_path is not None:
             # Treat it as path to a file and load it
             if not os.path.exists(data_path):
