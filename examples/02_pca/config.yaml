@@ -4,6 +4,10 @@
 # Set model path to current directory (for local model.py)
 model_path: "src"
 
+ray:
+  init:
+    address: null  # set address=None 
+
 # WandB configuration
 logging:
   project: falcon_pca2
@@ -53,7 +57,7 @@ graph:
       #norm_momentum: 0.01
       #device: cuda
     ray:
-      num_gpus: 0.5
+      num_gpus: 0.0
   
   m:
     parents: [z]

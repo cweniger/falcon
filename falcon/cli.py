@@ -53,6 +53,9 @@ def parse_operational_flags():
 
 def launch_mode(cfg: DictConfig) -> None:
     """Launch mode: Full training and inference pipeline."""
+    ray_init_args = cfg.get('ray', {}).get('init', {})
+    ray.init(**ray_init_args)
+
     # Add model path to Python path for imports
     if cfg.model_path:
         model_path = Path(cfg.model_path).resolve()
@@ -115,6 +118,9 @@ def launch_mode(cfg: DictConfig) -> None:
 
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies."""
+    ray_init_args = cfg.get('ray', {}).get('init', {})
+    ray.init(**ray_init_args)
+
     # Add model path to Python path for imports
     if cfg.model_path:
         model_path = Path(cfg.model_path).resolve()
@@ -226,7 +232,6 @@ def launch_main(cfg: DictConfig) -> None:
 
 def main():
     """Main CLI entry point with explicit mode dispatch."""
-    ray.init(address='auto')
     
     if len(sys.argv) < 2 or sys.argv[1] not in ['sample', 'swarm']:
         print("Error: Must specify mode. Usage:")
