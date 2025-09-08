@@ -71,7 +71,7 @@ graph:
   x:
     parents: [m, n]
     simulator: model.Add
-    observed: "data/obs_10000_clean.npy"
+    observed: "data/obs_10000.npy"
 
 sample:
   prior:
