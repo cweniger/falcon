@@ -17,8 +17,8 @@ paths:
 
 # WandB configuration
 logging:
-  project: falcon_pca2
-  group: pca_v1
+  project: falcon2_v1
+  group: run2
   dir: ${paths.run_root}
 
 # Training buffer parameters
@@ -48,7 +48,7 @@ graph:
       #discard_samples: true
       net_type: zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5
-      num_epochs: 10
+      num_epochs: 100
       batch_size: 128
       lr: 0.01
       early_stop_patience: 32
@@ -59,7 +59,7 @@ graph:
       #norm_momentum: 0.01
       #device: cuda
     ray:
-      num_gpus: 0.0
+      num_gpus: 0.5
   
   m:
     parents: [z]
