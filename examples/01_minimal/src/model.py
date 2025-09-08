@@ -21,16 +21,12 @@ class Simulate:
         self.npar = npar
         self.sigma = sigma
 
-    def sample(self, num_samples, parent_conditions=[]):
-        z = parent_conditions[0]
+    def simulate_batch(self, batch_size, z):
         z = torch.tensor(z)  # Input is numpy array
         x = z + torch.randn_like(z) * self.sigma
         falcon.log({"x_mean": x.mean().item()})
         falcon.log({"x_std": x.std().item()})
         return x.numpy()  # Return numpy array
-
-    def get_shape_and_dtype(self):
-        return (self.npar,), 'float64'
 
 
 class E(torch.nn.Module):
