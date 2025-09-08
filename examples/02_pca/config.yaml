@@ -4,20 +4,22 @@
 # Set model path to current directory (for local model.py)
 model_path: "src"
 
+# Ray initialization parameters
 ray:
   init:
     address: null  # set address=None 
+
+# Directory configuration (relative to Hydra output directory)
+paths:
+  run_root: ${hydra:run.dir}
+  buffer: ${paths.run_root}/sim_dir
+  graph: ${paths.run_root}/graph_dir
 
 # WandB configuration
 logging:
   project: falcon_pca2
   group: pca_v1
-  dir: ${hydra:run.dir}
-
-# Directory configuration (relative to Hydra output directory)
-paths:
-  buffer: ${hydra:run.dir}/sim_dir
-  graph: ${hydra:run.dir}/graph_dir
+  dir: ${paths.run_root}
 
 # Training buffer parameters
 buffer:
