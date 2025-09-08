@@ -233,9 +233,9 @@ def launch_main(cfg: DictConfig) -> None:
 def main():
     """Main CLI entry point with explicit mode dispatch."""
     
-    if len(sys.argv) < 2 or sys.argv[1] not in ['sample', 'swarm']:
+    if len(sys.argv) < 2 or sys.argv[1] not in ['sample', 'launch']:
         print("Error: Must specify mode. Usage:")
-        print("  falcon swarm [hydra_options...]")
+        print("  falcon launch [hydra_options...]")
         print("  falcon sample prior [hydra_options...]")
         print("  falcon sample proposal [hydra_options...]")
         print("  falcon sample posterior [hydra_options...]")
