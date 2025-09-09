@@ -247,8 +247,8 @@ class SNPE_A:
             log({"epoch": epoch + 1})
 
             # Training loop
-            loss_aux_avg = 0
-            loss_train_avg = 0
+            #loss_aux_avg = 0
+            #loss_train_avg = 0
             num_samples = 0
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
@@ -268,8 +268,8 @@ class SNPE_A:
                 loss_train = torch.mean(losses_train)
 
                 log({"loss_train_posterior": loss_train.item()})
-                log({"loss_train_posterior_min": losses_train.min().item()})
-                log({"loss_train_posterior_max": losses_train.max().item()})
+                #log({"loss_train_posterior_min": losses_train.min().item()})
+                #log({"loss_train_posterior_max": losses_train.max().item()})
 
                 self._traindist.train()
                 losses_aux = self._traindist.loss(uc, sc.detach()*0)
@@ -281,22 +281,22 @@ class SNPE_A:
                 loss_total.backward()
                 self._optimizer.step()
 
-                num_samples += len(batch)
-                loss_train_avg += loss_train.sum().item()
-                loss_aux_avg += loss_aux.sum().item()
+                #num_samples += len(batch)
+                #loss_train_avg += loss_train.sum().item()
+                #loss_aux_avg += loss_aux.sum().item()
 
                 # Run hook and allow other tasks to run
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
 
-            loss_train_avg /= num_samples
-            loss_aux_avg /= num_samples
+            #loss_train_avg /= num_samples
+            #loss_aux_avg /= num_samples
 
             # Validation loop
-            val_posterior_loss_avg = 0
-            val_traindist_loss_avg = 0
-            val_samples = 0
+            val_posterior_loss = 0
+            val_traindist_loss = 0
+            num_val_samples = 0
             for batch in dataloader_val:
                 log({"n_val_batch": n_val_batch})
                 n_val_batch += 1
@@ -309,41 +309,41 @@ class SNPE_A:
 
                 self._posterior.eval()
                 posterior_losses = self._posterior.loss(uc, sc)
-                posterior_loss = torch.mean(posterior_losses)
+                val_posterior_loss += torch.sum(posterior_losses).item()
 
                 self._traindist.eval()
                 traindist_losses = self._traindist.loss(uc, sc*0)
-                traindist_loss = torch.mean(traindist_losses)
+                val_traindist_loss += torch.sum(traindist_losses).item()
 
-                log({"loss_val_posterior": posterior_loss.item()})
-                log({"loss_val_traindist": traindist_loss.item()})
-
-                val_samples += len(batch)
-                val_posterior_loss_avg += posterior_loss.sum().item()
-                val_traindist_loss_avg += traindist_loss.sum().item()
+                num_val_samples += len(batch)
+                #val_posterior_loss_avg += posterior_loss.sum().item()
+                #val_traindist_loss_avg += traindist_loss.sum().item()
                 await asyncio.sleep(0)
 
-            val_posterior_loss_avg /= val_samples
-            val_traindist_loss_avg /= val_samples
+            val_posterior_loss /= num_val_samples
+            val_traindist_loss /= num_val_samples
+
+            log({"loss_val_posterior": val_posterior_loss})
+            log({"loss_val_traindist": val_traindist_loss})
 
             # Check and save best checkpoints independently
-            if val_posterior_loss_avg < self.best_posterior_val_loss:
-                self.best_posterior_val_loss = val_posterior_loss_avg
+            if val_posterior_loss < self.best_posterior_val_loss:
+                self.best_posterior_val_loss = val_posterior_loss
                 self._save_posterior_checkpoint()
                 
-            if val_traindist_loss_avg < self.best_traindist_val_loss:
-                self.best_traindist_val_loss = val_traindist_loss_avg
+            if val_traindist_loss < self.best_traindist_val_loss:
+                self.best_traindist_val_loss = val_traindist_loss
                 self._save_traindist_checkpoint()
 
             # Use posterior validation loss for scheduler and early stopping
-            self._scheduler.step(val_posterior_loss_avg)
+            self._scheduler.step(val_posterior_loss)
 
             lr_current = self._optimizer.param_groups[0]['lr']
             log({"lr": lr_current})
 
             # Early Stopping based on posterior validation loss
-            if val_posterior_loss_avg < best_val_loss:
-                best_val_loss = val_posterior_loss_avg
+            if val_posterior_loss < best_val_loss:
+                best_val_loss = val_posterior_loss
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
