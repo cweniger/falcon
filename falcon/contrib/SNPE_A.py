@@ -188,8 +188,7 @@ class SNPE_A:
         # Initialize Learning Rate Scheduler
         self._scheduler = ReduceLROnPlateau(self._optimizer, mode='min', 
                                            factor=self.lr_decay_factor, 
-                                           patience=self.scheduler_patience, 
-                                           verbose=True)
+                                           patience=self.scheduler_patience)
 
         # Set flag
         self.networks_initialized = True
@@ -227,7 +226,8 @@ class SNPE_A:
         
         # TODO: Remove annoying hack once batches are dicts
         inf_conditions = inf_conditions + [None]*10
-        s = self._embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
+        #s = self._embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
+        s = embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
         return s
 
     def sample(self, num_samples, parent_conditions=[]):
@@ -402,30 +402,30 @@ class SNPE_A:
         # Run conditions through summary network
         assert inf_conditions is not None, "Conditions must be provided."
         inf_conditions = [c.to(self.device) for c in inf_conditions]
-        s = self._summary(inf_conditions, train=False, use_best_fit=True)
+        s = self._summary(inf_conditions, train=False, use_best_fit=False)
         s, = self._align_singleton_batch_dims([s], length=num_samples)
 
         num_proposals = 128
-
-        self._best_traindist.eval()
-        samples_proposals = self._best_traindist.sample(num_proposals, s*0).detach()
-        # (num_proposals, num_samples, theta_dim)
-
-        log({
-            "traindist_mean": samples_proposals.mean().item(),
-            "traindist_std": samples_proposals.std().item(),
-            })
         
         #posterior_net = self._best_posterior
         #traindist_net = self._best_traindist
         posterior_net = self._posterior
         traindist_net = self._traindist
 
+        traindist_net.eval()
+        samples_proposals = traindist_net.sample(num_proposals, s*0).detach()
+        # (num_proposals, num_samples, theta_dim)
+
+        log({
+            "traindist_mean": samples_proposals.mean().item(),
+            "traindist_std": samples_proposals.std().item(),
+            })
+
         posterior_net.eval()
         log_prob_post = posterior_net.log_prob(
             samples_proposals, s)  # (num_proposals, num_samples)
 
-        traindist_net.eval()
+        #traindist_net.eval()
         log_prob_dist = traindist_net.log_prob(
             samples_proposals, s*0)  # (num_proposals, num_samples)
         
