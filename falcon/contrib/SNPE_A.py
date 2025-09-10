@@ -242,6 +242,8 @@ class SNPE_A:
         best_val_loss = float('inf')  # Best validation loss
         n_train_batch = 0
         n_val_batch = 0
+        counter_checkpoint_posterior = 0
+        counter_checkpoint_traindist = 0
         for epoch in range(self.num_epochs):
             print(f"⌛ Epoch {epoch+1}/{self.num_epochs}")
             log({"epoch": epoch + 1})
@@ -330,10 +332,14 @@ class SNPE_A:
             if val_posterior_loss < self.best_posterior_val_loss:
                 self.best_posterior_val_loss = val_posterior_loss
                 self._save_posterior_checkpoint()
+                log({"counter_checkpoint_posterior": counter_checkpoint_posterior})
+                counter_checkpoint_posterior += 1
                 
             if val_traindist_loss < self.best_traindist_val_loss:
                 self.best_traindist_val_loss = val_traindist_loss
                 self._save_traindist_checkpoint()
+                log({"counter_checkpoint_traindist": counter_checkpoint_traindist})
+                counter_checkpoint_traindist += 1
 
             # Use posterior validation loss for scheduler and early stopping
             self._scheduler.step(val_posterior_loss)
@@ -379,6 +385,14 @@ class SNPE_A:
             "proposal_mean": samples.mean().item(),
             "proposal_std": samples.std().item(),
             })
+        vector_mean = samples.mean(axis=0).cpu()
+        vector_std = samples.std(axis=0).cpu()
+        log(
+            {f"proposal_mean_{i}": vector_mean[i].item() for i in range(len(vector_mean))},
+        )
+        log(
+            {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
+        )
         samples = samples.numpy()
         return samples
 
