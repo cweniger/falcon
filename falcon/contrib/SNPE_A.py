@@ -415,13 +415,18 @@ class SNPE_A:
             "traindist_mean": samples_proposals.mean().item(),
             "traindist_std": samples_proposals.std().item(),
             })
+        
+        #posterior_net = self._best_posterior
+        #traindist_net = self._best_traindist
+        posterior_net = self._posterior
+        traindist_net = self._traindist
 
-        self._best_posterior.eval()
-        log_prob_post = self._best_posterior.log_prob(
+        posterior_net.eval()
+        log_prob_post = posterior_net.log_prob(
             samples_proposals, s)  # (num_proposals, num_samples)
 
-        self._best_traindist.eval()
-        log_prob_dist = self._best_traindist.log_prob(
+        traindist_net.eval()
+        log_prob_dist = traindist_net.log_prob(
             samples_proposals, s*0)  # (num_proposals, num_samples)
         
         # Generate "mask" that equals one if samples are outside the [-1, 1] box

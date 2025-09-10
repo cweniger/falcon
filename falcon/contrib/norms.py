@@ -32,10 +32,10 @@ class LazyOnlineNorm(nn.Module):
 
             # Update running statistics (match shape explicitly)
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * batch_mean
-            #self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+            self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
             # Exponential update
-            self.running_var = torch.exp((1-self.momentum) * torch.log(self.running_var)
-                                         + self.momentum * torch.log(batch_var))
+            #self.running_var = torch.exp((1-self.momentum) * torch.log(self.running_var)
+            #                             + self.momentum * torch.log(batch_var))
             
             # Update minimum variance if monotonic_variance is enabled
             if self.monotonic_variance:
