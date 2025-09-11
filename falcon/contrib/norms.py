@@ -4,12 +4,13 @@ from falcon.core.logging import log
 from torch.nn.parameter import UninitializedParameter
 
 class LazyOnlineNorm(nn.Module):
-    def __init__(self, momentum=0.01, epsilon = 1e-20, log_prefix = None, monotonic_variance=True):
+    def __init__(self, momentum=0.01, epsilon = 1e-20, log_prefix = None, monotonic_variance=True, use_log_update = False):
         super().__init__()
         self.momentum = momentum
         self.epsilon = epsilon
         self.log_prefix= log_prefix + ":" if log_prefix else ""
         self.monotonic_variance = monotonic_variance
+        self.use_log_update = use_log_update
 
         self.register_buffer("running_mean", None)
         self.register_buffer("running_var", None)
@@ -32,10 +33,12 @@ class LazyOnlineNorm(nn.Module):
 
             # Update running statistics (match shape explicitly)
             self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * batch_mean
-            self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
-            # Exponential update
-            #self.running_var = torch.exp((1-self.momentum) * torch.log(self.running_var)
-            #                             + self.momentum * torch.log(batch_var))
+            if self.use_log_update:
+                self.running_var = torch.exp((1-self.momentum) * torch.log(self.running_var)
+                                            + self.momentum * torch.log(batch_var))
+            else:
+                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+
             
             # Update minimum variance if monotonic_variance is enabled
             if self.monotonic_variance:

@@ -7,8 +7,8 @@ model_path: "src"
 
 # WandB configuration
 logging:
-  project: falcon2_v3
-  group: run1
+  project: falcon2_bimodal
+  group: new_run_1
   dir: ${hydra:run.dir}
 
 # Directory configuration (relative to Hydra output directory)
@@ -66,6 +66,8 @@ graph:
       lr_decay_factor: 0.1
       scheduler_patience: 10
       sample_reference_posterior: false
+      use_best_models_during_inference: false
+      use_log_update: false
       theta_norm: true
       norm_momentum: 0.003
       #device: cuda

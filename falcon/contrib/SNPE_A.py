@@ -16,10 +16,10 @@ from .norms import LazyOnlineNorm
 import copy
 
 class Flow(torch.nn.Module):
-    def __init__(self, theta, s, theta_norm=False, log_prefix=None, norm_momentum = 3e-3, net_type = 'nsf'):
+    def __init__(self, theta, s, theta_norm=False, log_prefix=None, norm_momentum = 3e-3, net_type = 'nsf', use_log_update = False):
         super(Flow, self).__init__()
         self.log_prefix = log_prefix + ":" if log_prefix else ""
-        self.theta_norm = LazyOnlineNorm(momentum=norm_momentum, log_prefix=self.log_prefix+"OnlineNorm") if theta_norm else None
+        self.theta_norm = LazyOnlineNorm(momentum=norm_momentum, log_prefix=self.log_prefix+"OnlineNorm", use_log_update = use_log_update) if theta_norm else None
         if net_type == 'nsf':
             self.net = net_builders.build_nsf(theta.float(), s.float(), z_score_x=None, z_score_y=None)
         elif net_type == 'made':
@@ -103,7 +103,9 @@ class SNPE_A:
                  sample_reference_posterior=True,
                  batch_size=128,
                  embedding=None,
-                 _embedding_keywords=[]
+                 _embedding_keywords=[],
+                 use_best_models_during_inference=True,
+                 use_log_update=False,
                  ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -125,6 +127,8 @@ class SNPE_A:
         self.norm_momentum = norm_momentum
         self.net_type = net_type
         self.sample_reference_posterior = sample_reference_posterior
+        self._use_best_models_during_inference = use_best_models_during_inference
+        self._use_log_update = use_log_update
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
@@ -160,9 +164,11 @@ class SNPE_A:
         theta = theta.to(self.device)
         
         # Training networks
-        self._posterior = Flow(theta, s, theta_norm = self.theta_norm, log_prefix = 'posterior', norm_momentum = self.norm_momentum, net_type=self.net_type)
+        self._posterior = Flow(theta, s, theta_norm = self.theta_norm, log_prefix = 'posterior', norm_momentum = self.norm_momentum, net_type=self.net_type,
+                               use_log_update=self._use_log_update)
         self._posterior.to(self.device)
-        self._traindist = Flow(theta, s*0, theta_norm = self.theta_norm, log_prefix = 'traindist', norm_momentum = self.norm_momentum, net_type=self.net_type)
+        self._traindist = Flow(theta, s*0, theta_norm = self.theta_norm, log_prefix = 'traindist', norm_momentum = self.norm_momentum, net_type=self.net_type,
+                                use_log_update=self._use_log_update)
         self._traindist.to(self.device)
         
         # Best-fit networks (initialized as copies of training networks)
@@ -402,15 +408,19 @@ class SNPE_A:
         # Run conditions through summary network
         assert inf_conditions is not None, "Conditions must be provided."
         inf_conditions = [c.to(self.device) for c in inf_conditions]
-        s = self._summary(inf_conditions, train=False, use_best_fit=False)
+
+        if self._use_best_models_during_inference:
+            posterior_net = self._best_posterior
+            traindist_net = self._best_traindist
+            s = self._summary(inf_conditions, train=False, use_best_fit=True)
+        else:
+            posterior_net = self._posterior
+            traindist_net = self._traindist
+            s = self._summary(inf_conditions, train=False, use_best_fit=False)
+
         s, = self._align_singleton_batch_dims([s], length=num_samples)
 
         num_proposals = 128
-        
-        #posterior_net = self._best_posterior
-        #traindist_net = self._best_traindist
-        posterior_net = self._posterior
-        traindist_net = self._traindist
 
         traindist_net.eval()
         samples_proposals = traindist_net.sample(num_proposals, s*0).detach()
