@@ -323,7 +323,7 @@ class SNPE_A:
                 traindist_losses = self._traindist.loss(uc, sc*0)
                 val_traindist_loss += torch.sum(traindist_losses).item()
 
-                num_val_samples += len(batch)
+                num_val_samples += uc.shape[0]
                 #val_posterior_loss_avg += posterior_loss.sum().item()
                 #val_traindist_loss_avg += traindist_loss.sum().item()
                 await asyncio.sleep(0)
@@ -420,11 +420,32 @@ class SNPE_A:
 
         s, = self._align_singleton_batch_dims([s], length=num_samples)
 
-        num_proposals = 128
+        num_proposals = 256
+        proposal_mode = 'traindist'
 
-        traindist_net.eval()
-        samples_proposals = traindist_net.sample(num_proposals, s*0).detach()
-        # (num_proposals, num_samples, theta_dim)
+        if proposal_mode == 'traindist':
+            traindist_net.eval()
+            samples_proposals = traindist_net.sample(num_proposals, s*0).detach()
+            # (num_proposals, num_samples, theta_dim)
+
+            log_prob_dist = traindist_net.log_prob(
+                samples_proposals, s*0)  # (num_proposals, num_samples)
+        elif proposal_mode == 'posterior':
+            posterior_net.eval()
+            samples_proposals = posterior_net.sample(num_proposals, s).detach()
+            # (num_proposals, num_samples, theta_dim)
+
+            log_prob_dist = posterior_net.log_prob(
+                samples_proposals, s)  # (num_proposals, num_samples)
+        else:
+            traindist_net.eval()
+            samples_proposals = traindist_net.sample(num_proposals, s*0).detach()
+            log_prob_dist = traindist_net.log_prob(
+                samples_proposals, s*0)  # (num_proposals, num_samples)
+            # Generate uniform proposals on [-2, 2]
+            samples_proposals = torch.empty_like(samples_proposals)
+            samples_proposals.uniform_(-2, 2)
+            log_prob_dist = log_prob_dist*0
 
         log({
             "traindist_mean": samples_proposals.mean().item(),
@@ -435,11 +456,7 @@ class SNPE_A:
         log_prob_post = posterior_net.log_prob(
             samples_proposals, s)  # (num_proposals, num_samples)
 
-        #traindist_net.eval()
-        log_prob_dist = traindist_net.log_prob(
-            samples_proposals, s*0)  # (num_proposals, num_samples)
-        
-        # Generate "mask" that equals one if samples are outside the [-1, 1] box
+        # Generate "mask" that equals one if samples are outside the [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
         mask = mask.any(dim=-1).float()*100     # (num_proposals, num_samples)
 
@@ -485,8 +502,11 @@ class SNPE_A:
 
         weights *= num_proposals
         #print("Weights:", weights.sum(dim=0))
-        n_eff = ((weights**2).sum(dim=0)**0.5).min().item()
-        log({"n_eff": n_eff})
+        #print(weights[:,0])
+        n_eff = 1/((weights**2).sum(dim=0)).cpu().detach().numpy()
+        print(n_eff, n_eff.min(), n_eff.max())
+        log({"n_eff_min": n_eff.min()})
+        log({"n_eff_max": n_eff.max()})
 
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
 
