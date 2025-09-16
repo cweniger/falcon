@@ -500,11 +500,8 @@ class SNPE_A:
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
         weights = torch.exp(log_weights)  # (num_proposals, num_samples) - sum up to one in first dimension
 
-        weights *= num_proposals
-        #print("Weights:", weights.sum(dim=0))
-        #print(weights[:,0])
+        # Effective sample size diagnostics
         n_eff = 1/((weights**2).sum(dim=0)).cpu().detach().numpy()
-        print(n_eff, n_eff.min(), n_eff.max())
         log({"n_eff_min": n_eff.min()})
         log({"n_eff_max": n_eff.max()})
 
