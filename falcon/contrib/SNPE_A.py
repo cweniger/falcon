@@ -467,7 +467,9 @@ class SNPE_A:
             # Proposal samples, based on auxiliary distribution
 	    
             # Option A
-            log_weights = gamma/(1.+gamma)*log_prob_post - log_prob_dist - mask
+            #log_weights = gamma/(1.+gamma)*log_prob_post - log_prob_dist - mask
+            #log_weights = gamma/(1.+gamma)*log_prob_post - log_prob_post - mask
+            log_weights = -1./(1.+gamma)*log_prob_post - mask
             #log_weights = (gamma-1)*log_prob_post - mask
 
             # Option B
@@ -477,7 +479,8 @@ class SNPE_A:
             # General posterior samples, based on auxiliary distribution alone
 
             # Option A
-            log_weights = log_prob_post - 2*log_prob_dist - mask
+            #log_weights = log_prob_post - 2*log_prob_dist - mask
+            log_weights = -gamma/(1+gamma)*log_prob_post - mask
 
             # Option B1
             #log_weights = log_prob_post - gamma/(1.+gamma)*log_prob_post_x0 - log_prob_dist - mask
