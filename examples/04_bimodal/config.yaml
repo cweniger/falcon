@@ -58,7 +58,7 @@ graph:
          _input_: [x, m, n]
       discard_samples: true
       net_type: nsf #zuko_gf # maf, nice, sospf, naf, gf
-      gamma: 0.5
+      gamma: 0.333333
       num_epochs: 300
       batch_size: 128
       lr: 0.01
