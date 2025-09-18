@@ -362,7 +362,7 @@ class DeployedGraph:
             time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
             while num_new_samples > 0:
-                print("Remaining new samples to generate:", num_new_samples)
+                #print("Remaining new samples to generate:", num_new_samples)
                 this_n = min(num_new_samples, 512)
                 #print("Generate new samples:", num_new_samples)
                 new_samples = self.proposal_sample(this_n, observations)
