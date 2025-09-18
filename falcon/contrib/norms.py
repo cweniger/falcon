@@ -31,13 +31,17 @@ class LazyOnlineNorm(nn.Module):
             batch_mean = x.mean(dim=0)  # Mean over batch dimension
             batch_var = ((x-self.running_mean)**2).mean(dim=0).detach()
 
+            threshold_ratio = 2
+            beta = 0.1
+            momentum_eff = self.momentum * torch.sigmoid(((self.running_var/batch_var)**0.5-threshold_ratio)/beta)
+
             # Update running statistics (match shape explicitly)
-            self.running_mean = (1 - self.momentum) * self.running_mean + self.momentum * batch_mean
+            self.running_mean = (1 - momentum_eff) * self.running_mean + momentum_eff * batch_mean
             if self.use_log_update:
-                self.running_var = torch.exp((1-self.momentum) * torch.log(self.running_var)
-                                            + self.momentum * torch.log(batch_var))
+                self.running_var = torch.exp((1-momentum_eff) * torch.log(self.running_var)
+                                            + momentum_eff * torch.log(batch_var))
             else:
-                self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+                self.running_var = (1 - momentum_eff) * self.running_var + momentum_eff * batch_var
 
             
             # Update minimum variance if monotonic_variance is enabled
