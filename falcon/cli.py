@@ -103,10 +103,10 @@ def launch_mode(cfg: DictConfig) -> None:
 
     # 3) Launch training & simulations
     graph_path = Path(cfg.paths.graph)
-    if graph_path.exists():
-        deployed_graph.load(graph_path)
-    deployed_graph.launch(dataset_manager, observations)
-    deployed_graph.save(graph_path)
+    #if graph_path.exists():
+    #    deployed_graph.load(graph_path)
+    deployed_graph.launch(dataset_manager, observations, graph_path=graph_path)
+    #deployed_graph.save(graph_path)
 
 
     ##########################

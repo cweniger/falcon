@@ -309,10 +309,14 @@ class DeployedGraph:
         """Shut down the deployed graph and release resources."""
         ray.get([node.shutdown.remote() for node in self.wrapped_nodes_dict.values()])
 
-    def launch(self, dataset_manager, observations):
-        asyncio.run(self._launch(dataset_manager, observations))
+    def launch(self, dataset_manager, observations, graph_path=None):
+        asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path))
 
-    async def _launch(self, dataset_manager, observations):
+    async def _launch(self, dataset_manager, observations, graph_path=None):
+        # Load graph if path is provided
+        if graph_path is not None and graph_path.exists():
+            self.load(graph_path)
+
         # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor
         dataset_manager = dataset_manager.dataset_manager_actor
 
@@ -383,6 +387,13 @@ class DeployedGraph:
                 #    ray.shutdown()
                 #    raise e # Re-raise the exception to propagate it
 
+            # FIXME: Not optimal, should happen after specific time steps
+            if graph_path is not None:
+                self.save(graph_path)
+        
+        # Save graph if path is provided
+        if graph_path is not None:
+            self.save(graph_path)
 
     def save(self, graph_dir):
         """Save the deployed graph node status."""
