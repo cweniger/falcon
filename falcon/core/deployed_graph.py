@@ -352,20 +352,25 @@ class DeployedGraph:
 #                print("All training finished!")
 #                break
 
+        resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
+
         while train_future_list:
             ready, train_future_list = ray.wait(train_future_list, num_returns=len(train_future_list), timeout=1)
             #active = ray.get(dataset_manager.is_active.remote())
             # FIX: Fix this to work adaptively again
             #generate_new_samples = not all(active[-num_sims:])  # Check if any of the last n_train samples are invalid
-            time.sleep(4)
+            time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
-            if num_new_samples > 0:
+            while num_new_samples > 0:
+                print("Remaining new samples to generate:", num_new_samples)
+                this_n = min(num_new_samples, 512)
                 #print("Generate new samples:", num_new_samples)
-                new_samples = self.proposal_sample(num_new_samples, observations)
+                new_samples = self.proposal_sample(this_n, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]
-                new_samples = self.sample(num_new_samples, conditions = new_samples)
+                new_samples = self.sample(this_n, conditions = new_samples)
                 ray.get(dataset_manager.append.remote(new_samples))
+                num_new_samples -= this_n
             
             for completed_task in ready:
                 result = ray.get(completed_task)  # Retrieve the result or raise an exception

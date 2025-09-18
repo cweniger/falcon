@@ -29,12 +29,14 @@ class DatasetManagerActor:
                  min_training_samples = None,   # TODO: Minimum number of simulations to train on
                  validation_window_size = None,   # TODO: Number of sliding validation sims
                  resample_batch_size = 256,
+                 resample_interval = 5,
                  initial_samples_path = None,
                  ):
         self.max_training_samples = max_training_samples
         self.min_training_samples = min_training_samples
         self.validation_window_size = validation_window_size
         self.resample_batch_size = resample_batch_size
+        self.resample_interval = resample_interval
         self.initial_samples_path = initial_samples_path
 
         # Store
@@ -56,6 +58,9 @@ class DatasetManagerActor:
 
     def num_resims(self):
         return self.resample_batch_size
+
+    def get_resample_interval(self):
+        return self.resample_interval
 
 #    def get_active_ids(self):
 #        # Only return the last num_min_sims active IDs
@@ -196,13 +201,14 @@ class DatasetView(IterableDataset):
 
 def get_ray_dataset_manager(min_training_samples=None,
         max_training_samples=None, validation_window_size=None, resample_batch_size=64,
-        initial_samples_path=None
+        resample_interval=5, initial_samples_path=None
         ):
     dataset_manager_actor = DatasetManagerActor.remote(
             min_training_samples=min_training_samples,
             max_training_samples=max_training_samples,
             validation_window_size=validation_window_size,
             resample_batch_size=resample_batch_size,
+            resample_interval=resample_interval,
             initial_samples_path=initial_samples_path,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)

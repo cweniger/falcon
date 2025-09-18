@@ -22,6 +22,7 @@ buffer:
   max_training_samples: 16384
   validation_window_size: 128
   resample_batch_size: 1024
+  resample_interval: 5
 
 # Graph definition using declarative YAML
 graph:
@@ -64,7 +65,7 @@ graph:
       lr: 0.01
       early_stop_patience: 32
       lr_decay_factor: 0.1
-      scheduler_patience: 10
+      scheduler_patience: 1000000
       sample_reference_posterior: false
       use_best_models_during_inference: false
       use_log_update: false
