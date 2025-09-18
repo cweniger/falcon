@@ -2,6 +2,7 @@ import asyncio
 from pathlib import Path
 
 import torch
+import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -52,6 +53,7 @@ class Flow(torch.nn.Module):
             raise ValueError("Netowrk type not known", net_type)
         if self.theta_norm is not None:
             theta = self.theta_norm(theta)
+        self.scale = 0.2
 
     def loss(self, theta, s):
         log({f"{self.log_prefix}target_{i}_min": theta[:, i].min().item() for i in range(theta.shape[1])})
@@ -61,7 +63,9 @@ class Flow(torch.nn.Module):
 
         if self.theta_norm is not None:
             theta = self.theta_norm(theta)
-        loss = self.net.loss(theta.float(), condition=s.float())
+        theta = theta.float() * self.scale
+        loss = self.net.loss(theta, condition=s.float())
+        loss = loss - np.log(self.scale)*theta.shape[-1]
         if self.theta_norm is not None:
             volume = self.theta_norm.volume()
             loss = loss + torch.log(volume)
@@ -70,6 +74,7 @@ class Flow(torch.nn.Module):
     def sample(self, num_samples, s):
         # Return (num_samples, num_conditions, theta_dim) - standard pyro 
         samples = self.net.sample((num_samples,), condition=s).detach()
+        samples = samples / self.scale
         if self.theta_norm is not None:
             samples = self.theta_norm.inverse(samples).detach()
         return samples
@@ -80,7 +85,9 @@ class Flow(torch.nn.Module):
         # (num_proposals, num_conditions, theta_dim)
         if self.theta_norm is not None:
             theta = self.theta_norm(theta).detach()
+        theta = theta * self.scale
         log_prob = self.net.log_prob(theta.float(), condition=s.float())  # (num_proposals, num_samples)
+        log_prob = log_prob + np.log(self.scale)*theta.shape[-1]
         if self.theta_norm is not None:
             volume = self.theta_norm.volume().detach()
             log_prob = log_prob - torch.log(volume)
