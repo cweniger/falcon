@@ -130,8 +130,8 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations = {}, num_trailing_samples = None):
         print("Training started for:", self.name)
-        keys_train = [self.name] + self.offline_evidence
-        keys_val = [self.name] + self.evidence + self.node.scaffolds
+        keys_train = [self.name, self.name + ".logprob"] + self.offline_evidence
+        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.node.scaffolds
         filter_train = OnlineEvidenceFilter(self.offline_evidence, self.resample_subgraph, self.evidence+self.scaffolds, self.graph)
         #filter_val = OnlineEvidenceFilter(self.evidence, [], self.evidence, self.graph)
 
@@ -372,6 +372,7 @@ class DeployedGraph:
 #                break
 
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
+        time.sleep(60) # Wait sixty seconds before starting resampling
 
         while train_future_list:
             ready, train_future_list = ray.wait(train_future_list, num_returns=len(train_future_list), timeout=1)

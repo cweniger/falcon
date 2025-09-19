@@ -22,7 +22,7 @@ buffer:
   max_training_samples: 16384
   validation_window_size: 256
   resample_batch_size: 1024
-  resample_interval: 5
+  resample_interval: 10
 
 # Graph definition using declarative YAML
 graph:

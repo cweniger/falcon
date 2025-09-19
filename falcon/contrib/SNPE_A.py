@@ -269,7 +269,9 @@ class SNPE_A:
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
                 n_train_batch += 1
-                _, theta, inf_conditions = batch[0], batch[1], batch[2:]
+                _, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                log({"theta_logprob_min": theta_logprob.min().item()})
+                log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
                     self._initialize_networks(u, inf_conditions)
@@ -316,7 +318,9 @@ class SNPE_A:
             for batch in dataloader_val:
                 log({"n_val_batch": n_val_batch})
                 n_val_batch += 1
-                _, theta, inf_conditions = batch[0], batch[1], batch[2:]
+                _, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                log({"theta_logprob_min": theta_logprob.min().item()})
+                log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=False)
