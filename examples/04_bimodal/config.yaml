@@ -72,6 +72,7 @@ graph:
       theta_norm: true
       norm_momentum: 0.01
       #device: cuda
+      log_ratio_threshold: -20
     ray:
       num_gpus: 1
   

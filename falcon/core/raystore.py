@@ -109,7 +109,8 @@ class DatasetManagerActor:
         self.ref_counts[ids] -= 1
 
     def deactivate(self, ids):
-        print("Deactivating samples:", ids)
+        #print("Deactivating samples:", ids)
+        self.status[ids] = SampleStatus.TOMBSTONE
 
     def append(self, data, batched=True):
         if batched:  # TODO: Legacy structure
