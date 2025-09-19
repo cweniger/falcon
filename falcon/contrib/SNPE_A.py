@@ -243,12 +243,13 @@ class SNPE_A:
         s = embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
         return s
 
-    def sample(self, num_samples, parent_conditions=[]):
+    def prior_sample(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
         assert parent_conditions == [], "Conditions are not supported."
-        samples = self.simulator_instance.sample(num_samples)
-        samples = samples.numpy()
-        return samples
+        samples = self.simulator_instance.simulate_batch(num_samples)
+        logprob_for_prior_samples = np.ones(num_samples)*(-np.log(4)**self.param_dim)  # Uniform prior on [-2, 2]^D
+        rvbatch = RVBatch(samples, logprob=logprob_for_prior_samples)
+        return rvbatch
 
     async def train(self, dataloader_train, dataloader_val, hook_fn=None):
         """Train the neural spline flow on the given data."""

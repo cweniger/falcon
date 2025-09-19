@@ -174,6 +174,10 @@ class NodeWrapper:
     def sample(self, n_samples, incoming = None):
 #        node_type = self.get_node_type()
 #        if node_type == 'stochastic':
+        if self.estimator_instance is not None:
+            samples = self.estimator_instance.prior_sample(n_samples, parent_conditions=incoming)
+            samples = as_rvbatch(samples)
+            return samples
         if hasattr(self.simulator_instance, 'simulate_batch'):
             return self.simulator_instance.simulate_batch(n_samples, *incoming)
         else:
@@ -244,16 +248,19 @@ class DeployedGraph:
     def sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_node_names
-        sample_dict = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in sample_dict.keys():
+            if name in trace.keys():
                 continue
-            incoming = [sample_dict[parent] for parent in self.graph.get_parents(name)]
-            sample_dict[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
-        
-        return sample_dict
+            incoming = [trace[parent] for parent in self.graph.get_parents(name)]
+            rvbatch = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
+            rvbatch = as_rvbatch(rvbatch)
+            trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
+        return trace
 
     def conditioned_sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
@@ -275,6 +282,8 @@ class DeployedGraph:
                 parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
                 )
             trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples, incoming))
             #except AttributeError:
@@ -301,6 +310,8 @@ class DeployedGraph:
             rvbatch = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(
                 num_samples, parent_conditions=parent_conditions, evidence_conditions=evidence_conditions))
             trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(num_samples, incoming))
             #except AttributeError:
