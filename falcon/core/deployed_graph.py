@@ -142,20 +142,19 @@ class NodeWrapper:
         dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
         dataloader_val = DataLoader(dataset_val, batch_size=batch_size)
 
-#        def hook_fn(module, batch):
-#            id, theta, conditions = batch[0], batch[1], batch[2:]
-#            for i, k in enumerate(self.evidence):
-#                if k in observations.keys():
-#                    conditions[i] = observations[k]
-#            # Corresponding id
-#            mask = module.discardable(theta, conditions)
-#            ids = id[mask]
-#            ids = list(ids.numpy())
-#
-#            # Deactivate samples
-#            if dataset_manager is not None:
-#                dataset_manager.deactivate.remote(ids)
-        hook_fn = None
+        def hook_fn(module, batch):
+            ids, theta, theta_logprob, conditions = batch[0], batch[1], batch[2], batch[3:]
+            for i, k in enumerate(self.evidence):
+                if k in observations.keys():
+                    conditions[i] = observations[k]
+            # Corresponding id
+            mask = module.discardable(theta, conditions)
+            ids = ids[mask]
+            ids = list(ids.numpy())
+
+            # Deactivate samples
+            dataset_manager.deactivate.remote(ids)
+#        hook_fn = None
 
         await self.estimator_instance.train(dataloader_train, dataloader_val, hook_fn=hook_fn)
         print("...training complete for:", self.name)

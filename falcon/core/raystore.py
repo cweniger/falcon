@@ -108,6 +108,10 @@ class DatasetManagerActor:
     def release_samples(self, ids):
         self.ref_counts[ids] -= 1
 
+    def deactivate(self, ids):
+        print("Deactivating samples:", ids)
+        #self.status[ids[0]] = SampleStatus.TOMBSTONE
+
     def append(self, data, batched=True):
         if batched:  # TODO: Legacy structure
             num_new_samples = data[list(data.keys())[0]].shape[0]
