@@ -113,6 +113,7 @@ class SNPE_A:
                  _embedding_keywords=[],
                  use_best_models_during_inference=True,
                  use_log_update=False,
+                 log_ratio_threshold=-20.,
                  ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -136,6 +137,7 @@ class SNPE_A:
         self.sample_reference_posterior = sample_reference_posterior
         self._use_best_models_during_inference = use_best_models_during_inference
         self._use_log_update = use_log_update
+        self.log_ratio_threshold = log_ratio_threshold
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
@@ -145,7 +147,6 @@ class SNPE_A:
         self.simulator_instance = simulator_instance
 
         # Runtime variables
-        self.log_ratio_threshold = -torch.inf  # Dynamic threshold for rejection sampling
         self.networks_initialized = False
         self.best_posterior_val_loss = float('inf')  # Best posterior validation loss
         self.best_traindist_val_loss = float('inf')  # Best traindist validation loss
@@ -537,39 +538,19 @@ class SNPE_A:
 
         return samples, logprob.detach()
 
-    def discardable(self, theta, parent_conditions=[], evidence_conditions=[]):
-        return torch.ones(len(theta)).bool()
+    def discardable(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
         inf_conditions = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
         inf_conditions = [c.to(self.device) for c in inf_conditions]
         s = self._summary(inf_conditions, train=False, use_best_fit=True)
         u, s = self._align_singleton_batch_dims([u, s])
         u = u.to(self.device)
-        self._best_posterior.eval()
-        self._best_traindist.eval()
-        log_prob1 = self._best_posterior.log_prob(u.unsqueeze(0), s).squeeze(0).to('cpu')
-        log_prob2 = self._best_traindist.log_prob(u.unsqueeze(0), s*0).squeeze(0).to('cpu')
-        log_ratio = log_prob1 - 0*log_prob2  #  p(z|x)/p(z)
-
-        alpha = 0.99
-        eta = 1e-3
-        t = self.log_ratio_threshold
-        t += eta*(sum((log_ratio > t)*(log_ratio - t)*alpha) - 
-                  sum((log_ratio < t)*(t - log_ratio)*(1-alpha))
-                  )
-        offset = 0.5*3**2*self.param_dim
-        self.log_ratio_threshold = max(log_ratio.max().item()-offset, self.log_ratio_threshold)
-        
-        if self.discard_samples:
-            #mask = log_ratio < self.log_ratio_threshold
-            mask = log_ratio < torch.inf
-        else:
-            mask = torch.zeros_like(log_ratio).bool()
-        #print("rejection fraction:", mask.float().mean().item())
-        
-        return mask
-
-        # p(z|x)/p_tilde(z) = p(x|z)/p_tilde(x) > 1e-3**dim_params
+        posterior_net = self._posterior
+        posterior_net.eval()
+        log_prob = posterior_net.log_prob(u.unsqueeze(0), s).squeeze(0).to('cpu')
+        log_ratio = log_prob - theta_logprob
+        discard = log_ratio < self.log_ratio_threshold
+        return discard
 
     def save(self, node_dir: Path):
         # Save best-fit model states to files

@@ -148,7 +148,7 @@ class NodeWrapper:
                 if k in observations.keys():
                     conditions[i] = observations[k]
             # Corresponding id
-            mask = module.discardable(theta, conditions)
+            mask = module.discardable(theta, theta_logprob, conditions)
             ids = ids[mask]
             ids = list(ids.numpy())
 
