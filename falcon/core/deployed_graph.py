@@ -12,35 +12,35 @@ from omegaconf import ListConfig
 from falcon.core.logging import initialize_logging_for
 from .utils import LazyLoader, as_rvbatch
 
-class OnlineEvidenceFilter:
-    def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
-        self.offline_evidence = offline_evidence
-        self.resample_subgraph = resample_subgraph
-        self.evidence = evidence
-        self.graph = graph
-
-        # Instantiate online nodes
-        self.online_nodes = {}
-        for k in self.resample_subgraph:
-            self.online_nodes[k] = graph.get_simulate_cls(k)(**graph.node_dict[k].simulate_config)
-
-    def __call__(self, values):
-        # Associate inputs with keywords
-        values_dict = {k: v for k, v in zip(self.offline_evidence, values[1:])}
-        
-        # Run through online nodes and add to values_dict
-        for k, v in self.online_nodes.items():
-            conditions = [values_dict[parent] for parent in self.graph.get_parents(k)]
-            # Turn conditions into tensors and add a single batch dimension
-            conditions = [torch.tensor(c).unsqueeze(0) for c in conditions]
-            sample = v.sample(1, parent_conditions=conditions)
-            # Remove batch dimension and turn into numpy
-            sample = sample.squeeze(0).numpy()
-            values_dict[k] = sample
-
-        # Return projection of values_dict to evidence
-        output = values[:1] + [values_dict[k] for k in self.evidence]
-        return output
+#class OnlineEvidenceFilter:
+#    def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
+#        self.offline_evidence = offline_evidence
+#        self.resample_subgraph = resample_subgraph
+#        self.evidence = evidence
+#        self.graph = graph
+#
+#        # Instantiate online nodes
+#        self.online_nodes = {}
+#        for k in self.resample_subgraph:
+#            self.online_nodes[k] = graph.get_simulate_cls(k)(**graph.node_dict[k].simulate_config)
+#
+#    def __call__(self, values):
+#        # Associate inputs with keywords
+#        values_dict = {k: v for k, v in zip(self.offline_evidence, values[1:])}
+#        
+#        # Run through online nodes and add to values_dict
+#        for k, v in self.online_nodes.items():
+#            conditions = [values_dict[parent] for parent in self.graph.get_parents(k)]
+#            # Turn conditions into tensors and add a single batch dimension
+#            conditions = [torch.tensor(c).unsqueeze(0) for c in conditions]
+#            sample = v.sample(1, parent_conditions=conditions)
+#            # Remove batch dimension and turn into numpy
+#            sample = sample.squeeze(0).numpy()
+#            values_dict[k] = sample
+#
+#        # Return projection of values_dict to evidence
+#        output = values[:1] + [values_dict[k] for k in self.evidence]
+#        return output
 
 @ray.remote
 class MultiplexNodeWrapper:
@@ -118,8 +118,8 @@ class NodeWrapper:
         self.evidence = node.evidence
         self.scaffolds = node.scaffolds
         self.name = node.name
-        self.offline_evidence, self.resample_subgraph = graph.get_resample_parents_and_graph(
-            self.evidence + self.scaffolds)
+        #self.offline_evidence, self.resample_subgraph = graph.get_resample_parents_and_graph(
+        #    self.evidence + self.scaffolds)
         #print("Node:", self.name)
         #print("Offline evidence:", self.offline_evidence)
         #print("Resample subgraph:", self.resample_subgraph)
@@ -130,15 +130,13 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations = {}, num_trailing_samples = None):
         print("Training started for:", self.name)
-        keys_train = [self.name, self.name + ".logprob"] + self.offline_evidence
-        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.node.scaffolds
-        filter_train = OnlineEvidenceFilter(self.offline_evidence, self.resample_subgraph, self.evidence+self.scaffolds, self.graph)
-        #filter_val = OnlineEvidenceFilter(self.evidence, [], self.evidence, self.graph)
+        keys_train = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds 
+        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
 
         batch_size = self.node.estimator_config.get('batch_size', 128)
 
         dataset_train = ray.get(
-            dataset_manager.get_train_dataset_view.remote(keys_train, filter=filter_train))
+            dataset_manager.get_train_dataset_view.remote(keys_train, filter=None))
         dataset_val = ray.get(
             dataset_manager.get_val_dataset_view.remote(keys_val, filter=None))
         dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
