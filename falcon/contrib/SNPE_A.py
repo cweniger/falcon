@@ -10,7 +10,7 @@ import sbi.utils  # Don't remove this import, it is needed for sbi.neural_nets.n
 from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
-from falcon.core.utils import LazyLoader
+from falcon.core.utils import LazyLoader, RVBatch, RV
 from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
@@ -376,7 +376,7 @@ class SNPE_A:
     def conditioned_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
         samples = self._aux_sample(num_samples, mode = 'posterior', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
         samples = samples.numpy()
-        return samples
+        return RVBatch(samples)
 
     def proposal_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
         # Sample from posterior and log values for reference
@@ -407,7 +407,7 @@ class SNPE_A:
             {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
         )
         samples = samples.numpy()
-        return samples
+        return RVBatch(samples)
 
     def _aux_sample(self, num_samples, mode = None, parent_conditions=[], evidence_conditions=[]):
         """Sample from the proposal distribution given conditions."""

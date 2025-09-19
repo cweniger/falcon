@@ -10,7 +10,7 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
-from .utils import LazyLoader
+from .utils import LazyLoader, as_rvbatch
 
 class OnlineEvidenceFilter:
     def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
@@ -190,11 +190,13 @@ class NodeWrapper:
     def conditioned_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
         samples = self.estimator_instance.conditioned_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
+        samples = as_rvbatch(samples)
         return samples
 
     def proposal_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
         samples = self.estimator_instance.proposal_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
+        samples = as_rvbatch(samples)
         return samples
 
     def call_simulator_method(self, method_name, *args, **kwargs):
@@ -256,54 +258,56 @@ class DeployedGraph:
     def conditioned_sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
-        conditions = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in conditions.keys():
+            if name in trace.keys():
                 continue
             evidence_conditions = (
-                [conditions[parent] for parent in self.graph.get_evidence(name)]
+                [trace[parent] for parent in self.graph.get_evidence(name)]
             )
             parent_conditions = (
-                [conditions[parent] for parent in self.graph.get_parents(name)]
+                [trace[parent] for parent in self.graph.get_parents(name)]
             )
-            conditions[name] = ray.get(
+            rvbatch = ray.get(
                 self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples,
                 parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
                 )
+            trace[name] = rvbatch.value
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples, incoming))
             #except AttributeError:
             #    print("WARNING: Using sample instead of conditioned_sample for:", name)
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
         
-        return conditions
+        return trace
 
     def proposal_sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
-        conditions = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in conditions.keys():
+            if name in trace.keys():
                 continue
             parent_conditions = (
-                [conditions[parent] for parent in self.graph.get_parents(name)]
+                [trace[parent] for parent in self.graph.get_parents(name)]
             )
             evidence_conditions = (
-                [conditions[parent] for parent in self.graph.get_evidence(name)]
+                [trace[parent] for parent in self.graph.get_evidence(name)]
             )
-            conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(
+            rvbatch = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(
                 num_samples, parent_conditions=parent_conditions, evidence_conditions=evidence_conditions))
+            trace[name] = rvbatch.value
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(num_samples, incoming))
             #except AttributeError:
             #    print("WARNING: Using sample instead of conditioned_sample for:", name)
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
         
-        return conditions
+        return trace
 
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
