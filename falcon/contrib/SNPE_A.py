@@ -10,7 +10,7 @@ import sbi.utils  # Don't remove this import, it is needed for sbi.neural_nets.n
 from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
-from falcon.core.utils import LazyLoader, RVBatch, RV
+from falcon.core.utils import LazyLoader, RVBatch
 from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
@@ -374,14 +374,14 @@ class SNPE_A:
         # Training complete - best-fit networks are already updated via checkpoints
 
     def conditioned_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self._aux_sample(num_samples, mode = 'posterior', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
+        samples, logprob = self._aux_sample(num_samples, mode = 'posterior', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
         samples = samples.numpy()
-        return RVBatch(samples)
+        return RVBatch(samples, logprob=logprob.numpy())
 
     def proposal_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
         # Sample from posterior and log values for reference
         if self.sample_reference_posterior:
-            posterior_samples = self._aux_sample(128, mode = 'posterior',
+            posterior_samples, _ = self._aux_sample(128, mode = 'posterior',
                 parent_conditions = parent_conditions, evidence_conditions =
                 evidence_conditions)
             vector_mean = posterior_samples.mean(axis=0).cpu()
@@ -393,10 +393,11 @@ class SNPE_A:
                 {f"posterior_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
             )
 
-        samples = self._aux_sample(num_samples, mode = 'proposal', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
+        samples, logprob = self._aux_sample(num_samples, mode = 'proposal', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
         log({
             "proposal_mean": samples.mean().item(),
             "proposal_std": samples.std().item(),
+            "proposal_logprob": logprob.mean().item(),
             })
         vector_mean = samples.mean(axis=0).cpu()
         vector_std = samples.std(axis=0).cpu()
@@ -407,7 +408,7 @@ class SNPE_A:
             {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
         )
         samples = samples.numpy()
-        return RVBatch(samples)
+        return RVBatch(samples, logprob=logprob.numpy())
 
     def _aux_sample(self, num_samples, mode = None, parent_conditions=[], evidence_conditions=[]):
         """Sample from the proposal distribution given conditions."""
@@ -524,10 +525,12 @@ class SNPE_A:
         # samples by samples_proposals[idx[i], i, :] for i in range(num_samples)
 
         samples = samples_proposals[idx, torch.arange(num_samples), :]
+        samples = self.simulator_instance.forward(samples).to('cpu')
 
-        samples = self.simulator_instance.forward(samples)
+        # FIXME: For now always return log_prob under posterior
+        logprob = log_prob_post[idx, torch.arange(num_samples)].to('cpu')
 
-        return samples.to('cpu')
+        return samples, logprob.detach()
 
     def discardable(self, theta, parent_conditions=[], evidence_conditions=[]):
         inf_conditions = parent_conditions + evidence_conditions
