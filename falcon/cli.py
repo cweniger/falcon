@@ -94,7 +94,7 @@ def launch_mode(cfg: DictConfig) -> None:
             validation_window_size=cfg.buffer.validation_window_size,
             resample_batch_size=cfg.buffer.resample_batch_size,
             resample_interval=cfg.buffer.resample_interval,
-            resample_always=cfg.buffer.resample_always,
+            keep_resampling=cfg.buffer.keep_resampling,
             initial_samples_path=cfg.buffer.get("initial_samples_path", None)
             )
 
