@@ -161,8 +161,14 @@ class SNPE_A:
         self._best_traindist = None
         self._best_embedding = None
 
+        # History of training/validation IDs
         self._train_id_history = []
         self._validation_id_history = []
+
+        # Pausing and termination events
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()   # initially running (interted logic)
+        self._terminated = False
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
@@ -314,6 +320,7 @@ class SNPE_A:
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
+                await self._pause_event.wait()   # pauses here if pause() called
 
             #loss_train_avg /= num_samples
             #loss_aux_avg /= num_samples
@@ -348,6 +355,7 @@ class SNPE_A:
                 #val_posterior_loss_avg += posterior_loss.sum().item()
                 #val_traindist_loss_avg += traindist_loss.sum().item()
                 await asyncio.sleep(0)
+                await self._pause_event.wait()   # pauses here if pause() called
 
             val_posterior_loss /= num_val_samples
             val_traindist_loss /= num_val_samples
@@ -383,6 +391,10 @@ class SNPE_A:
 
             if epochs_no_improve >= self.early_stop_patience:
                 print("Early stopping triggered.")
+                break
+
+            await self._pause_event.wait()   # pauses here if pause() called
+            if self._terminated:
                 break
         
         # Training complete - best-fit networks are already updated via checkpoints
@@ -594,3 +606,13 @@ class SNPE_A:
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             embedding_state = torch.load(node_dir / "embedding.pth")
             self._best_embedding.load_state_dict(embedding_state)
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def interrupt(self):
+        self._terminated = True
+        self._pause_event.set()   # unblock if currently paused

@@ -224,6 +224,18 @@ class NodeWrapper:
             node_dir.mkdir(parents=True, exist_ok=True)
             return self.estimator_instance.load(node_dir)
 
+    def pause(self):
+        if hasattr(self.estimator_instance, 'pause'):
+            return self.estimator_instance.pause()
+
+    def resume(self):
+        if hasattr(self.estimator_instance, 'resume'):
+            return self.estimator_instance.resume()
+        
+    def interrupt(self):
+        if hasattr(self.estimator_instance, 'interrupt'):
+            return self.estimator_instance.interrupt()
+
 
 class DeployedGraph:
     def __init__(self, graph, model_path=None):
@@ -369,7 +381,7 @@ class DeployedGraph:
 #                break
 
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
-        time.sleep(60) # Wait sixty seconds before starting resampling
+        #time.sleep(60) # Wait sixty seconds before starting resampling
 
         while train_future_list:
             ready, train_future_list = ray.wait(train_future_list, num_returns=len(train_future_list), timeout=1)
@@ -378,6 +390,7 @@ class DeployedGraph:
             #generate_new_samples = not all(active[-num_sims:])  # Check if any of the last n_train samples are invalid
             time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
+            self.pause()
             while num_new_samples > 0:
                 #print("Remaining new samples to generate:", num_new_samples)
                 this_n = min(num_new_samples, 512)
@@ -388,6 +401,7 @@ class DeployedGraph:
                 new_samples = self.sample(this_n, conditions = new_samples)
                 ray.get(dataset_manager.append.remote(new_samples))
                 num_new_samples -= this_n
+            self.resume()
             
             for completed_task in ready:
                 result = ray.get(completed_task)  # Retrieve the result or raise an exception
@@ -430,3 +444,27 @@ class DeployedGraph:
             load_future = node.load.remote(node_dir)
             load_futures.append(load_future)
         ray.get(load_futures)
+
+    def pause(self):
+        """Pause all nodes in the deployed graph."""
+        pause_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            pause_future = node.pause.remote()
+            pause_futures.append(pause_future)
+        ray.get(pause_futures)
+
+    def resume(self):
+        """Resume all nodes in the deployed graph."""
+        resume_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            resume_future = node.resume.remote()
+            resume_futures.append(resume_future)
+        ray.get(resume_futures)
+
+    def interrupt(self):
+        """Interrupt all nodes in the deployed graph."""
+        interrupt_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            interrupt_future = node.interrupt.remote()
+            interrupt_futures.append(interrupt_future)
+        ray.get(interrupt_futures)
