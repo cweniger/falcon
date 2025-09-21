@@ -35,11 +35,13 @@ class DatasetManagerActor:
                  resample_batch_size = 256,
                  resample_interval = 5,
                  initial_samples_path = None,
+                 resample_always = True,
                  ):
         self.max_training_samples = max_training_samples
         self.min_training_samples = min_training_samples
         self.validation_window_size = validation_window_size
         self.resample_batch_size = resample_batch_size
+        self.resample_always = resample_always
         self.resample_interval = resample_interval
         self.initial_samples_path = initial_samples_path
 
@@ -61,7 +63,11 @@ class DatasetManagerActor:
         return self.min_training_samples + self.validation_window_size
 
     def num_resims(self):
-        return self.resample_batch_size
+        if self.resample_always:
+            return self.resample_batch_size
+        else:
+            num_train_samples = sum(self.status == SampleStatus.TRAINING)
+            return min(self.resample_batch_size, self.max_training_samples - num_train_samples)
 
     def get_resample_interval(self):
         return self.resample_interval
@@ -211,7 +217,7 @@ class DatasetView(IterableDataset):
 
 def get_ray_dataset_manager(min_training_samples=None,
         max_training_samples=None, validation_window_size=None, resample_batch_size=64,
-        resample_interval=5, initial_samples_path=None
+        resample_interval=5, initial_samples_path=None, resample_always=True,
         ):
     dataset_manager_actor = DatasetManagerActor.remote(
             min_training_samples=min_training_samples,
@@ -219,6 +225,7 @@ def get_ray_dataset_manager(min_training_samples=None,
             validation_window_size=validation_window_size,
             resample_batch_size=resample_batch_size,
             resample_interval=resample_interval,
+            resample_always=resample_always,
             initial_samples_path=initial_samples_path,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)
