@@ -5,6 +5,7 @@ import torch
 import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import time
 
 import sbi.utils  # Don't remove this import, it is needed for sbi.neural_nets.net_builders
 from sbi.neural_nets import net_builders
@@ -160,6 +161,9 @@ class SNPE_A:
         self._best_traindist = None
         self._best_embedding = None
 
+        self._train_id_history = []
+        self._validation_id_history = []
+
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
         inf_conditions = conditions
@@ -270,7 +274,9 @@ class SNPE_A:
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
                 n_train_batch += 1
-                _, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ids, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ts = time.time()
+                self._train_id_history.extend((ts, id) for id in ids.numpy().tolist())
                 log({"theta_logprob_min": theta_logprob.min().item()})
                 log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
@@ -319,7 +325,9 @@ class SNPE_A:
             for batch in dataloader_val:
                 log({"n_val_batch": n_val_batch})
                 n_val_batch += 1
-                _, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ids, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ts = time.time()
+                self._validation_id_history.extend((ts, id) for id in ids.numpy().tolist())
                 log({"theta_logprob_min": theta_logprob.min().item()})
                 log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
@@ -562,7 +570,9 @@ class SNPE_A:
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
         torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
-        
+        torch.save(self._train_id_history, node_dir / "train_id_history.pth")
+        torch.save(self._validation_id_history, node_dir / "validation_id_history.pth")
+
         # Save best-fit embedding networks if they exist
         if self._best_embedding is not None:
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
