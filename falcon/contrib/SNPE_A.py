@@ -559,6 +559,8 @@ class SNPE_A:
         return samples, logprob.detach()
 
     def discardable(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
+        if self.discard_samples is False:
+            return torch.zeros(len(theta), dtype=torch.bool)
         inf_conditions = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
         inf_conditions = [c.to(self.device) for c in inf_conditions]
