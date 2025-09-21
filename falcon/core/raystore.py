@@ -17,10 +17,14 @@ class DatasetManager:
         ray.get(self.dataset_manager_actor.initialize_samples.remote(deployed_graph))
 
 class SampleStatus(IntEnum):
-    VALIDATION = 0
-    TRAINING = 1
-    TOMBSTONE = 2
-    DELETED = 3
+    # Live samples (used for validation/training)
+    VALIDATION  = 0  # New samples for validation
+    TRAINING    = 1  # Older samples for training
+    DISFAVOURED = 2  # Can be moved to tombstone
+
+    # Dead samples (will not be used anymore)
+    TOMBSTONE =   3  # Marked for deletion when no longer referenced by any actor
+    DELETED =     4  # Permanently deleted
 
 @ray.remote(name='DatasetManager')
 class DatasetManagerActor:
@@ -62,39 +66,40 @@ class DatasetManagerActor:
     def get_resample_interval(self):
         return self.resample_interval
 
-#    def get_active_ids(self):
-#        # Only return the last num_min_sims active IDs
-#        return np.where(self.status >= SampleStatus.TRAINING)[0]
-
-#    @property
-#    def training_ids(self):
-#        return np.where(self.status == SampleStatus.TRAINING)[0]
-#
-#    @property
-#    def validation_ids(self):
-#        return np.where(self.status == SampleStatus.VALIDATION)[0]
-#
-#    @property
-#    def tombstone_ids(self):
-#        return np.where(self.status == SampleStatus.TOMBSTONE)[0]
-
     def rotate_sample_buffer(self):
         """
-        Rotate samples through lifecycle: VAL -> TRAIN -> TOMBSTONE.
+        Rotate samples through lifecycle: VAL -> TRAIN -> DISFAVOURED -> TOMBSTONE.
         
         Keeps most recent samples for validation, older samples for training,
-        and marks oldest samples as tombstones for deletion.
+        and marks oldest samples as disfavoured and then tombstone for deletion.
         """
-        # Get all samples that are not expired yet
-        live_ids = np.where(self.status < SampleStatus.TOMBSTONE)[0]
+        # 1) Maximum number of VALIDATION samples should be validation_window_size
+        #    Move excess validation samples to training
+        ids_validation = np.where(self.status == SampleStatus.VALIDATION)[0]
+        num_val_samples = len(ids_validation)
+        if num_val_samples > self.validation_window_size:
+            ids_to_train = ids_validation[:-self.validation_window_size]
+            self.status[ids_to_train] = SampleStatus.TRAINING
 
-        # Release older samples for training
-        validation_ids = live_ids[:-self.validation_window_size]
-        self.status[validation_ids] = SampleStatus.TRAINING
+        # 2) Minimum number of TRAINING+DISFAVOURED samples should be min_training_samples
+        #    Move excess disfavoured samples to tombstone
+        ids_disfavoured = np.where(self.status == SampleStatus.DISFAVOURED)[0]
+        num_train_samples = sum(self.status == SampleStatus.TRAINING)
+        num_disfavoured_samples = len(ids_disfavoured)
+        num_disfavoured_samples_to_keep = max(0, self.min_training_samples - num_train_samples)
+        if num_disfavoured_samples_to_keep == 0:
+            self.status[ids_disfavoured] = SampleStatus.TOMBSTONE
+        elif num_disfavoured_samples > num_disfavoured_samples_to_keep:
+            ids_to_tombstone = ids_disfavoured[:-num_disfavoured_samples_to_keep]
+            self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-        # Set earliest samples to tombstone
-        tombstone_ids = live_ids[:-self.validation_window_size - self.max_training_samples]
-        self.status[tombstone_ids] = SampleStatus.TOMBSTONE
+        # 3) Maximum number of TRAINING samples is max_training_samples
+        #    Move excess training samples to tombstone
+        ids_training = np.where(self.status == SampleStatus.TRAINING)[0]
+        num_train_samples = len(ids_training)
+        if num_train_samples > self.max_training_samples:
+            ids_to_tombstone = ids_training[:-self.max_training_samples]
+            self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
     def get_num_resims(self):
         return self.num_resims
@@ -110,7 +115,7 @@ class DatasetManagerActor:
 
     def deactivate(self, ids):
         #print("Deactivating samples:", ids)
-        self.status[ids] = SampleStatus.TOMBSTONE
+        self.status[ids] = SampleStatus.DISFAVOURED
 
     def append(self, data, batched=True):
         if batched:  # TODO: Legacy structure
@@ -131,6 +136,7 @@ class DatasetManagerActor:
         log({"Dataset:total_length": len(self.ray_store)})
         log({"Dataset:validation": sum(self.status == SampleStatus.VALIDATION)})
         log({"Dataset:training": sum(self.status == SampleStatus.TRAINING)})
+        log({"Dataset:disfavoured": sum(self.status == SampleStatus.DISFAVOURED)})
         log({"Dataset:tombstone": sum(self.status == SampleStatus.TOMBSTONE)})
         log({"Dataset:deleted": sum(self.status == SampleStatus.DELETED)})
 
