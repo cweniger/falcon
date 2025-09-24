@@ -18,12 +18,12 @@ paths:
 
 # Training buffer parameters
 buffer:
-  min_training_samples: 8192
-  max_training_samples: 8192
+  min_training_samples: 8000
+  max_training_samples: 32000
   validation_window_size: 256
-  resample_batch_size: 8192
+  resample_batch_size: 8000
   keep_resampling: true
-  resample_interval: 60
+  resample_interval: 300
 
 # Graph definition using declarative YAML
 graph:
@@ -33,32 +33,32 @@ graph:
     simulator: 
       _target_: falcon.contrib.HypercubeMappingPrior
       priors: 
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
     estimator:
       _target_: falcon.contrib.SNPE_A
       embedding:
          _target_: model.E
          _input_: [x, m, n]
-      discard_samples: true
+      discard_samples: false
       net_type: nsf #zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5
       num_epochs: 300

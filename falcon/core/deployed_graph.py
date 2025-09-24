@@ -10,37 +10,37 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
-from .utils import LazyLoader
+from .utils import LazyLoader, as_rvbatch
 
-class OnlineEvidenceFilter:
-    def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
-        self.offline_evidence = offline_evidence
-        self.resample_subgraph = resample_subgraph
-        self.evidence = evidence
-        self.graph = graph
-
-        # Instantiate online nodes
-        self.online_nodes = {}
-        for k in self.resample_subgraph:
-            self.online_nodes[k] = graph.get_simulate_cls(k)(**graph.node_dict[k].simulate_config)
-
-    def __call__(self, values):
-        # Associate inputs with keywords
-        values_dict = {k: v for k, v in zip(self.offline_evidence, values[1:])}
-        
-        # Run through online nodes and add to values_dict
-        for k, v in self.online_nodes.items():
-            conditions = [values_dict[parent] for parent in self.graph.get_parents(k)]
-            # Turn conditions into tensors and add a single batch dimension
-            conditions = [torch.tensor(c).unsqueeze(0) for c in conditions]
-            sample = v.sample(1, parent_conditions=conditions)
-            # Remove batch dimension and turn into numpy
-            sample = sample.squeeze(0).numpy()
-            values_dict[k] = sample
-
-        # Return projection of values_dict to evidence
-        output = values[:1] + [values_dict[k] for k in self.evidence]
-        return output
+#class OnlineEvidenceFilter:
+#    def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
+#        self.offline_evidence = offline_evidence
+#        self.resample_subgraph = resample_subgraph
+#        self.evidence = evidence
+#        self.graph = graph
+#
+#        # Instantiate online nodes
+#        self.online_nodes = {}
+#        for k in self.resample_subgraph:
+#            self.online_nodes[k] = graph.get_simulate_cls(k)(**graph.node_dict[k].simulate_config)
+#
+#    def __call__(self, values):
+#        # Associate inputs with keywords
+#        values_dict = {k: v for k, v in zip(self.offline_evidence, values[1:])}
+#        
+#        # Run through online nodes and add to values_dict
+#        for k, v in self.online_nodes.items():
+#            conditions = [values_dict[parent] for parent in self.graph.get_parents(k)]
+#            # Turn conditions into tensors and add a single batch dimension
+#            conditions = [torch.tensor(c).unsqueeze(0) for c in conditions]
+#            sample = v.sample(1, parent_conditions=conditions)
+#            # Remove batch dimension and turn into numpy
+#            sample = sample.squeeze(0).numpy()
+#            values_dict[k] = sample
+#
+#        # Return projection of values_dict to evidence
+#        output = values[:1] + [values_dict[k] for k in self.evidence]
+#        return output
 
 @ray.remote
 class MultiplexNodeWrapper:
@@ -118,8 +118,8 @@ class NodeWrapper:
         self.evidence = node.evidence
         self.scaffolds = node.scaffolds
         self.name = node.name
-        self.offline_evidence, self.resample_subgraph = graph.get_resample_parents_and_graph(
-            self.evidence + self.scaffolds)
+        #self.offline_evidence, self.resample_subgraph = graph.get_resample_parents_and_graph(
+        #    self.evidence + self.scaffolds)
         #print("Node:", self.name)
         #print("Offline evidence:", self.offline_evidence)
         #print("Resample subgraph:", self.resample_subgraph)
@@ -130,34 +130,31 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations = {}, num_trailing_samples = None):
         print("Training started for:", self.name)
-        keys_train = [self.name] + self.offline_evidence
-        keys_val = [self.name] + self.evidence + self.node.scaffolds
-        filter_train = OnlineEvidenceFilter(self.offline_evidence, self.resample_subgraph, self.evidence+self.scaffolds, self.graph)
-        #filter_val = OnlineEvidenceFilter(self.evidence, [], self.evidence, self.graph)
+        keys_train = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds 
+        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
 
         batch_size = self.node.estimator_config.get('batch_size', 128)
 
         dataset_train = ray.get(
-            dataset_manager.get_train_dataset_view.remote(keys_train, filter=filter_train))
+            dataset_manager.get_train_dataset_view.remote(keys_train, filter=None))
         dataset_val = ray.get(
             dataset_manager.get_val_dataset_view.remote(keys_val, filter=None))
         dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
         dataloader_val = DataLoader(dataset_val, batch_size=batch_size)
 
-#        def hook_fn(module, batch):
-#            id, theta, conditions = batch[0], batch[1], batch[2:]
-#            for i, k in enumerate(self.evidence):
-#                if k in observations.keys():
-#                    conditions[i] = observations[k]
-#            # Corresponding id
-#            mask = module.discardable(theta, conditions)
-#            ids = id[mask]
-#            ids = list(ids.numpy())
-#
-#            # Deactivate samples
-#            if dataset_manager is not None:
-#                dataset_manager.deactivate.remote(ids)
-        hook_fn = None
+        def hook_fn(module, batch):
+            ids, theta, theta_logprob, conditions = batch[0], batch[1], batch[2], batch[3:]
+            for i, k in enumerate(self.evidence):
+                if k in observations.keys():
+                    conditions[i] = observations[k]
+            # Corresponding id
+            mask = module.discardable(theta, theta_logprob, conditions)
+            ids = ids[mask]
+            ids = list(ids.numpy())
+
+            # Deactivate samples
+            dataset_manager.deactivate.remote(ids)
+#        hook_fn = None
 
         await self.estimator_instance.train(dataloader_train, dataloader_val, hook_fn=hook_fn)
         print("...training complete for:", self.name)
@@ -174,6 +171,10 @@ class NodeWrapper:
     def sample(self, n_samples, incoming = None):
 #        node_type = self.get_node_type()
 #        if node_type == 'stochastic':
+        if self.estimator_instance is not None:
+            samples = self.estimator_instance.prior_sample(n_samples, parent_conditions=incoming)
+            samples = as_rvbatch(samples)
+            return samples
         if hasattr(self.simulator_instance, 'simulate_batch'):
             return self.simulator_instance.simulate_batch(n_samples, *incoming)
         else:
@@ -190,11 +191,13 @@ class NodeWrapper:
     def conditioned_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
         samples = self.estimator_instance.conditioned_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
+        samples = as_rvbatch(samples)
         return samples
 
     def proposal_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
         samples = self.estimator_instance.proposal_sample(n_samples,
             parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
+        samples = as_rvbatch(samples)
         return samples
 
     def call_simulator_method(self, method_name, *args, **kwargs):
@@ -221,6 +224,18 @@ class NodeWrapper:
             node_dir.mkdir(parents=True, exist_ok=True)
             return self.estimator_instance.load(node_dir)
 
+    def pause(self):
+        if hasattr(self.estimator_instance, 'pause'):
+            return self.estimator_instance.pause()
+
+    def resume(self):
+        if hasattr(self.estimator_instance, 'resume'):
+            return self.estimator_instance.resume()
+        
+    def interrupt(self):
+        if hasattr(self.estimator_instance, 'interrupt'):
+            return self.estimator_instance.interrupt()
+
 
 class DeployedGraph:
     def __init__(self, graph, model_path=None):
@@ -242,68 +257,77 @@ class DeployedGraph:
     def sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_node_names
-        sample_dict = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in sample_dict.keys():
+            if name in trace.keys():
                 continue
-            incoming = [sample_dict[parent] for parent in self.graph.get_parents(name)]
-            sample_dict[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
-        
-        return sample_dict
+            incoming = [trace[parent] for parent in self.graph.get_parents(name)]
+            rvbatch = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
+            rvbatch = as_rvbatch(rvbatch)
+            trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
+        return trace
 
     def conditioned_sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
-        conditions = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in conditions.keys():
+            if name in trace.keys():
                 continue
             evidence_conditions = (
-                [conditions[parent] for parent in self.graph.get_evidence(name)]
+                [trace[parent] for parent in self.graph.get_evidence(name)]
             )
             parent_conditions = (
-                [conditions[parent] for parent in self.graph.get_parents(name)]
+                [trace[parent] for parent in self.graph.get_parents(name)]
             )
-            conditions[name] = ray.get(
+            rvbatch = ray.get(
                 self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples,
                 parent_conditions=parent_conditions, evidence_conditions=evidence_conditions)
                 )
+            trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples, incoming))
             #except AttributeError:
             #    print("WARNING: Using sample instead of conditioned_sample for:", name)
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
         
-        return conditions
+        return trace
 
     def proposal_sample(self, num_samples, conditions = {}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
-        conditions = conditions.copy()
+        trace = conditions.copy()
 
         # Process nodes in topological order
         for name in sorted_node_names:
-            if name in conditions.keys():
+            if name in trace.keys():
                 continue
             parent_conditions = (
-                [conditions[parent] for parent in self.graph.get_parents(name)]
+                [trace[parent] for parent in self.graph.get_parents(name)]
             )
             evidence_conditions = (
-                [conditions[parent] for parent in self.graph.get_evidence(name)]
+                [trace[parent] for parent in self.graph.get_evidence(name)]
             )
-            conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(
+            rvbatch = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(
                 num_samples, parent_conditions=parent_conditions, evidence_conditions=evidence_conditions))
+            trace[name] = rvbatch.value
+            if rvbatch.logprob is not None:
+                trace[f"{name}.logprob"] = rvbatch.logprob
             #try:
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(num_samples, incoming))
             #except AttributeError:
             #    print("WARNING: Using sample instead of conditioned_sample for:", name)
             #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
         
-        return conditions
+        return trace
 
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
@@ -357,6 +381,7 @@ class DeployedGraph:
 #                break
 
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
+        #time.sleep(60) # Wait sixty seconds before starting resampling
 
         while train_future_list:
             ready, train_future_list = ray.wait(train_future_list, num_returns=len(train_future_list), timeout=1)
@@ -365,6 +390,7 @@ class DeployedGraph:
             #generate_new_samples = not all(active[-num_sims:])  # Check if any of the last n_train samples are invalid
             time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
+            self.pause()
             while num_new_samples > 0:
                 #print("Remaining new samples to generate:", num_new_samples)
                 this_n = min(num_new_samples, 512)
@@ -375,6 +401,7 @@ class DeployedGraph:
                 new_samples = self.sample(this_n, conditions = new_samples)
                 ray.get(dataset_manager.append.remote(new_samples))
                 num_new_samples -= this_n
+            self.resume()
             
             for completed_task in ready:
                 result = ray.get(completed_task)  # Retrieve the result or raise an exception
@@ -417,3 +444,27 @@ class DeployedGraph:
             load_future = node.load.remote(node_dir)
             load_futures.append(load_future)
         ray.get(load_futures)
+
+    def pause(self):
+        """Pause all nodes in the deployed graph."""
+        pause_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            pause_future = node.pause.remote()
+            pause_futures.append(pause_future)
+        ray.get(pause_futures)
+
+    def resume(self):
+        """Resume all nodes in the deployed graph."""
+        resume_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            resume_future = node.resume.remote()
+            resume_futures.append(resume_future)
+        ray.get(resume_futures)
+
+    def interrupt(self):
+        """Interrupt all nodes in the deployed graph."""
+        interrupt_futures = []
+        for _, node in self.wrapped_nodes_dict.items():
+            interrupt_future = node.interrupt.remote()
+            interrupt_futures.append(interrupt_future)
+        ray.get(interrupt_futures)

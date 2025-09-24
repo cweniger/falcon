@@ -115,3 +115,5 @@ runs/
 
 # Data files
 #*.npz
+
+*.out

@@ -18,12 +18,12 @@ paths:
 
 # Training buffer parameters
 buffer:
-  min_training_samples: 8192
+  min_training_samples: 2048
   max_training_samples: 8192
   validation_window_size: 256
-  resample_batch_size: 8192
-  keep_resampling: true
-  resample_interval: 60
+  resample_batch_size: 512
+  keep_resampling: false
+  resample_interval: 15
 
 # Graph definition using declarative YAML
 graph:
@@ -33,26 +33,26 @@ graph:
     simulator: 
       _target_: falcon.contrib.HypercubeMappingPrior
       priors: 
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -10000.0, 10000.0]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
-        - ['uniform', -0.3, 0.3]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        - ['uniform', -10000.0, 10000.0]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
+        #- ['uniform', -0.3, 0.3]
     estimator:
       _target_: falcon.contrib.SNPE_A
       embedding:
@@ -98,5 +98,5 @@ sample:
     n: 1000
     path: samples_proposal.joblib
   posterior:
-    n: 10000
+    n: 2000
     path: samples_posterior.joblib

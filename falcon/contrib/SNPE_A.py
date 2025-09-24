@@ -5,12 +5,13 @@ import torch
 import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
+import time
 
 import sbi.utils  # Don't remove this import, it is needed for sbi.neural_nets.net_builders
 from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
-from falcon.core.utils import LazyLoader
+from falcon.core.utils import LazyLoader, RVBatch
 from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
@@ -113,6 +114,7 @@ class SNPE_A:
                  _embedding_keywords=[],
                  use_best_models_during_inference=True,
                  use_log_update=False,
+                 log_ratio_threshold=-20.,
                  ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -136,6 +138,7 @@ class SNPE_A:
         self.sample_reference_posterior = sample_reference_posterior
         self._use_best_models_during_inference = use_best_models_during_inference
         self._use_log_update = use_log_update
+        self.log_ratio_threshold = log_ratio_threshold
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
@@ -145,7 +148,6 @@ class SNPE_A:
         self.simulator_instance = simulator_instance
 
         # Runtime variables
-        self.log_ratio_threshold = -torch.inf  # Dynamic threshold for rejection sampling
         self.networks_initialized = False
         self.best_posterior_val_loss = float('inf')  # Best posterior validation loss
         self.best_traindist_val_loss = float('inf')  # Best traindist validation loss
@@ -158,6 +160,15 @@ class SNPE_A:
         self._best_posterior = None
         self._best_traindist = None
         self._best_embedding = None
+
+        # History of training/validation IDs
+        self._train_id_history = []
+        self._validation_id_history = []
+
+        # Pausing and termination events
+        self._pause_event = asyncio.Event()
+        self._pause_event.set()   # initially running (interted logic)
+        self._terminated = False
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
@@ -243,12 +254,13 @@ class SNPE_A:
         s = embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
         return s
 
-    def sample(self, num_samples, parent_conditions=[]):
+    def prior_sample(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
         assert parent_conditions == [], "Conditions are not supported."
-        samples = self.simulator_instance.sample(num_samples)
-        samples = samples.numpy()
-        return samples
+        samples = self.simulator_instance.simulate_batch(num_samples)
+        logprob_for_prior_samples = np.ones(num_samples)*(-np.log(4)**self.param_dim)  # Uniform prior on [-2, 2]^D
+        rvbatch = RVBatch(samples, logprob=logprob_for_prior_samples)
+        return rvbatch
 
     async def train(self, dataloader_train, dataloader_val, hook_fn=None):
         """Train the neural spline flow on the given data."""
@@ -268,7 +280,11 @@ class SNPE_A:
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
                 n_train_batch += 1
-                _, theta, inf_conditions = batch[0], batch[1], batch[2:]
+                ids, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ts = time.time()
+                self._train_id_history.extend((ts, id) for id in ids.numpy().tolist())
+                log({"theta_logprob_min": theta_logprob.min().item()})
+                log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
                     self._initialize_networks(u, inf_conditions)
@@ -304,6 +320,7 @@ class SNPE_A:
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
+                await self._pause_event.wait()   # pauses here if pause() called
 
             #loss_train_avg /= num_samples
             #loss_aux_avg /= num_samples
@@ -315,7 +332,11 @@ class SNPE_A:
             for batch in dataloader_val:
                 log({"n_val_batch": n_val_batch})
                 n_val_batch += 1
-                _, theta, inf_conditions = batch[0], batch[1], batch[2:]
+                ids, theta, theta_logprob, inf_conditions = batch[0], batch[1], batch[2], batch[3:]
+                ts = time.time()
+                self._validation_id_history.extend((ts, id) for id in ids.numpy().tolist())
+                log({"theta_logprob_min": theta_logprob.min().item()})
+                log({"theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=False)
@@ -334,6 +355,7 @@ class SNPE_A:
                 #val_posterior_loss_avg += posterior_loss.sum().item()
                 #val_traindist_loss_avg += traindist_loss.sum().item()
                 await asyncio.sleep(0)
+                await self._pause_event.wait()   # pauses here if pause() called
 
             val_posterior_loss /= num_val_samples
             val_traindist_loss /= num_val_samples
@@ -370,18 +392,22 @@ class SNPE_A:
             if epochs_no_improve >= self.early_stop_patience:
                 print("Early stopping triggered.")
                 break
+
+            await self._pause_event.wait()   # pauses here if pause() called
+            if self._terminated:
+                break
         
         # Training complete - best-fit networks are already updated via checkpoints
 
     def conditioned_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self._aux_sample(num_samples, mode = 'posterior', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
+        samples, logprob = self._aux_sample(num_samples, mode = 'posterior', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
         samples = samples.numpy()
-        return samples
+        return RVBatch(samples, logprob=logprob.numpy())
 
     def proposal_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
         # Sample from posterior and log values for reference
         if self.sample_reference_posterior:
-            posterior_samples = self._aux_sample(128, mode = 'posterior',
+            posterior_samples, _ = self._aux_sample(128, mode = 'posterior',
                 parent_conditions = parent_conditions, evidence_conditions =
                 evidence_conditions)
             vector_mean = posterior_samples.mean(axis=0).cpu()
@@ -393,10 +419,11 @@ class SNPE_A:
                 {f"posterior_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
             )
 
-        samples = self._aux_sample(num_samples, mode = 'proposal', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
+        samples, logprob = self._aux_sample(num_samples, mode = 'proposal', parent_conditions = parent_conditions, evidence_conditions = evidence_conditions)
         log({
             "proposal_mean": samples.mean().item(),
             "proposal_std": samples.std().item(),
+            "proposal_logprob": logprob.mean().item(),
             })
         vector_mean = samples.mean(axis=0).cpu()
         vector_std = samples.std(axis=0).cpu()
@@ -407,7 +434,7 @@ class SNPE_A:
             {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
         )
         samples = samples.numpy()
-        return samples
+        return RVBatch(samples, logprob=logprob.numpy())
 
     def _aux_sample(self, num_samples, mode = None, parent_conditions=[], evidence_conditions=[]):
         """Sample from the proposal distribution given conditions."""
@@ -524,43 +551,28 @@ class SNPE_A:
         # samples by samples_proposals[idx[i], i, :] for i in range(num_samples)
 
         samples = samples_proposals[idx, torch.arange(num_samples), :]
+        samples = self.simulator_instance.forward(samples).to('cpu')
 
-        samples = self.simulator_instance.forward(samples)
+        # FIXME: For now always return log_prob under posterior
+        logprob = log_prob_post[idx, torch.arange(num_samples)].to('cpu')
 
-        return samples.to('cpu')
+        return samples, logprob.detach()
 
-    def discardable(self, theta, parent_conditions=[], evidence_conditions=[]):
+    def discardable(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
+        if self.discard_samples is False:
+            return torch.zeros(len(theta), dtype=torch.bool)
         inf_conditions = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
         inf_conditions = [c.to(self.device) for c in inf_conditions]
         s = self._summary(inf_conditions, train=False, use_best_fit=True)
         u, s = self._align_singleton_batch_dims([u, s])
         u = u.to(self.device)
-        self._best_posterior.eval()
-        self._best_traindist.eval()
-        log_prob1 = self._best_posterior.log_prob(u.unsqueeze(0), s).squeeze(0).to('cpu')
-        log_prob2 = self._best_traindist.log_prob(u.unsqueeze(0), s*0).squeeze(0).to('cpu')
-        log_ratio = log_prob1 - 0*log_prob2  #  p(z|x)/p(z)
-
-        alpha = 0.99
-        eta = 1e-3
-        t = self.log_ratio_threshold
-        t += eta*(sum((log_ratio > t)*(log_ratio - t)*alpha) - 
-                  sum((log_ratio < t)*(t - log_ratio)*(1-alpha))
-                  )
-        offset = 0.5*3**2*self.param_dim
-        self.log_ratio_threshold = max(log_ratio.max().item()-offset, self.log_ratio_threshold)
-        
-        if self.discard_samples:
-            #mask = log_ratio < self.log_ratio_threshold
-            mask = log_ratio < torch.inf
-        else:
-            mask = torch.zeros_like(log_ratio).bool()
-        #print("rejection fraction:", mask.float().mean().item())
-        
-        return mask
-
-        # p(z|x)/p_tilde(z) = p(x|z)/p_tilde(x) > 1e-3**dim_params
+        posterior_net = self._posterior
+        posterior_net.eval()
+        log_prob = posterior_net.log_prob(u.unsqueeze(0), s).squeeze(0).to('cpu')
+        log_ratio = log_prob - theta_logprob
+        discard = log_ratio < self.log_ratio_threshold
+        return discard
 
     def save(self, node_dir: Path):
         # Save best-fit model states to files
@@ -572,7 +584,9 @@ class SNPE_A:
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
         torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
-        
+        torch.save(self._train_id_history, node_dir / "train_id_history.pth")
+        torch.save(self._validation_id_history, node_dir / "validation_id_history.pth")
+
         # Save best-fit embedding networks if they exist
         if self._best_embedding is not None:
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
@@ -594,3 +608,13 @@ class SNPE_A:
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             embedding_state = torch.load(node_dir / "embedding.pth")
             self._best_embedding.load_state_dict(embedding_state)
+
+    def pause(self):
+        self._pause_event.clear()
+
+    def resume(self):
+        self._pause_event.set()
+
+    def interrupt(self):
+        self._terminated = True
+        self._pause_event.set()   # unblock if currently paused
