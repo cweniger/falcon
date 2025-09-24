@@ -4,13 +4,14 @@ from falcon.core.logging import log
 from torch.nn.parameter import UninitializedParameter
 
 class LazyOnlineNorm(nn.Module):
-    def __init__(self, momentum=0.01, epsilon = 1e-20, log_prefix = None, monotonic_variance=True, use_log_update = False):
+    def __init__(self, momentum=0.01, epsilon = 1e-20, log_prefix = None, adaptive_momentum = False, monotonic_variance=True, use_log_update = False):
         super().__init__()
         self.momentum = momentum
         self.epsilon = epsilon
         self.log_prefix= log_prefix + ":" if log_prefix else ""
         self.monotonic_variance = monotonic_variance
         self.use_log_update = use_log_update
+        self.adaptive_momentum = adaptive_momentum
 
         self.register_buffer("running_mean", None)
         self.register_buffer("running_var", None)
@@ -31,9 +32,12 @@ class LazyOnlineNorm(nn.Module):
             batch_mean = x.mean(dim=0)  # Mean over batch dimension
             batch_var = ((x-self.running_mean)**2).mean(dim=0).detach()
 
-            threshold_ratio = 2
-            beta = 0.1
-            momentum_eff = self.momentum * torch.sigmoid(((self.running_var/batch_var)**0.5-threshold_ratio)/beta)
+            if self.adaptive_momentum:
+                threshold_ratio = 2
+                beta = 0.1
+                momentum_eff = self.momentum * torch.sigmoid(((self.running_var/batch_var)**0.5-threshold_ratio)/beta)
+            else:
+                momentum_eff = self.momentum
 
             # Update running statistics (match shape explicitly)
             self.running_mean = (1 - momentum_eff) * self.running_mean + momentum_eff * batch_mean

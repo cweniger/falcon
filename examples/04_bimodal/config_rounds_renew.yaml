@@ -71,7 +71,8 @@ graph:
       use_best_models_during_inference: true
       use_log_update: true
       theta_norm: true
-      norm_momentum: 0.01
+      adaptive_momentum: false
+      norm_momentum: 0.003
       #device: cuda
       log_ratio_threshold: -20
     ray:

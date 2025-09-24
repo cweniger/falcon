@@ -18,10 +18,10 @@ from .norms import LazyOnlineNorm
 import copy
 
 class Flow(torch.nn.Module):
-    def __init__(self, theta, s, theta_norm=False, log_prefix=None, norm_momentum = 3e-3, net_type = 'nsf', use_log_update = False):
+    def __init__(self, theta, s, theta_norm=False, log_prefix=None, norm_momentum = 3e-3, net_type = 'nsf', use_log_update = False, adaptive_momentum = False):
         super(Flow, self).__init__()
         self.log_prefix = log_prefix + ":" if log_prefix else ""
-        self.theta_norm = LazyOnlineNorm(momentum=norm_momentum, log_prefix=self.log_prefix+"OnlineNorm", use_log_update = use_log_update) if theta_norm else None
+        self.theta_norm = LazyOnlineNorm(momentum=norm_momentum, log_prefix=self.log_prefix+"OnlineNorm", use_log_update = use_log_update, adaptive_momentum = adaptive_momentum) if theta_norm else None
         if net_type == 'nsf':
             self.net = net_builders.build_nsf(theta.float(), s.float(), z_score_x=None, z_score_y=None)
         elif net_type == 'made':
@@ -114,6 +114,7 @@ class SNPE_A:
                  _embedding_keywords=[],
                  use_best_models_during_inference=True,
                  use_log_update=False,
+                 adaptive_momentum=False,
                  log_ratio_threshold=-20.,
                  ):
         # Configuration
@@ -134,6 +135,7 @@ class SNPE_A:
         self.lr = lr
         self.theta_norm = theta_norm
         self.norm_momentum = norm_momentum
+        self.adaptive_momentum = adaptive_momentum
         self.net_type = net_type
         self.sample_reference_posterior = sample_reference_posterior
         self._use_best_models_during_inference = use_best_models_during_inference
@@ -183,18 +185,20 @@ class SNPE_A:
         
         # Training networks
         self._posterior = Flow(theta, s, theta_norm = self.theta_norm, log_prefix = 'posterior', norm_momentum = self.norm_momentum, net_type=self.net_type,
-                               use_log_update=self._use_log_update)
+                               use_log_update=self._use_log_update, adaptive_momentum=self.adaptive_momentum)
         self._posterior.to(self.device)
         self._traindist = Flow(theta, s*0, theta_norm = self.theta_norm, log_prefix = 'traindist', norm_momentum = self.norm_momentum, net_type=self.net_type,
-                                use_log_update=self._use_log_update)
+                                use_log_update=self._use_log_update, adaptive_momentum=self.adaptive_momentum)
         self._traindist.to(self.device)
         
         # Best-fit networks (initialized as copies of training networks)
-        self._best_posterior = Flow(theta, s, theta_norm = self.theta_norm, log_prefix = 'best_posterior', norm_momentum = self.norm_momentum, net_type=self.net_type)
+        self._best_posterior = Flow(theta, s, theta_norm = self.theta_norm, log_prefix = 'best_posterior', norm_momentum = self.norm_momentum, net_type=self.net_type,
+                                     adaptive_momentum=self.adaptive_momentum)
         self._best_posterior.to(self.device)
         self._best_posterior.load_state_dict(self._posterior.state_dict())
         
-        self._best_traindist = Flow(theta, s*0, theta_norm = self.theta_norm, log_prefix = 'best_traindist', norm_momentum = self.norm_momentum, net_type=self.net_type)
+        self._best_traindist = Flow(theta, s*0, theta_norm = self.theta_norm, log_prefix = 'best_traindist', norm_momentum = self.norm_momentum, net_type=self.net_type,
+                                     adaptive_momentum=self.adaptive_momentum)
         self._best_traindist.to(self.device)
         self._best_traindist.load_state_dict(self._traindist.state_dict())
         
