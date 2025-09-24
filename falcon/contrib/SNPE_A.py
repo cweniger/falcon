@@ -423,8 +423,6 @@ class SNPE_A:
                 loss_train = torch.mean(losses_train)
 
                 log({"loss_train_posterior": loss_train.item()})
-                # log({"loss_train_posterior_min": losses_train.min().item()})
-                # log({"loss_train_posterior_max": losses_train.max().item()})
 
                 self._traindist.train()
                 losses_aux = self._traindist.loss(uc, sc.detach() * 0)
@@ -436,18 +434,11 @@ class SNPE_A:
                 loss_total.backward()
                 self._optimizer.step()
 
-                # num_samples += len(batch)
-                # loss_train_avg += loss_train.sum().item()
-                # loss_aux_avg += loss_aux.sum().item()
-
                 # Run hook and allow other tasks to run
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
-
-            # loss_train_avg /= num_samples
-            # loss_aux_avg /= num_samples
 
             # Validation loop
             val_posterior_loss = 0
@@ -483,8 +474,6 @@ class SNPE_A:
                 val_traindist_loss += torch.sum(traindist_losses).item()
 
                 num_val_samples += uc.shape[0]
-                # val_posterior_loss_avg += posterior_loss.sum().item()
-                # val_traindist_loss_avg += traindist_loss.sum().item()
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
 
@@ -665,28 +654,11 @@ class SNPE_A:
 
         if mode == "proposal":
             # Proposal samples, based on auxiliary distribution
-
-            # Option A
-            # log_weights = gamma/(1.+gamma)*log_prob_post - log_prob_dist - mask
-            # log_weights = gamma/(1.+gamma)*log_prob_post - log_prob_post - mask
             log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
-            # log_weights = (gamma-1)*log_prob_post - mask
-
-            # Option B
-            # log_weights = gamma*(log_prob_post-log_prob_dist) - log_prob_dist - mask
 
         elif mode == "posterior":
             # General posterior samples, based on auxiliary distribution alone
-
-            # Option A
-            # log_weights = log_prob_post - 2*log_prob_dist - mask
             log_weights = -gamma / (1 + gamma) * log_prob_post - mask
-
-            # Option B1
-            # log_weights = log_prob_post - gamma/(1.+gamma)*log_prob_post_x0 - log_prob_dist - mask
-
-            # Option B2
-            # log_weights = 1./(1.+gamma)*log_prob_post - log_prob_dist - mask
 
         elif mode == "prior":
             # Prior samples, based on auxiliary distribution

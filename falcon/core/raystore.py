@@ -177,7 +177,6 @@ class DatasetManagerActor:
         )[0]
 
         if len(unreferenced_tombstone_ids) > 0:
-            # print(f"Garbage collecting {len(unreferenced_tombstone_ids)} tombstones")
             for i in unreferenced_tombstone_ids:
                 ray.internal.free(list(self.ray_store[i].values()))
                 self.status[i] = SampleStatus.DELETED
@@ -212,7 +211,6 @@ class DatasetManagerActor:
 
     def shutdown(self):
         pass
-        # shutdown_global_logger()
 
 
 class DatasetView(IterableDataset):
@@ -230,7 +228,6 @@ class DatasetView(IterableDataset):
         perm = np.random.permutation(len(active_samples))
 
         log({"DatasetView:length": len(perm)})
-        # print("Starting iterating", len(perm))
 
         for i in perm:
             try:
@@ -242,7 +239,6 @@ class DatasetView(IterableDataset):
                 sample = self.filter(sample)
             index = active_ids[i]
             yield (index, *sample)
-        # print("Done iterating", len(perm))
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
 

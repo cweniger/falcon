@@ -75,14 +75,6 @@ class PCAProjector(torch.nn.Module):
             X: A batch of input data with shape (batch_size, D).
         """
         batch_size = X.shape[0]
-        # Move data to the specified device
-        # X = X.to(self.device)
-
-        #        if self.mean is None:
-        #            self.mean = X.mean(dim=0)
-        #        else:
-        #            batch_mean = X.mean(dim=0)
-        #            self.mean = (1 - self.momentum) * self.mean + self.momentum * batch_mean
 
         # Store in the buffer
         self.buffer.append(X)
@@ -154,8 +146,6 @@ class PCAProjector(torch.nn.Module):
             self.components = Vt[: self.n_components]
             # Blend the eigenvalues (variances) in a simpler linear way
             self.eigenvalues = (1 - alpha) * self.eigenvalues + alpha * Λ_new
-
-    # print(self.mean)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         """

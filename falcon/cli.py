@@ -84,10 +84,10 @@ def launch_mode(cfg: DictConfig) -> None:
     ### Run analysis ###
     ####################
 
-    # 0) Deploy graph
+    # 1) Deploy graph
     deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get("model_path"))
 
-    # 1) Prepare dataset manager for deployed graph and store initial samples
+    # 2) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
         min_training_samples=cfg.buffer.min_training_samples,
         max_training_samples=cfg.buffer.max_training_samples,
@@ -98,16 +98,9 @@ def launch_mode(cfg: DictConfig) -> None:
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
     )
 
-    # 2) Generate initial samples
-    #    dataset_manager.generate_samples(deployed_graph, num_sims = cfg.buffer.min_training_samples,
-    #                                     initial_samples_path=cfg.buffer.get("initial_samples_path", None))
-
     # 3) Launch training & simulations
     graph_path = Path(cfg.paths.graph)
-    # if graph_path.exists():
-    #    deployed_graph.load(graph_path)
     deployed_graph.launch(dataset_manager, observations, graph_path=graph_path)
-    # deployed_graph.save(graph_path)
 
     ##########################
     ### Clean up resources ###
@@ -152,11 +145,6 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     # Deploy graph for sampling
     deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get("model_path"))
 
-    # Load saved models if reload is enabled
-    #    graph_path = Path(cfg.paths.graph)
-    #    if graph_path.exists():
-    #        deployed_graph.load(graph_path)
-
     if sample_type == "prior":
         # Generate forward samples from prior
         samples = deployed_graph.sample(num_samples)
@@ -164,14 +152,12 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     elif sample_type == "posterior":
         # TODO: Implement posterior sampling (requires trained model and observations)
         deployed_graph.load(Path(cfg.paths.graph))
-        # observations = load_observations(cfg.observations)
         samples = deployed_graph.conditioned_sample(num_samples, observations)
 
     elif sample_type == "proposal":
         # Proposal sampling requires observations for conditioning
         # Load observations from config
         deployed_graph.load(Path(cfg.paths.graph))
-        # observations = load_observations(cfg.observations)
         samples = deployed_graph.proposal_sample(num_samples, observations)
 
     else:
@@ -213,7 +199,6 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
         os.makedirs(output_dir, exist_ok=True)
 
     print(f"Saving samples to: {output_path}")
-    # np.savez(output_path, **save_data)
     save_data_reversed = []
     num_samples = len(next(iter(save_data.values())))
     for i in range(num_samples):

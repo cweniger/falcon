@@ -33,13 +33,6 @@ class Node:
         """
         self.name = name
 
-        #        # Obtain class definitions by auto-importing modules (is here the right place?)
-        # Should go to wrapper
-        #        if isinstance(simulator_cls, str):
-        #            simulator_cls = LazyLoader(simulator_cls)
-        #        if isinstance(estimator_cls, str):
-        #            estimator_cls = LazyLoader(estimator_cls)
-
         self.simulator_cls = simulator_cls
         self.estimator_cls = estimator_cls
 

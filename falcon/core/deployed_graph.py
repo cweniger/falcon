@@ -12,36 +12,6 @@ from omegaconf import ListConfig
 from falcon.core.logging import initialize_logging_for
 from .utils import LazyLoader, as_rvbatch
 
-# class OnlineEvidenceFilter:
-#    def __init__(self, offline_evidence, resample_subgraph, evidence, graph):
-#        self.offline_evidence = offline_evidence
-#        self.resample_subgraph = resample_subgraph
-#        self.evidence = evidence
-#        self.graph = graph
-#
-#        # Instantiate online nodes
-#        self.online_nodes = {}
-#        for k in self.resample_subgraph:
-#            self.online_nodes[k] = graph.get_simulate_cls(k)(**graph.node_dict[k].simulate_config)
-#
-#    def __call__(self, values):
-#        # Associate inputs with keywords
-#        values_dict = {k: v for k, v in zip(self.offline_evidence, values[1:])}
-#
-#        # Run through online nodes and add to values_dict
-#        for k, v in self.online_nodes.items():
-#            conditions = [values_dict[parent] for parent in self.graph.get_parents(k)]
-#            # Turn conditions into tensors and add a single batch dimension
-#            conditions = [torch.tensor(c).unsqueeze(0) for c in conditions]
-#            sample = v.sample(1, parent_conditions=conditions)
-#            # Remove batch dimension and turn into numpy
-#            sample = sample.squeeze(0).numpy()
-#            values_dict[k] = sample
-#
-#        # Return projection of values_dict to evidence
-#        output = values[:1] + [values_dict[k] for k in self.evidence]
-#        return output
-
 
 @ray.remote
 class MultiplexNodeWrapper:
@@ -51,13 +21,8 @@ class MultiplexNodeWrapper:
             NodeWrapper.options(**actor_config).remote(node, graph, model_path)
             for _ in range(self.num_actors)
         ]
-        # self.num_actors = len(self.wrapped_node_list)
 
     def sample(self, n_samples, incoming=None):
-        # num_samples_per_node = n_samples // self.num_actors
-        # index_range_list = [(i*num_samples_per_node, (i+1)*num_samples_per_node) for i in range(self.num_actors)]
-        # index_range_list[-1] = (index_range_list[-1][0], n_samples)
-
         num_samples_per_node = n_samples / self.num_actors
         index_range_list = [
             (int(i * num_samples_per_node), int((i + 1) * num_samples_per_node))
@@ -95,10 +60,6 @@ class MultiplexNodeWrapper:
         pass  # Silently ignore, multiplexed nodes are never saved
 
 
-# This is a wrapper node that will be used to instantiate Module within ray actors
-# Nodes are passed to the init method
-
-
 @ray.remote
 class NodeWrapper:
     def __init__(self, node, graph, model_path=None):
@@ -130,11 +91,6 @@ class NodeWrapper:
         self.evidence = node.evidence
         self.scaffolds = node.scaffolds
         self.name = node.name
-        # self.offline_evidence, self.resample_subgraph = graph.get_resample_parents_and_graph(
-        #    self.evidence + self.scaffolds)
-        # print("Node:", self.name)
-        # print("Offline evidence:", self.offline_evidence)
-        # print("Resample subgraph:", self.resample_subgraph)
         self.graph = graph
 
         # Initialize and set global logger
@@ -183,18 +139,7 @@ class NodeWrapper:
         )
         print("...training complete for:", self.name)
 
-    #    def get_simulator_module(self):
-    #        return self.simulator_instance
-
-    #    def get_node_type(self):
-    #        if hasattr(self.simulator_instance, 'sample'):
-    #            return 'stochastic'
-    #        else:
-    #            return 'deterministic'
-
     def sample(self, n_samples, incoming=None):
-        #        node_type = self.get_node_type()
-        #        if node_type == 'stochastic':
         if self.estimator_instance is not None:
             samples = self.estimator_instance.prior_sample(
                 n_samples, parent_conditions=incoming
@@ -209,11 +154,6 @@ class NodeWrapper:
                 params = [v[i] for v in incoming]
                 samples.append(self.simulator_instance.simulate(*params))
             return np.stack(samples)
-
-    #        elif node_type == 'deterministic':
-    #            return self.module.compute(incoming)
-    #        else:
-    #            raise ValueError(f"Unknown node type: {node_type}")
 
     def conditioned_sample(
         self, n_samples, parent_conditions=[], evidence_conditions=[]
@@ -245,7 +185,6 @@ class NodeWrapper:
 
     def shutdown(self):
         pass
-        # shutdown_global_logger()  # Shutdown the global logger for this actor
 
     def save(self, node_dir):
         # Silently ignore if the module does not have a save method
@@ -343,11 +282,6 @@ class DeployedGraph:
             trace[name] = rvbatch.value
             if rvbatch.logprob is not None:
                 trace[f"{name}.logprob"] = rvbatch.logprob
-            # try:
-            #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].conditioned_sample.remote(num_samples, incoming))
-            # except AttributeError:
-            #    print("WARNING: Using sample instead of conditioned_sample for:", name)
-            #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
 
         return trace
 
@@ -376,11 +310,6 @@ class DeployedGraph:
             trace[name] = rvbatch.value
             if rvbatch.logprob is not None:
                 trace[f"{name}.logprob"] = rvbatch.logprob
-            # try:
-            #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].proposal_sample.remote(num_samples, incoming))
-            # except AttributeError:
-            #    print("WARNING: Using sample instead of conditioned_sample for:", name)
-            #    conditions[name] = ray.get(self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming))
 
         return trace
 
@@ -402,12 +331,6 @@ class DeployedGraph:
         # Initial data generation
         ray.get(dataset_manager.initialize_samples.remote(self))
 
-        # num_sims = ray.get(dataset_manager.get_num_min_sims.remote())
-        # samples = self.sample(num_sims)
-        # ray.get(dataset_manager.append.remote(samples))
-        # time.sleep(1)
-        # print("Initial number of simulations:", num_sims)
-
         # Training
         train_future_list = []
         for name, node in self.graph.node_dict.items():
@@ -419,23 +342,6 @@ class DeployedGraph:
                 train_future_list.append(train_future)
                 time.sleep(1)
 
-        # n_train = ray.get(dataset_manager.get_num_active.remote())  # Initial number of samples
-
-        #        while True:
-        #            ready, _ = ray.wait(train_future_list, num_returns=len(train_future_list), timeout=1)
-        #            num_active = ray.get(dataset_manager.get_num_active.remote())
-        #            num_new_samples = min(n_train - num_active, 128)
-        #            if num_new_samples > 0:
-        #                print("Generate new samples / num_active:", num_new_samples, num_active)
-        #                new_samples = self.proposal_sample(num_new_samples, observations)
-        #                for key in observations.keys():  # Remove observations from new samples
-        #                    del new_samples[key]
-        #                new_samples = self.sample(num_new_samples, conditions = new_samples)
-        #                ray.get(dataset_manager.append.remote(new_samples))
-        #            if len(ready) == len(train_future_list):
-        #                print("All training finished!")
-        #                break
-
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
         # time.sleep(60) # Wait sixty seconds before starting resampling
 
@@ -443,16 +349,11 @@ class DeployedGraph:
             ready, train_future_list = ray.wait(
                 train_future_list, num_returns=len(train_future_list), timeout=1
             )
-            # active = ray.get(dataset_manager.is_active.remote())
-            # FIX: Fix this to work adaptively again
-            # generate_new_samples = not all(active[-num_sims:])  # Check if any of the last n_train samples are invalid
             time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
             self.pause()
             while num_new_samples > 0:
-                # print("Remaining new samples to generate:", num_new_samples)
                 this_n = min(num_new_samples, 512)
-                # print("Generate new samples:", num_new_samples)
                 new_samples = self.proposal_sample(this_n, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]
@@ -465,14 +366,6 @@ class DeployedGraph:
                 result = ray.get(
                     completed_task
                 )  # Retrieve the result or raise an exception
-                # print(f"Result: {result}")
-                # try:
-                #    result = ray.get(completed_task)  # Retrieve the result or raise an exception
-                #    print(f"Result: {result}")
-                # except ray.exceptions.RayTaskError as e:
-                #    #print(f"Error from task: {e}")
-                #    ray.shutdown()
-                #    raise e # Re-raise the exception to propagate it
 
             # FIXME: Not optimal, should happen after specific time steps
             if graph_path is not None:
