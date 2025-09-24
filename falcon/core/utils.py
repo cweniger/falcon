@@ -3,6 +3,7 @@ import os
 import torch
 import numpy as np
 
+
 class RV:
     """
     Random Variable object that encapsulates:
@@ -12,16 +13,14 @@ class RV:
     """
 
     def __init__(self, value, logprob=None, name=None, meta=None):
-        self.value = value              # tensor, array, or dict of values
-        self.logprob = logprob          # scalar or dict of logprobs
-        self.name = name                # optional identifier
-        self.meta = meta or {}          # arbitrary metadata (dict)
+        self.value = value  # tensor, array, or dict of values
+        self.logprob = logprob  # scalar or dict of logprobs
+        self.name = name  # optional identifier
+        self.meta = meta or {}  # arbitrary metadata (dict)
 
     def __repr__(self):
         return (
-            f"RV(name={self.name}, "
-            f"value={self.value}, "
-            f"logprob={self.logprob})"
+            f"RV(name={self.name}, " f"value={self.value}, " f"logprob={self.logprob})"
         )
 
     def to_dict(self):
@@ -33,6 +32,7 @@ class RV:
             "meta": self.meta,
         }
 
+
 def as_rv(value, logprob=None, name=None, meta=None):
     """
     Ensure output is an RV. If already RV, return unchanged; otherwise wrap it.
@@ -40,6 +40,7 @@ def as_rv(value, logprob=None, name=None, meta=None):
     if isinstance(value, RV):
         return value
     return RV(value=value, logprob=logprob, name=name, meta=meta)
+
 
 class RVBatch:
     """
@@ -51,10 +52,12 @@ class RVBatch:
     """
 
     def __init__(self, value, logprob=None, names=None, meta=None):
-        self.value = value        # tensor/array or dict of tensors, shape [B, ...]
-        self.logprob = logprob    # tensor/array or dict aligned with value, shape [B, ...] or [B]
-        self.names = names        # optional sequence of length B
-        self.meta = meta or {}    # arbitrary metadata (dict)
+        self.value = value  # tensor/array or dict of tensors, shape [B, ...]
+        self.logprob = (
+            logprob  # tensor/array or dict aligned with value, shape [B, ...] or [B]
+        )
+        self.names = names  # optional sequence of length B
+        self.meta = meta or {}  # arbitrary metadata (dict)
 
         self.batch_size = self._infer_batch_size()
 
@@ -86,6 +89,7 @@ class RVBatch:
             "meta": self.meta,
         }
 
+
 def as_rvbatch(value, logprob=None, names=None, meta=None):
     """
     Ensure output is an RVBatch. If `value` is already an RVBatch,
@@ -95,7 +99,8 @@ def as_rvbatch(value, logprob=None, names=None, meta=None):
         return value
     return RVBatch(value=value, logprob=logprob, names=names, meta=meta)
 
-#class LazyLoaderOld:
+
+# class LazyLoaderOld:
 #    """This class is used to lazily load a class from a string path."""
 #    def __init__(self, class_path, *args, **kwargs):
 #        self.class_path = class_path
@@ -104,12 +109,12 @@ def as_rvbatch(value, logprob=None, names=None, meta=None):
 #
 #    def __getstate__(self):
 #        return {"class_path": self.class_path, "args": self.args, "kwargs": self.kwargs}
-#    
+#
 #    def __setstate__(self, state):
 #        self.class_path = state["class_path"]
 #        self.args = state["args"]
 #        self.kwargs = state["kwargs"]
-#    
+#
 #    def __call__(self, **kwargs):
 #        local_config = {**self.kwargs, **kwargs}
 #        module_name, class_name = self.class_path.rsplit(".", 1)
@@ -118,13 +123,15 @@ def as_rvbatch(value, logprob=None, names=None, meta=None):
 #        model_instance = model_class(*self.args, **local_config)
 #        return model_instance
 
+
 class LazyLoader:
     """This class is used to lazily load a class from a string path."""
+
     def __init__(self, class_path):
         self.class_path = class_path
-    
+
     def __call__(self, *args, **kwargs):
-        if isinstance(self.class_path , str):
+        if isinstance(self.class_path, str):
             module_name, class_name = self.class_path.rsplit(".", 1)
             module = importlib.import_module(module_name)
             model_class = getattr(module, class_name)
@@ -134,29 +141,28 @@ class LazyLoader:
         return model_instance
 
 
-
 def load_observations(config):
     """Load observations from NPZ file with optional batch indexing.
-    
+
     Args:
         config: Dict with 'path' (required) and 'index' (optional)
                 - {"path": "data/observations.npz"}
                 - {"path": "data/observations.npz", "index": 0}
                 - {"path": "data/observations.npz", "index": null}
-        
+
     Returns:
         dict: Dictionary of observations with node names as keys
     """
-    data_path = config['path']
-    index = config.get('index')
-    
+    data_path = config["path"]
+    index = config.get("index")
+
     if not os.path.exists(data_path):
         raise FileNotFoundError(f"Observation file not found: {data_path}")
-    
+
     # Load from NPZ file
     data = np.load(data_path)
     observations = {}
-    
+
     for key in data.files:
         array = data[key]
         if index is not None:
@@ -165,5 +171,5 @@ def load_observations(config):
         else:
             # Use arrays as-is
             observations[key] = torch.from_numpy(array)
-    
+
     return observations

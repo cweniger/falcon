@@ -8,35 +8,40 @@ from torch.utils.data import IterableDataset
 
 from falcon.core.logging import initialize_logging_for, log
 
+
 class DatasetManager:
     """Access the DatasetManagerActor without exposing the actor interface directly."""
+
     def __init__(self, dataset_manager_actor):
         self.dataset_manager_actor = dataset_manager_actor
 
     def initialize_samples(self, deployed_graph):
         ray.get(self.dataset_manager_actor.initialize_samples.remote(deployed_graph))
 
+
 class SampleStatus(IntEnum):
     # Live samples (used for validation/training)
-    VALIDATION  = 0  # New samples for validation
-    TRAINING    = 1  # Older samples for training
+    VALIDATION = 0  # New samples for validation
+    TRAINING = 1  # Older samples for training
     DISFAVOURED = 2  # Can be moved to tombstone
 
     # Dead samples (will not be used anymore)
-    TOMBSTONE =   3  # Marked for deletion when no longer referenced by any actor
-    DELETED =     4  # Permanently deleted
+    TOMBSTONE = 3  # Marked for deletion when no longer referenced by any actor
+    DELETED = 4  # Permanently deleted
 
-@ray.remote(name='DatasetManager')
+
+@ray.remote(name="DatasetManager")
 class DatasetManagerActor:
-    def __init__(self, 
-                 max_training_samples = None,   # TODO: Maximum number of simulations to store
-                 min_training_samples = None,   # TODO: Minimum number of simulations to train on
-                 validation_window_size = None,   # TODO: Number of sliding validation sims
-                 resample_batch_size = 256,
-                 resample_interval = 5,
-                 initial_samples_path = None,
-                 keep_resampling = True,
-                 ):
+    def __init__(
+        self,
+        max_training_samples=None,  # TODO: Maximum number of simulations to store
+        min_training_samples=None,  # TODO: Minimum number of simulations to train on
+        validation_window_size=None,  # TODO: Number of sliding validation sims
+        resample_batch_size=256,
+        resample_interval=5,
+        initial_samples_path=None,
+        keep_resampling=True,
+    ):
         self.max_training_samples = max_training_samples
         self.min_training_samples = min_training_samples
         self.validation_window_size = validation_window_size
@@ -67,7 +72,9 @@ class DatasetManagerActor:
             return self.resample_batch_size
         else:
             num_train_samples = sum(self.status == SampleStatus.TRAINING)
-            return min(self.resample_batch_size, self.max_training_samples - num_train_samples)
+            return min(
+                self.resample_batch_size, self.max_training_samples - num_train_samples
+            )
 
     def get_resample_interval(self):
         return self.resample_interval
@@ -75,7 +82,7 @@ class DatasetManagerActor:
     def rotate_sample_buffer(self):
         """
         Rotate samples through lifecycle: VAL -> TRAIN -> DISFAVOURED -> TOMBSTONE.
-        
+
         Keeps most recent samples for validation, older samples for training,
         and marks oldest samples as disfavoured and then tombstone for deletion.
         """
@@ -84,7 +91,7 @@ class DatasetManagerActor:
         ids_validation = np.where(self.status == SampleStatus.VALIDATION)[0]
         num_val_samples = len(ids_validation)
         if num_val_samples > self.validation_window_size:
-            ids_to_train = ids_validation[:-self.validation_window_size]
+            ids_to_train = ids_validation[: -self.validation_window_size]
             self.status[ids_to_train] = SampleStatus.TRAINING
 
         # 2) Minimum number of TRAINING+DISFAVOURED samples should be min_training_samples
@@ -92,7 +99,9 @@ class DatasetManagerActor:
         ids_disfavoured = np.where(self.status == SampleStatus.DISFAVOURED)[0]
         num_train_samples = sum(self.status == SampleStatus.TRAINING)
         num_disfavoured_samples = len(ids_disfavoured)
-        num_disfavoured_samples_to_keep = max(0, self.min_training_samples - num_train_samples)
+        num_disfavoured_samples_to_keep = max(
+            0, self.min_training_samples - num_train_samples
+        )
         if num_disfavoured_samples_to_keep == 0:
             self.status[ids_disfavoured] = SampleStatus.TOMBSTONE
         elif num_disfavoured_samples > num_disfavoured_samples_to_keep:
@@ -104,7 +113,7 @@ class DatasetManagerActor:
         ids_training = np.where(self.status == SampleStatus.TRAINING)[0]
         num_train_samples = len(ids_training)
         if num_train_samples > self.max_training_samples:
-            ids_to_tombstone = ids_training[:-self.max_training_samples]
+            ids_to_tombstone = ids_training[: -self.max_training_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
     def get_num_resims(self):
@@ -138,9 +147,13 @@ class DatasetManagerActor:
         else:  # TODO: Should become default
             num_new_samples = len(data)
             for sample in data:
-                sample_ray_objects = {key: ray.put(value) for key, value in sample.items()}
+                sample_ray_objects = {
+                    key: ray.put(value) for key, value in sample.items()
+                }
                 self.ray_store.append(sample_ray_objects)
-        self.status = np.append(self.status, np.full(num_new_samples, SampleStatus.VALIDATION))
+        self.status = np.append(
+            self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
+        )
         self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
 
         self.rotate_sample_buffer()
@@ -155,28 +168,33 @@ class DatasetManagerActor:
     def garbage_collect_tombstones(self):
         """
         Garbage collect tombstone samples with zero references.
-        
+
         Frees Ray objects and clears store entries for samples that are
         marked as tombstones and no longer referenced by any operations.
         """
         unreferenced_tombstone_ids = np.where(
             (self.status == SampleStatus.TOMBSTONE) & (self.ref_counts <= 0)
         )[0]
-        
+
         if len(unreferenced_tombstone_ids) > 0:
-            #print(f"Garbage collecting {len(unreferenced_tombstone_ids)} tombstones")
+            # print(f"Garbage collecting {len(unreferenced_tombstone_ids)} tombstones")
             for i in unreferenced_tombstone_ids:
                 ray.internal.free(list(self.ray_store[i].values()))
                 self.status[i] = SampleStatus.DELETED
                 self.ray_store[i] = None
 
     def get_train_dataset_view(self, keys, filter=None):
-        dataset_train = DatasetView(keys, filter=filter, sample_status=
-                                    [SampleStatus.TRAINING, SampleStatus.DISFAVOURED])
+        dataset_train = DatasetView(
+            keys,
+            filter=filter,
+            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
+        )
         return dataset_train
 
     def get_val_dataset_view(self, keys, filter=None):
-        dataset_val = DatasetView(keys, filter=filter, sample_status=SampleStatus.VALIDATION)
+        dataset_val = DatasetView(
+            keys, filter=filter, sample_status=SampleStatus.VALIDATION
+        )
         return dataset_val
 
     def initialize_samples(self, deployed_graph):
@@ -194,7 +212,7 @@ class DatasetManagerActor:
 
     def shutdown(self):
         pass
-        #shutdown_global_logger()
+        # shutdown_global_logger()
 
 
 class DatasetView(IterableDataset):
@@ -205,12 +223,14 @@ class DatasetView(IterableDataset):
         self.sample_status = sample_status
 
     def __iter__(self):
-        active_samples, active_ids = ray.get(self.dataset_manager.get_samples_by_status.remote(self.sample_status))
+        active_samples, active_ids = ray.get(
+            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
+        )
 
         perm = np.random.permutation(len(active_samples))
 
         log({"DatasetView:length": len(perm)})
-        #print("Starting iterating", len(perm))
+        # print("Starting iterating", len(perm))
 
         for i in perm:
             try:
@@ -222,22 +242,28 @@ class DatasetView(IterableDataset):
                 sample = self.filter(sample)
             index = active_ids[i]
             yield (index, *sample)
-        #print("Done iterating", len(perm))
+        # print("Done iterating", len(perm))
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
 
-def get_ray_dataset_manager(min_training_samples=None,
-        max_training_samples=None, validation_window_size=None, resample_batch_size=64,
-        resample_interval=5, initial_samples_path=None, keep_resampling=True,
-        ):
+
+def get_ray_dataset_manager(
+    min_training_samples=None,
+    max_training_samples=None,
+    validation_window_size=None,
+    resample_batch_size=64,
+    resample_interval=5,
+    initial_samples_path=None,
+    keep_resampling=True,
+):
     dataset_manager_actor = DatasetManagerActor.remote(
-            min_training_samples=min_training_samples,
-            max_training_samples=max_training_samples,
-            validation_window_size=validation_window_size,
-            resample_batch_size=resample_batch_size,
-            resample_interval=resample_interval,
-            keep_resampling=keep_resampling,
-            initial_samples_path=initial_samples_path,
+        min_training_samples=min_training_samples,
+        max_training_samples=max_training_samples,
+        validation_window_size=validation_window_size,
+        resample_batch_size=resample_batch_size,
+        resample_interval=resample_interval,
+        keep_resampling=keep_resampling,
+        initial_samples_path=initial_samples_path,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)
     return dataset_manager
