@@ -72,11 +72,27 @@ class LazyOnlineNorm(nn.Module):
 
             log(
                 {
-                    f"{self.log_prefix}running_mean": self.running_mean.mean().item(),
-                    f"{self.log_prefix}running_std": self.running_var.mean().item()
-                    ** 0.5,
-                    f"{self.log_prefix}batch_mean": batch_mean.mean().item(),
-                    f"{self.log_prefix}batch_std": batch_var.mean().item() ** 0.5,
+                    f"{self.log_prefix}running_mean_{i}": self.running_mean[i].item()
+                    for i in range(self.running_mean.shape[0])
+                }
+            )
+            log(
+                {
+                    f"{self.log_prefix}running_std_{i}": self.running_var[i].item()
+                    ** 0.5
+                    for i in range(self.running_var.shape[0])
+                }
+            )
+            log(
+                {
+                    f"{self.log_prefix}batch_mean_{i}": batch_mean[i].item()
+                    for i in range(batch_mean.shape[0])
+                }
+            )
+            log(
+                {
+                    f"{self.log_prefix}batch_std_{i}": batch_var[i].item() ** 0.5
+                    for i in range(batch_var.shape[0])
                 }
             )
 
