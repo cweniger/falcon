@@ -229,6 +229,188 @@ class HypercubeMappingPrior:
             + self.hypercube_range[0]
         )
         return self.forward(u).numpy()
+    
+    def log_prob(self, x):                  ### change 
+        """
+        计算目标分布参数 x 的对数概率密度。
+        
+        Args:
+            x (torch.Tensor): 形状为 (..., n_params) 的张量，表示目标分布中的参数值。
+        
+        Returns:
+            torch.Tensor: 形状为 (...) 的对数概率密度值。
+        """
+        log_probs = []
+        for i, prior in enumerate(self.priors):
+            dist_type = prior[0]
+            params = prior[1:]
+            x_i = x[..., i]
+
+            if dist_type == "uniform":
+                low, high = params
+                # 均匀分布: 在 [low, high] 内概率为 1/(high-low)
+                log_p = torch.where(
+                    (x_i >= low) & (x_i <= high),
+                    -torch.log(torch.tensor(high - low, dtype=x_i.dtype, device=x_i.device)),
+                    torch.tensor(-torch.inf, dtype=x_i.dtype, device=x_i.device)
+                )
+
+            elif dist_type == "cosine":
+                low, high = params
+                alpha = (x_i - low) / (high - low) * math.pi
+                # 概率密度公式: (π / (2*(high-low))) * sin(alpha)
+                log_p = torch.log(math.pi / (2 * (high - low))) + torch.log(torch.sin(alpha))
+                # 检查有效范围
+                valid = (x_i >= low) & (x_i <= high)
+                log_p = torch.where(valid, log_p, torch.tensor(-torch.inf, dtype=x_i.dtype, device=x_i.device))
+
+            elif dist_type == "sine":
+                low, high = params
+                alpha = (x_i - low) / (high - low) * math.pi
+                # 概率密度公式: (π / (2*(high-low))) * cos(alpha)
+                log_p = torch.log(math.pi / (2 * (high - low))) + torch.log(torch.cos(alpha))
+                valid = (x_i >= low) & (x_i <= high)
+                log_p = torch.where(valid, log_p, torch.tensor(-torch.inf, dtype=x_i.dtype, device=x_i.device))
+
+            elif dist_type == "uvol":
+                low, high = params
+                # 概率密度公式: (3x^2) / (high^3 - low^3)
+                log_p = torch.log(3 * x_i**2) - torch.log(high**3 - low**3)
+                valid = (x_i >= low) & (x_i <= high)
+                log_p = torch.where(valid, log_p, torch.tensor(-torch.inf, dtype=x_i.dtype, device=x_i.device))
+
+            elif dist_type == "normal":
+                mean, std = params
+                # 正态分布对数概率
+                log_p = -0.5 * ((x_i - mean) / std)**2 - torch.log(std) - 0.5 * math.log(2 * math.pi)
+
+            elif dist_type == "triangular":
+                a, c, b = params
+                valid = (x_i >= a) & (x_i <= b)
+                # 分段概率密度公式
+                term1 = torch.log(2) + torch.log(x_i - a) - torch.log((b - a) * (c - a))
+                term2 = torch.log(2) + torch.log(b - x_i) - torch.log((b - a) * (b - c))
+                log_p = torch.where(x_i < c, term1, term2)
+                log_p = torch.where(valid, log_p, torch.tensor(-torch.inf, dtype=x_i.dtype, device=x_i.device))
+
+            else:
+                raise ValueError(f"不支持的分布类型: {dist_type}")
+
+            log_probs.append(log_p)
+
+        # 各维度独立，对数概率相加
+        return torch.stack(log_probs, dim=-1).sum(dim=-1)
+
+
+    @staticmethod
+    def _log_abs_det_jac_single_u(u, dist_type, *params, eps=1e-8):
+        """
+        返回单维在 u∈(0,1) 的 log|dx/du|，不含从 u_raw 到 u 的 1/4 因子。
+        注意：这里的 u 是 [0,1] 的，而不是 [-2,2] 的 u_raw。
+        """
+        if dist_type == "uniform":
+            low, high = params
+            # x = low + (high-low)*u
+            # dx/du = (high-low)
+            return torch.log(torch.tensor(high - low, dtype=u.dtype, device=u.device))
+
+        elif dist_type == "cosine":
+            low, high = params
+            # x = low + (acos(1-2u)/pi)*(high-low)
+            # dx/du = (high-low)/(pi*sqrt(u*(1-u)))
+            uu = u.clamp(eps, 1.0 - eps)
+            return (torch.log(torch.tensor(high - low, dtype=u.dtype, device=u.device))
+                    - math.log(math.pi)
+                    - 0.5 * (torch.log(uu) + torch.log(1.0 - uu)))
+
+        elif dist_type == "sine":
+            low, high = params
+            # x = low + (asin(2u-1)+pi/2)*(high-low)/pi
+            # dx/du = (high-low)/(pi*sqrt(u*(1-u)))
+            uu = u.clamp(eps, 1.0 - eps)
+            return (torch.log(torch.tensor(high - low, dtype=u.dtype, device=u.device))
+                    - math.log(math.pi)
+                    - 0.5 * (torch.log(uu) + torch.log(1.0 - uu)))
+
+        elif dist_type == "uvol":
+            low, high = params
+            # x = (A u + B)^(1/3), A=high^3-low^3, B=low^3
+            # dx/du = A / (3 x^2)
+            A = (high**3 - low**3)
+            # 用 forward 的 x 以免重复算
+            # 但这里没有 x，外层会传进来；所以此函数只负责公式部件，外层提供 x
+            raise RuntimeError("uvol 的单维雅可比在外层使用 x 计算，见下方 log_prob_u 实现。")
+
+        elif dist_type == "normal":
+            mean, std = params
+            # x = mean + std * sqrt(2) * erfinv(2u-1)
+            # 设 y = erfinv(2u-1)，dy/du = sqrt(pi)*exp(y^2)
+            # dx/du = std*sqrt(2)*sqrt(pi)*exp(y^2) = std*sqrt(2π) * exp(y^2)
+            uu = u.clamp(eps, 1.0 - eps)
+            y = torch.erfinv(2*uu - 1)
+            return (math.log(std) + 0.5*math.log(2*math.pi) + (y**2))
+
+        elif dist_type == "triangular":
+            a, c, b = params
+            # threshold
+            t = (c - a) / (b - a)
+            uu = u.clamp(eps, 1.0 - eps)
+            # 下支：x = a + sqrt(u*(b-a)*(c-a)) => dx/du = 0.5*sqrt((b-a)*(c-a))/sqrt(u)
+            # 上支：x = b - sqrt((1-u)*(b-a)*(b-c)) => dx/du = 0.5*sqrt((b-a)*(b-c))/sqrt(1-u)
+            left = 0.5*math.sqrt((b-a)*(c-a)) - 0.5*torch.log(uu)  # 先写错了？我们直接写 log 形式
+            # 直接写 log|dx/du|
+            log_dx_left  = math.log(0.5) + 0.5*math.log((b-a)*(c-a)) - 0.5*torch.log(uu)
+            log_dx_right = math.log(0.5) + 0.5*math.log((b-a)*(b-c)) - 0.5*torch.log(1.0 - uu)
+            return torch.where(uu < t, log_dx_left, log_dx_right)
+
+        else:
+            raise ValueError(f"Unknown dist_type: {dist_type}")
+
+    def log_prob_u(self, u_raw, eps=1e-8):
+        """
+        接受 u_raw ∈ [-2,2]（最后一维是参数维度）的张量，返回 u-space 的 log p(u_raw)。
+        计算：log p_x(x) + ∑_i [ log|dx_i/du_i| - log 4 ]。
+        其中 u = (u_raw+2)/4，x = forward(u_raw) 已含 u_raw→u→x 变换。
+        """
+        # 1) 先把 u_raw 映到 u ∈ (0,1)
+        a, b = self.hypercube_range
+        assert a < b
+        width = (b - a)  # 这里通常是 4
+        u = (u_raw - a) / width
+        u = u.clamp(eps, 1.0 - eps)
+
+        # 2) 得到 x（真实参数空间）
+        x = self.forward(u_raw)  # 你已有的 forward 会自己做 (u_raw->u->x)
+
+        # 3) 先算 x-space 的 log p(x)
+        log_px = self.log_prob(x)  # 你已有的 log_prob(x) 在 x-space
+
+        # 4) 逐维加上 log|dx/du_raw| = log|dx/du| - log(width)
+        #    width = 4（若 hypercube_range=[-2,2]）
+        per_dim_logs = []
+        for i, prior in enumerate(self.priors):
+            dist_type = prior[0]
+            params = prior[1:]
+            u_i = u[..., i]
+            x_i = x[..., i]   # 有些分布（uvol）更方便用 x_i
+
+            if dist_type == "uvol":
+                # dx/du = A/(3 x^2), 其中 A=high^3-low^3
+                low, high = params
+                A = (high**3 - low**3)
+                # x_i 可能为 0，做个 clamp
+                xi2 = (x_i**2).clamp(min=eps)
+                log_dx_du = torch.log(torch.tensor(abs(A)/3.0, dtype=u.dtype, device=u.device)) - torch.log(xi2)
+            else:
+                log_dx_du = self._log_abs_det_jac_single_u(u_i, dist_type, *params, eps=eps)
+
+            # 减去 log(width)
+            per_dim_logs.append(log_dx_du - math.log(width))
+
+        log_det = torch.stack(per_dim_logs, dim=-1).sum(dim=-1)
+
+        # 5) 合成 u-space 的 log-prior
+        return log_px + log_det
 
 
 # ==================== Example Usage ==================== #
