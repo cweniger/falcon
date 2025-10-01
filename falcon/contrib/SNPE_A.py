@@ -188,6 +188,7 @@ class SNPE_A:
         use_log_update=False,
         adaptive_momentum=False,
         log_ratio_threshold=-20.0,
+        reset_network_after_pause=False,
     ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -213,6 +214,7 @@ class SNPE_A:
         self._use_best_models_during_inference = use_best_models_during_inference
         self._use_log_update = use_log_update
         self.log_ratio_threshold = log_ratio_threshold
+        self.reset_network_after_pause = reset_network_after_pause
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
@@ -756,7 +758,9 @@ class SNPE_A:
     def pause(self):
         self._pause_event.clear()
 
-    def resume(self):
+    def resume(self, reset_network = False):
+        if self.reset_network_after_pause:
+            self.networks_initialized = False
         self._pause_event.set()
 
     def interrupt(self):

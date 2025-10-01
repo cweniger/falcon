@@ -75,6 +75,7 @@ graph:
       norm_momentum: 0.003
       #device: cuda
       log_ratio_threshold: -20
+      reset_network_after_pause: true
     ray:
       num_gpus: 1
   
