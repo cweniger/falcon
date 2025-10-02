@@ -90,7 +90,7 @@ graph:
     parents: [m, n]
     simulator: model.Add
     #observed: "${hydra:runtime.cwd}/examples/04_bimodal/data/x_obs_10dim.npy"
-    observed: "data/x_obs_10dim_zeros.npy"
+    observed: "data/x_obs_10dim.npy"
 
 sample:
   prior:

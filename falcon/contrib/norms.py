@@ -29,8 +29,6 @@ class LazyOnlineNorm(nn.Module):
         self.initialized = False
 
     def forward(self, x):
-        if x.dim() == 3:
-            x = x.squeeze(0)
         if not self.initialized:
             # Initialize running statistics based on the first minibatch
             self.running_mean = x.mean(dim=0).detach()
