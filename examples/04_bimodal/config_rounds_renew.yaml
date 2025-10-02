@@ -63,7 +63,7 @@ graph:
       gamma: 0.5
       num_epochs: 300
       batch_size: 128
-      lr: 0.01
+      lr: 0.003
       early_stop_patience: 32
       lr_decay_factor: 0.5
       scheduler_patience: 16
@@ -72,10 +72,10 @@ graph:
       use_log_update: true
       theta_norm: true
       adaptive_momentum: false
-      norm_momentum: 0.003
+      norm_momentum: 0.0005
       #device: cuda
       log_ratio_threshold: -20
-      reset_network_after_pause: true
+      reset_network_after_pause: false
     ray:
       num_gpus: 1
   
