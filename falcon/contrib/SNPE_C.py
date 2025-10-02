@@ -764,12 +764,14 @@ class SNPE_C:
 
         if mode == "proposal":
             # Proposal samples, based on auxiliary distribution
-            log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
+            #log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
+            log_weights = - (1.0 - gamma) * log_prob_post - mask
 
         elif mode == "posterior":
             # General posterior samples, based on auxiliary distribution alone
             # log_weights = -gamma / (1 + gamma) * log_prob_post - mask
-            log_weights = -log_prob_post - mask
+            #log_weights = -log_prob_post - mask
+            log_weights = -mask
             log({"log_prob_post_min": log_prob_post.min().item()})
             log({"log_prob_post_max": log_prob_post.max().item()})
 
