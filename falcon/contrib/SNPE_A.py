@@ -245,6 +245,7 @@ class SNPE_A:
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # initially running (interted logic)
         self._terminated = False
+        self._break_flag = False
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
@@ -441,6 +442,9 @@ class SNPE_A:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
+                if self._break_flag:
+                    self._break_flag = False
+                    break
 
             # Validation loop
             val_posterior_loss = 0
@@ -478,6 +482,9 @@ class SNPE_A:
                 num_val_samples += uc.shape[0]
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
+                if self._break_flag:
+                    self._break_flag = False
+                    break
 
             val_posterior_loss /= num_val_samples
             val_traindist_loss /= num_val_samples
@@ -761,6 +768,7 @@ class SNPE_A:
     def resume(self, reset_network = False):
         if self.reset_network_after_pause:
             self.networks_initialized = False
+            self._break_flag = True
         self._pause_event.set()
 
     def interrupt(self):
