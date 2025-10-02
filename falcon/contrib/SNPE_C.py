@@ -178,7 +178,8 @@ class Flow(torch.nn.Module):
         # 4. calculate loss
         log({"log_q - log_prior - log_Z": (log_q - log_prior - log_Z).mean().item()})
         # loss = -torch.mean(log_q - log_prior - log_Z.detach())
-        loss = -(log_q - log_prior - log_Z.detach())
+        #loss = -(log_q - log_prior - log_Z.detach())
+        loss = -(log_q - log_prior - log_Z)
         return loss, log_Z.detach()
 
     def sample(self, num_samples, s):
