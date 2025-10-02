@@ -655,6 +655,11 @@ class SNPE_A:
             samples_proposals, s
         )  # (num_proposals, num_samples)
 
+        traindist_net.eval()
+        log_prob_dist = traindist_net.log_prob(
+            samples_proposals, s * 0
+        )  # (num_proposals, num_samples)
+
         # Generate "mask" that equals one if samples are outside the [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
         mask = mask.any(dim=-1).float() * 100  # (num_proposals, num_samples)
@@ -667,7 +672,8 @@ class SNPE_A:
 
         elif mode == "posterior":
             # General posterior samples, based on auxiliary distribution alone
-            log_weights = -gamma / (1 + gamma) * log_prob_post - mask
+            #log_weights = -gamma / (1 + gamma) * log_prob_post - mask
+            log_weights = - log_prob_dist - mask
 
         elif mode == "prior":
             # Prior samples, based on auxiliary distribution
