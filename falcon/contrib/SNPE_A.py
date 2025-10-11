@@ -672,8 +672,8 @@ class SNPE_A:
 
         elif mode == "posterior":
             # General posterior samples, based on auxiliary distribution alone
-            #log_weights = -gamma / (1 + gamma) * log_prob_post - mask
-            log_weights = - log_prob_dist - mask
+            # log_weights = -gamma / (1 + gamma) * log_prob_post - mask
+            log_weights = -log_prob_dist - mask
 
         elif mode == "prior":
             # Prior samples, based on auxiliary distribution
@@ -771,7 +771,7 @@ class SNPE_A:
     def pause(self):
         self._pause_event.clear()
 
-    def resume(self, reset_network = False):
+    def resume(self, reset_network=False):
         if self.reset_network_after_pause:
             self.networks_initialized = False
             self._break_flag = True

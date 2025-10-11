@@ -14,8 +14,8 @@ setup(
         "omegaconf",
     ],
     entry_points={
-        'console_scripts': [
-            'falcon=falcon.cli:main',
+        "console_scripts": [
+            "falcon=falcon.cli:main",
         ],
     },
 )

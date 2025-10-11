@@ -239,7 +239,7 @@ class HypercubeMappingPrior:
         # 1) 先把 u_raw 映到 u ∈ (0,1)
         a, b = self.hypercube_range
         assert a < b
-        width = (b - a)  # 这里通常是 4
+        width = b - a  # 这里通常是 4
         u = (u_raw - a) / width
         u = u.clamp(eps, 1.0 - eps)
 
@@ -256,17 +256,21 @@ class HypercubeMappingPrior:
             dist_type = prior[0]
             params = prior[1:]
             u_i = u[..., i]
-            x_i = x[..., i]   # 有些分布（uvol）更方便用 x_i
+            x_i = x[..., i]  # 有些分布（uvol）更方便用 x_i
 
             if dist_type == "uvol":
                 # dx/du = A/(3 x^2), 其中 A=high^3-low^3
                 low, high = params
-                A = (high**3 - low**3)
+                A = high**3 - low**3
                 # x_i 可能为 0，做个 clamp
                 xi2 = (x_i**2).clamp(min=eps)
-                log_dx_du = torch.log(torch.tensor(abs(A)/3.0, dtype=u.dtype, device=u.device)) - torch.log(xi2)
+                log_dx_du = torch.log(
+                    torch.tensor(abs(A) / 3.0, dtype=u.dtype, device=u.device)
+                ) - torch.log(xi2)
             else:
-                log_dx_du = self._log_abs_det_jac_single_u(u_i, dist_type, *params, eps=eps)
+                log_dx_du = self._log_abs_det_jac_single_u(
+                    u_i, dist_type, *params, eps=eps
+                )
 
             # 减去 log(width)
             per_dim_logs.append(log_dx_du - math.log(width))
