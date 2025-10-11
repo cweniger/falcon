@@ -16,7 +16,7 @@ from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
 import copy
-
+import os
 
 class Flow(torch.nn.Module):
     def __init__(
@@ -139,6 +139,48 @@ class Flow(torch.nn.Module):
             volume = self.theta_norm.volume()
             loss = loss + torch.log(volume)
         return loss
+    
+    def loss_new(self, theta, s, prior, theta_atoms):
+        """
+        theta: parameter sample (batch_size, theta_dim)
+        s: conditional variable (batch_size, cond_dim)
+        current_proposal: current proposal distribution
+                """
+        # 1. calculate log_q(θ|s)
+        log_q = self.log_prob(theta.unsqueeze(0).float(), s.float()).squeeze(0) # (batch_size,)
+        log({'log_q_mean': log_q.mean().item()})
+        # print('log_q', log_q.shape)
+        
+        # # 2. calculate log(proposal(θ)/p(θ))
+        log_prior = prior.log_prob_u(theta)
+        log({'log_prior_mean': log_prior.mean().item()})
+        # print('log_prior', log_prior.shape)
+
+        # # 3. calculate Z from log_q(θ_atoms|s_atoms) and log(proposal(θ_atoms)/p(θ_atoms)) 
+        K, d_theta = theta_atoms.shape
+        B, d_s = s.shape
+        theta_atoms_expanded = theta_atoms.unsqueeze(0).expand(B, K, d_theta)  # theta_atoms: (512, 10) -> (1, 512, 10) -> (128, 512, 10)
+        s_expanded = s.unsqueeze(1).expand(B, K, d_s) # s: (128, 20) -> (128, 1, 20) -> (128, 512, 20)
+        # with self.theta_norm.frozen(), torch.no_grad():
+        # log_q_atoms = self.net.log_prob(theta_atoms_expanded.reshape(-1, d_theta).unsqueeze(0).float(), s_expanded.reshape(-1, d_s).float())
+        log_q_atoms = self.log_prob(theta_atoms_expanded.reshape(-1, d_theta).unsqueeze(0).float(), s_expanded.reshape(-1, d_s).float())
+        log_q_atoms = log_q_atoms.reshape(B, K)  # (128, 512)
+
+        log_p_atoms = prior.log_prob_u(theta_atoms.unsqueeze(0).expand(B, K, d_theta).reshape(-1, d_theta)) # (B*K,)
+        log_p_atoms = log_p_atoms.reshape(B, K) # (128, 512)
+        diff = log_q_atoms - log_p_atoms  # (B, K)
+        # C = 50  # Clamping value
+        # center = diff.mean(dim=1, keepdim=True)
+        # diff = (diff - center).clamp(min=-C, max=C) + center
+        log_Z = torch.logsumexp(diff, dim=1) #- np.log(K)  # (B,)
+        log({"log_Z_mean": log_Z.mean().item()})
+
+        # 4. calculate loss
+        log({"log_q - log_prior - log_Z": (log_q - log_prior - log_Z).mean().item()})
+        # loss = -torch.mean(log_q - log_prior - log_Z.detach())
+        #loss = -(log_q - log_prior - log_Z.detach())
+        loss = -(log_q - log_prior - log_Z)
+        return loss, log_Z.detach()
 
     def sample(self, num_samples, s):
         # Return (num_samples, num_conditions, theta_dim) - standard pyro
@@ -154,6 +196,8 @@ class Flow(torch.nn.Module):
         # (num_proposals, num_conditions, theta_dim)
         if self.theta_norm is not None:
             theta = self.theta_norm(theta).detach()
+            if theta.dim() == 2:
+                theta = theta.unsqueeze(0)
         theta = theta * self.scale
         log_prob = self.net.log_prob(
             theta.float(), condition=s.float()
@@ -165,7 +209,7 @@ class Flow(torch.nn.Module):
         return log_prob
 
 
-class SNPE_A:
+class SNPE_C:
     def __init__(
         self,
         simulator_instance,
@@ -188,7 +232,6 @@ class SNPE_A:
         use_log_update=False,
         adaptive_momentum=False,
         log_ratio_threshold=-20.0,
-        reset_network_after_pause=False,
     ):
         # Configuration
         self.param_dim = simulator_instance.param_dim
@@ -214,7 +257,6 @@ class SNPE_A:
         self._use_best_models_during_inference = use_best_models_during_inference
         self._use_log_update = use_log_update
         self.log_ratio_threshold = log_ratio_threshold
-        self.reset_network_after_pause = reset_network_after_pause
 
         # New embedding instantiation
         self._embedding = instantiate_embedding(embedding).to(self.device)
@@ -245,7 +287,6 @@ class SNPE_A:
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # initially running (interted logic)
         self._terminated = False
-        self._break_flag = False
 
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
@@ -389,15 +430,29 @@ class SNPE_A:
         best_val_loss = float("inf")  # Best validation loss
         n_train_batch = 0
         n_val_batch = 0
+        train_log_probs_avg = 0
         counter_checkpoint_posterior = 0
         counter_checkpoint_traindist = 0
+
+        # --- Prepare to collect variables ---
+        self.epoch_list        = []
+        self.train_loss_post_history = []
+        self.train_loss_aux_history = []
+        self.val_loss_post_history = []
+        self.val_loss_aux_history = []
+        self.train_log_probs_history = []
+        self.val_log_probs_history = []
+
+        self.theta_mins_batches = []  # List of the minimum theta values ​​for each batch
+        self.theta_maxs_batches = []  # List of the maximum theta values ​​for each batch
+
         for epoch in range(self.num_epochs):
             print(f"⌛ Epoch {epoch+1}/{self.num_epochs}")
             log({"epoch": epoch + 1})
 
             # Training loop
-            # loss_aux_avg = 0
-            # loss_train_avg = 0
+            loss_aux_avg = 0
+            loss_train_avg = 0
             num_samples = 0
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
@@ -421,10 +476,21 @@ class SNPE_A:
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
-                self._posterior.train()
-                losses_train = self._posterior.loss(uc, sc)
-                loss_train = torch.mean(losses_train)
+                # Calculate the θ min/max of this batch and save it to a list
+                with torch.no_grad():
+                    theta_min = theta.min(dim=0).values.cpu().numpy()  # shape (D,)
+                    theta_max = theta.max(dim=0).values.cpu().numpy()  # shape (D,)
+                self.theta_mins_batches.append(theta_min)
+                self.theta_maxs_batches.append(theta_max)
 
+                self._posterior.train()
+                # losses_train = self._posterior.loss(uc, sc)
+                # loss_train = torch.mean(losses_train)
+                (losses, log_Z_batch) = self._posterior.loss_new(uc, sc, self.simulator_instance, uc)
+                loss_train = torch.mean(losses)
+                with torch.no_grad():
+                    log({"train_log_probs": torch.mean(self._posterior.loss(uc, sc)).item()})
+                    train_log_probs_avg += torch.mean(self._posterior.loss(uc, sc)).sum().item()
                 log({"loss_train_posterior": loss_train.item()})
 
                 self._traindist.train()
@@ -437,18 +503,24 @@ class SNPE_A:
                 loss_total.backward()
                 self._optimizer.step()
 
+                num_samples += 1
+                loss_train_avg += loss_train.sum().item()
+                loss_aux_avg += loss_aux.sum().item()
+
                 # Run hook and allow other tasks to run
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
-                if self._break_flag:
-                    self._break_flag = False
-                    break
+
+            loss_train_avg /= num_samples
+            loss_aux_avg /= num_samples
+            train_log_probs_avg /= num_samples
 
             # Validation loop
             val_posterior_loss = 0
             val_traindist_loss = 0
+            val_log_probs_avg = 0
             num_val_samples = 0
             for batch in dataloader_val:
                 log({"n_val_batch": n_val_batch})
@@ -472,8 +544,13 @@ class SNPE_A:
                 sc = s.to(self.device)
 
                 self._posterior.eval()
-                posterior_losses = self._posterior.loss(uc, sc)
+                # posterior_losses = self._posterior.loss(uc, sc)
+                # val_posterior_loss += torch.sum(posterior_losses).item()
+                (posterior_losses, val_log_Z_batch) = self._posterior.loss_new(uc, sc, self.simulator_instance, uc) 
                 val_posterior_loss += torch.sum(posterior_losses).item()
+                with torch.no_grad():
+                    log({"val_log_probs": torch.mean(self._posterior.loss(uc, sc)).item()})
+                    val_log_probs_avg += torch.sum(self._posterior.loss(uc, sc)).item()
 
                 self._traindist.eval()
                 traindist_losses = self._traindist.loss(uc, sc * 0)
@@ -482,19 +559,17 @@ class SNPE_A:
                 num_val_samples += uc.shape[0]
                 await asyncio.sleep(0)
                 await self._pause_event.wait()  # pauses here if pause() called
-                if self._break_flag:
-                    self._break_flag = False
-                    break
 
             val_posterior_loss /= num_val_samples
             val_traindist_loss /= num_val_samples
+            val_log_probs_avg /= num_val_samples
 
             log({"loss_val_posterior": val_posterior_loss})
             log({"loss_val_traindist": val_traindist_loss})
 
             # Check and save best checkpoints independently
-            if val_posterior_loss < self.best_posterior_val_loss:
-                self.best_posterior_val_loss = val_posterior_loss
+            if val_log_probs_avg < self.best_posterior_val_loss:
+                self.best_posterior_val_loss = val_log_probs_avg
                 self._save_posterior_checkpoint()
                 log({"counter_checkpoint_posterior": counter_checkpoint_posterior})
                 counter_checkpoint_posterior += 1
@@ -512,11 +587,20 @@ class SNPE_A:
             log({"lr": lr_current})
 
             # Early Stopping based on posterior validation loss
-            if val_posterior_loss < best_val_loss:
-                best_val_loss = val_posterior_loss
+            if val_log_probs_avg < best_val_loss:
+                best_val_loss = val_log_probs_avg
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
+
+            # Record the data for this epoch for saving data
+            self.epoch_list.append(epoch + 1)
+            self.train_loss_post_history.append(loss_train_avg)     # posterior train loss
+            self.train_loss_aux_history.append(loss_aux_avg)        # traindist train loss
+            self.val_loss_post_history.append(val_posterior_loss)         # posterior val loss
+            self.val_loss_aux_history.append(val_traindist_loss)      # traindist val loss
+            self.train_log_probs_history.append(train_log_probs_avg)
+            self.val_log_probs_history.append(val_log_probs_avg)
 
             if epochs_no_improve >= self.early_stop_patience:
                 print("Early stopping triggered.")
@@ -527,6 +611,24 @@ class SNPE_A:
                 break
 
         # Training complete - best-fit networks are already updated via checkpoints
+
+        # ✅Save the data required to draw the training and validation losses, and θ min/max statistics
+        save_dir = 'plot_data'
+        os.makedirs(save_dir, exist_ok=True)
+        save_path = os.path.join(save_dir, f'SNPE_C_multimodel_training_loss_and_theta_stats_[-10k,10k]_{self.gamma}.npz')
+
+        np.savez_compressed(
+            save_path,
+            epochs        = np.array(self.epoch_list),           # (E,)
+            loss_train_avg_back= np.array(self.train_loss_post_history),      # (E,)
+            loss_train_avg= np.array(self.train_log_probs_history), # (E,)
+            loss_val_avg_back  = np.array(self.val_loss_post_history),        # (E,)
+            loss_val_avg = np.array(self.val_log_probs_history),  # (E,)       # (E,)
+            theta_mins    = np.vstack(self.theta_mins_batches),  # (B, D)
+            theta_maxs    = np.vstack(self.theta_maxs_batches)   # (B, D)
+        )
+
+        print(f"Saved all metrics and θ-stats to '{save_path}'.")
 
     def conditioned_sample(
         self, num_samples, parent_conditions=[], evidence_conditions=[]
@@ -546,7 +648,7 @@ class SNPE_A:
         # Sample from posterior and log values for reference
         if self.sample_reference_posterior:
             posterior_samples, _ = self._aux_sample(
-                128,
+                num_samples,
                 mode="posterior",
                 parent_conditions=parent_conditions,
                 evidence_conditions=evidence_conditions,
@@ -655,11 +757,6 @@ class SNPE_A:
             samples_proposals, s
         )  # (num_proposals, num_samples)
 
-        traindist_net.eval()
-        log_prob_dist = traindist_net.log_prob(
-            samples_proposals, s * 0
-        )  # (num_proposals, num_samples)
-
         # Generate "mask" that equals one if samples are outside the [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
         mask = mask.any(dim=-1).float() * 100  # (num_proposals, num_samples)
@@ -668,12 +765,16 @@ class SNPE_A:
 
         if mode == "proposal":
             # Proposal samples, based on auxiliary distribution
-            log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
+            #log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
+            log_weights = - (1.0 - gamma) * log_prob_post - mask
 
         elif mode == "posterior":
             # General posterior samples, based on auxiliary distribution alone
-            #log_weights = -gamma / (1 + gamma) * log_prob_post - mask
-            log_weights = - log_prob_dist - mask
+            # log_weights = -gamma / (1 + gamma) * log_prob_post - mask
+            #log_weights = -log_prob_post - mask
+            log_weights = -mask
+            log({"log_prob_post_min": log_prob_post.min().item()})
+            log({"log_prob_post_max": log_prob_post.max().item()})
 
         elif mode == "prior":
             # Prior samples, based on auxiliary distribution
@@ -771,10 +872,7 @@ class SNPE_A:
     def pause(self):
         self._pause_event.clear()
 
-    def resume(self, reset_network = False):
-        if self.reset_network_after_pause:
-            self.networks_initialized = False
-            self._break_flag = True
+    def resume(self):
         self._pause_event.set()
 
     def interrupt(self):

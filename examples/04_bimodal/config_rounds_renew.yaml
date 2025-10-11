@@ -23,7 +23,7 @@ buffer:
   validation_window_size: 256
   resample_batch_size: 8000
   keep_resampling: true
-  resample_interval: 300
+  resample_interval: 600
 
 # Graph definition using declarative YAML
 graph:
@@ -61,9 +61,9 @@ graph:
       discard_samples: false
       net_type: nsf #zuko_gf # maf, nice, sospf, naf, gf
       gamma: 0.5
-      num_epochs: 300
+      num_epochs: 600
       batch_size: 128
-      lr: 0.01
+      lr: 0.006
       early_stop_patience: 32
       lr_decay_factor: 0.5
       scheduler_patience: 16
@@ -72,9 +72,10 @@ graph:
       use_log_update: true
       theta_norm: true
       adaptive_momentum: false
-      norm_momentum: 0.003
+      norm_momentum: 0.002
       #device: cuda
       log_ratio_threshold: -20
+      reset_network_after_pause: false
     ray:
       num_gpus: 1
   
@@ -89,7 +90,7 @@ graph:
     parents: [m, n]
     simulator: model.Add
     #observed: "${hydra:runtime.cwd}/examples/04_bimodal/data/x_obs_10dim.npy"
-    observed: "data/x_obs_10dim_zeros.npy"
+    observed: "data/x_obs_10dim.npy"
 
 sample:
   prior:
