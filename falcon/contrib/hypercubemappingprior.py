@@ -230,56 +230,6 @@ class HypercubeMappingPrior:
         )
         return self.forward(u).numpy()
 
-    def log_prob_u(self, u_raw, eps=1e-8):
-        """
-        接受 u_raw ∈ [-2,2]（最后一维是参数维度）的张量，返回 u-space 的 log p(u_raw)。
-        计算：log p_x(x) + ∑_i [ log|dx_i/du_i| - log 4 ]。
-        其中 u = (u_raw+2)/4，x = forward(u_raw) 已含 u_raw→u→x 变换。
-        """
-        # 1) 先把 u_raw 映到 u ∈ (0,1)
-        a, b = self.hypercube_range
-        assert a < b
-        width = b - a  # 这里通常是 4
-        u = (u_raw - a) / width
-        u = u.clamp(eps, 1.0 - eps)
-
-        # 2) 得到 x（真实参数空间）
-        x = self.forward(u_raw)  # 你已有的 forward 会自己做 (u_raw->u->x)
-
-        # 3) 先算 x-space 的 log p(x)
-        log_px = self.log_prob(x)  # 你已有的 log_prob(x) 在 x-space
-
-        # 4) 逐维加上 log|dx/du_raw| = log|dx/du| - log(width)
-        #    width = 4（若 hypercube_range=[-2,2]）
-        per_dim_logs = []
-        for i, prior in enumerate(self.priors):
-            dist_type = prior[0]
-            params = prior[1:]
-            u_i = u[..., i]
-            x_i = x[..., i]  # 有些分布（uvol）更方便用 x_i
-
-            if dist_type == "uvol":
-                # dx/du = A/(3 x^2), 其中 A=high^3-low^3
-                low, high = params
-                A = high**3 - low**3
-                # x_i 可能为 0，做个 clamp
-                xi2 = (x_i**2).clamp(min=eps)
-                log_dx_du = torch.log(
-                    torch.tensor(abs(A) / 3.0, dtype=u.dtype, device=u.device)
-                ) - torch.log(xi2)
-            else:
-                log_dx_du = self._log_abs_det_jac_single_u(
-                    u_i, dist_type, *params, eps=eps
-                )
-
-            # 减去 log(width)
-            per_dim_logs.append(log_dx_du - math.log(width))
-
-        log_det = torch.stack(per_dim_logs, dim=-1).sum(dim=-1)
-
-        # 5) 合成 u-space 的 log-prior
-        return log_px + log_det
-
 
 # ==================== Example Usage ==================== #
 if __name__ == "__main__":
