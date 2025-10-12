@@ -51,11 +51,11 @@ def launch_mode(cfg: DictConfig) -> None:
     ray_init_args = cfg.get("ray", {}).get("init", {})
     ray.init(**ray_init_args)
 
-    # Add model path to Python path for imports
-    if cfg.model_path:
-        model_path = Path(cfg.model_path).resolve()
-        if model_path not in sys.path:
-            sys.path.insert(0, str(model_path))
+#    # Add model path to Python path for imports
+#    if cfg.model_path:
+#        model_path = Path(cfg.model_path).resolve()
+#        if model_path not in sys.path:
+#            sys.path.insert(0, str(model_path))
 
     # Initialise logger (should be done before any other falcon code)
     wandb_dir = cfg.logging.get("dir", None)
@@ -85,7 +85,7 @@ def launch_mode(cfg: DictConfig) -> None:
     ####################
 
     # 1) Deploy graph
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get("model_path"))
+    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
 
     # 2) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
@@ -115,11 +115,11 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     ray_init_args = cfg.get("ray", {}).get("init", {})
     ray.init(**ray_init_args)
 
-    # Add model path to Python path for imports
-    if cfg.model_path:
-        model_path = Path(cfg.model_path).resolve()
-        if model_path not in sys.path:
-            sys.path.insert(0, str(model_path))
+#    # Add model path to Python path for imports
+#    if cfg.model_path:
+#        model_path = Path(cfg.model_path).resolve()
+#        if model_path not in sys.path:
+#            sys.path.insert(0, str(model_path))
 
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
@@ -143,7 +143,7 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     print(graph)
 
     # Deploy graph for sampling
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.get("model_path"))
+    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
 
     if sample_type == "prior":
         # Generate forward samples from prior
