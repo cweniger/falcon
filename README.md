@@ -1,6 +1,6 @@
-# FALCON - Federated Adaptive Learning of CONditional distributions
+# 🪶 Falcon - Distributed Dynamic Simulation-Based Inference
 
-FALCON is a Python framework for **simulation-based inference (SBI)** that enables adaptive learning of complex conditional distributions. Built on top of PyTorch, Ray, and sbi, FALCON provides a declarative approach to building probabilistic models with automatic parallelization and experiment tracking.
+*Falcon* is a Python framework for **simulation-based inference (SBI)** that enables adaptive learning of complex conditional distributions. Built on top of PyTorch, Ray, and sbi, *Falcon* provides a declarative approach to building probabilistic models with automatic parallelization and experiment tracking.
 
 ## Key Features
 
@@ -32,7 +32,7 @@ pip install -e .
 
 ### Dependencies
 
-FALCON requires the following packages (automatically installed):
+*Falcon* requires the following packages (automatically installed):
 - `torch>=2.0.0` - Deep learning framework
 - `numpy` - Numerical computing
 - `ray` - Distributed computing
@@ -64,7 +64,7 @@ falcon/
 
 ## Configuration Structure
 
-FALCON uses Hydra/OmegaConf for configuration management. Each experiment is defined by a `config.yaml` file:
+*Falcon* uses Hydra/OmegaConf for configuration management. Each experiment is defined by a `config.yaml` file:
 
 ### Core Configuration Sections
 
@@ -140,7 +140,7 @@ sample:
 
 ## Usage
 
-FALCON provides a simple command-line interface for running experiments:
+*Falcon* provides a simple command-line interface for running experiments:
 
 ### Launch Training
 
@@ -295,7 +295,7 @@ falcon launch
 
 ### Multi-Node Graphs
 
-FALCON supports complex dependency graphs with multiple nodes:
+*Falcon* supports complex dependency graphs with multiple nodes:
 
 ```yaml
 graph:
@@ -362,7 +362,7 @@ graph:
 
 ### Weights & Biases Integration
 
-FALCON automatically logs training metrics to WandB:
+*Falcon* automatically logs training metrics to WandB:
 
 1. Set up WandB account: https://wandb.ai
 2. Configure project in `config.yaml`
@@ -376,7 +376,7 @@ Logged metrics include:
 
 ### Output Structure
 
-After training, FALCON creates:
+After training, *Falcon* creates:
 
 ```
 outputs/run_name/
@@ -407,11 +407,11 @@ outputs/run_name/
 
 ## Citation
 
-If you use FALCON in your research, please cite:
+If you use *Falcon* in your research, please cite:
 
 ```bibtex
 @software{falcon2024,
-  title = {FALCON: Federated Adaptive Learning of CONditional distributions},
+  title = {Falcon: Federated Adaptive Learning of CONditional distributions},
   year = {2024},
   url = {https://github.com/yourusername/falcon}
 }
