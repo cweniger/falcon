@@ -1,35 +1,28 @@
-# Model-specific configuration using _target_ pattern
-# PCA streaming example configuration
-
-# Set model path to current directory (for local model.py)
-model_path: "src"
-# model_path: "${hydra:runtime.cwd}/examples/04_bimodal/src"
-
 # WandB configuration
 logging:
-  project: falcon2_bimodal
-  group: new_run_1
+  project: falcon_examples
+  group: 02_bimodal_rounds_renew
   dir: ${hydra:run.dir}
 
 # Directory configuration (relative to Hydra output directory)
 paths:
+  import: "./src"
   buffer: ${hydra:run.dir}/sim_dir
   graph: ${hydra:run.dir}/graph_dir
 
 # Training buffer parameters
 buffer:
-  min_training_samples: 32000
-  max_training_samples: 32000
+  min_training_samples: 8000
+  max_training_samples: 8000
   validation_window_size: 256
-  resample_batch_size: 0
-  keep_resampling: false
-  resample_interval: 30
+  resample_batch_size: 8000
+  keep_resampling: true
+  resample_interval: 600
 
 # Graph definition using declarative YAML
 graph:
   z:
     evidence: [x]
-    scaffolds: [m, n]
     simulator: 
       _target_: falcon.contrib.HypercubeMappingPrior
       priors: 
@@ -43,27 +36,17 @@ graph:
         - ['uniform', -10000.0, 10000.0]
         - ['uniform', -10000.0, 10000.0]
         - ['uniform', -10000.0, 10000.0]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
-        #- ['uniform', -0.3, 0.3]
     estimator:
       _target_: falcon.contrib.SNPE_A
       embedding:
          _target_: model.E
-         _input_: [x, m, n]
+         _input_: [x]
       discard_samples: false
-      net_type: nsf #zuko_gf # maf, nice, sospf, naf, gf
+      net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
       gamma: 0.5
-      num_epochs: 300
+      num_epochs: 600
       batch_size: 128
-      lr: 0.01
+      lr: 0.006
       early_stop_patience: 32
       lr_decay_factor: 0.5
       scheduler_patience: 16
@@ -72,9 +55,9 @@ graph:
       use_log_update: true
       theta_norm: true
       adaptive_momentum: false
-      norm_momentum: 0.003
-      #device: cuda
+      norm_momentum: 0.002
       log_ratio_threshold: -20
+      reset_network_after_pause: false
     ray:
       num_gpus: 1
   
@@ -88,8 +71,7 @@ graph:
   x:
     parents: [m, n]
     simulator: model.Add
-    #observed: "${hydra:runtime.cwd}/examples/04_bimodal/data/x_obs_10dim.npy"
-    observed: "data/x_obs_10dim_zeros.npy"
+    observed: "./data/x_obs_10dim.npy"
 
 sample:
   prior:
@@ -99,5 +81,5 @@ sample:
     n: 1000
     path: samples_proposal.joblib
   posterior:
-    n: 10000
+    n: 1000
     path: samples_posterior.joblib
