@@ -1,73 +1,69 @@
-# Model-specific configuration using _target_ pattern
-# Updated to the new Falcon config schema
-
-# Set model path to current directory (for local model.py)
-model_path: "src"
-
-# Ray initialization parameters
-ray:
-  init:
-    address: null   # set to None for local single-node
+# WandB logging configuration
+logging:
+  project: falcon_examples
+  group: 01_minimal
+  dir: ${hydra:run.dir}
 
 # Directory configuration
 paths:
-  run_root: ${hydra:run.dir}
-  buffer: ${paths.run_root}/sim_dir         # same location as old 'sim_dir'
-  graph: ${paths.run_root}/graph_dir        # same location as old 'graph_dir'
+  import: "./src"
+  buffer: ${hydra:run.dir}/sim_dir
+  graph: ${hydra:run.dir}/graph_dir
 
-# WandB / logging configuration (renamed)
-logging:
-  project: falcon4
-  group: v2_frozen
-  dir: ${paths.run_root}
-
-# (Optional) Training buffer parameters — leave defaulted if unused in this example
+# Training buffer parameters
 buffer:
-  min_training_samples: 8192                # aligned with old n_train / num_initial_samples
-  max_training_samples: 8192
-  validation_window_size: 256               # old num_val_samples
-  resample_batch_size: 256                  # old num_resims
+  min_training_samples: 4096
+  max_training_samples: 32768
+  validation_window_size: 256
+  resample_batch_size: 128
+  keep_resampling: true
+  resample_interval: 10
 
 # Graph definition using declarative YAML
 graph:
   z:
     evidence: [x]
-    # No explicit parents (latent prior); scaffolds not used here
+
     simulator:
       _target_: falcon.contrib.HypercubeMappingPrior
       priors:
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
+
     estimator:
       _target_: falcon.contrib.SNPE_A
-      embedding:
-        _target_: model.E
-        _input_: [x]                        # equivalent to old 'embeddings: model.E'
-      num_epochs: 10                        # from training.max_epochs
-      #discard_samples: true                 # from old config
-      gamma: 0.5
-      lr_decay_factor: 0.1
-      lr: 0.01
+
+      net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
       theta_norm: true
-      norm_momentum: 0.001
-      early_stop_patience: 32
+      norm_momentum: 0.003
+
+      embedding:
+         _target_: model.E
+         _input_: [x]
+
+      num_epochs: 300
+      batch_size: 128
+      lr: 0.01
       scheduler_patience: 16
-      net_type: zuko_nice
+      lr_decay_factor: 0.5
+      early_stop_patience: 32
+
+      gamma: 0.5
+      discard_samples: false
+      log_ratio_threshold: -20
+
     ray:
-      num_gpus: 0.                           # from actor_config.num_gpus
+      num_gpus: 0
 
   x:
     parents: [z]
     simulator:
       _target_: model.Simulate
       npar: 3
-    observed: "data/obs_3.npy"  # from observations.path
-    # NOTE: old 'observations.index: null' = use full arrays; keep default behavior.
-    ray:
-      num_gpus: 0
+    observed: "./data/obs_3.npy"  
 
 sample:
   posterior:
-    n: 10000
+    n: 1000
     path: samples_posterior.joblib
