@@ -23,11 +23,11 @@
 
 ```bash
 # Clone the repository
-git clone https://github.com/yourusername/falcon.git
+git clone https://github.com/cweniger/falcon.git
 cd falcon
 
-# Install in development mode
-pip install -e .
+# Install
+pip install .
 ```
 
 ### Dependencies
