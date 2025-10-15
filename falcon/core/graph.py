@@ -2,10 +2,23 @@ from omegaconf import OmegaConf
 import numpy as np
 import os
 
+
 class Node:
-    def __init__(self, name, simulator_cls, estimator_cls = None, 
-                 parents=[], evidence=[], scaffolds=[], observed=False, resample=False,
-                 simulator_config={}, estimator_config = {}, actor_config={}, num_actors = 1):
+    def __init__(
+        self,
+        name,
+        simulator_cls,
+        estimator_cls=None,
+        parents=[],
+        evidence=[],
+        scaffolds=[],
+        observed=False,
+        resample=False,
+        simulator_config={},
+        estimator_config={},
+        actor_config={},
+        num_actors=1,
+    ):
         """Node definition for a graphical model.
 
         Args:
@@ -19,13 +32,6 @@ class Node:
             resample (bool): Whether to resample the node
         """
         self.name = name
-
-#        # Obtain class definitions by auto-importing modules (is here the right place?)
-# Should go to wrapper
-#        if isinstance(simulator_cls, str):
-#            simulator_cls = LazyLoader(simulator_cls)
-#        if isinstance(estimator_cls, str):
-#            estimator_cls = LazyLoader(estimator_cls)
 
         self.simulator_cls = simulator_cls
         self.estimator_cls = estimator_cls
@@ -53,16 +59,21 @@ class Graph:
         # Storing the model graph structure
         self.name_list = [node.name for node in node_list]
         self.parents_dict = {node.name: node.parents for node in node_list}
-        self.sorted_node_names = self._topological_sort(self.name_list, self.parents_dict)
+        self.sorted_node_names = self._topological_sort(
+            self.name_list, self.parents_dict
+        )
 
         # Storing the inference graph structure.
         # Only observed nodes or nodes with evidence are included in the inference graph.
         self.evidence_dict = {node.name: node.evidence for node in node_list}
         self.scaffolds_dict = {node.name: node.scaffolds for node in node_list}
         self.observed_dict = {node.name: node.observed for node in node_list}
-        self.inference_name_list = [node.name for node in node_list if node.observed or len(node.evidence) > 0]
+        self.inference_name_list = [
+            node.name for node in node_list if node.observed or len(node.evidence) > 0
+        ]
         self.sorted_inference_node_names = self._topological_sort(
-            self.inference_name_list, self.evidence_dict)
+            self.inference_name_list, self.evidence_dict
+        )
 
     def get_resample_parents_and_graph(self, evidence):
         evidence = evidence[:]  # Shallow copy
@@ -94,7 +105,7 @@ class Graph:
         """Topological sort, based on parent structure. Should raise an error if there is a cycle."""
         # Create a dictionary to track the number of parents (incoming edges) for each node
         num_parents = {node: 0 for node in name_list}
-        
+
         # Count the number of parents for each node (incoming edges)
         for node in name_list:
             for parent in parents_dict[node]:
@@ -106,7 +117,7 @@ class Graph:
 
         # List to hold the sorted nodes
         sorted_node_names = []
-        
+
         while no_parents:
             node = no_parents.pop()
             sorted_node_names.append(node)
@@ -140,11 +151,13 @@ class Graph:
         for node in self.sorted_node_names:
             parents = self.get_parents(node)
             simulator_cls = self.get_simulator_cls(node)
-            if hasattr(simulator_cls, 'display_name'):
+            if hasattr(simulator_cls, "display_name"):
                 class_name = simulator_cls.display_name
             else:
                 class_name = str(simulator_cls)
-            graph_str += f"* {node:<15} <- {', '.join(parents):<45} | {class_name:<20}\n"
+            graph_str += (
+                f"* {node:<15} <- {', '.join(parents):<45} | {class_name:<20}\n"
+            )
         return graph_str
 
 
@@ -153,7 +166,7 @@ class Extractor:
         self.index = index
 
     def sample(self, batch_dim, parent_conditions=[]):
-        composite, = parent_conditions
+        (composite,) = parent_conditions
         x = composite[self.index]
         return x
 
@@ -162,7 +175,7 @@ def CompositeNode(names, module, **kwargs):
     """Auxiliary function to create a composite node with multiple child nodes."""
 
     # Generate name of composite node from names of child nodes
-    joined_names  = "comp_"+"_".join(names)
+    joined_names = "comp_" + "_".join(names)
 
     # Instantiate composite node
     node_comp = Node(joined_names, module, **kwargs)
@@ -170,7 +183,9 @@ def CompositeNode(names, module, **kwargs):
     # Instantiate child nodes, which extract the individual components
     nodes = []
     for i, name in enumerate(names):
-        node = Node(name, Extractor, parents=[joined_names], simulator_config=dict(index=i))
+        node = Node(
+            name, Extractor, parents=[joined_names], simulator_config=dict(index=i)
+        )
         nodes.append(node)
 
     # Return composite node and child nodes, which both must be added to the graph
@@ -179,27 +194,29 @@ def CompositeNode(names, module, **kwargs):
 
 def create_graph_from_config(graph_config, _cfg=None):
     """Create a computational graph from YAML configuration.
-    
+
     Args:
         graph_config: Dictionary containing graph node definitions
         _cfg: Full Hydra configuration object (optional)
-        
+
     Returns:
         Graph: The computational graph
     """
     nodes = []
     observations = {}
-    
+
     for node_name, node_config in graph_config.items():
         # Extract node parameters
-        parents = node_config.get('parents', [])
-        evidence = node_config.get('evidence', [])
-        scaffolds = node_config.get('scaffolds', [])
-        observed = node_config.get('observed', False)  # TODO: Remove from internal logic
-        data_path = node_config.get('observed', None)
-        resample = node_config.get('resample', False)
-        actor_config = node_config.get('ray', {})
-        num_actors = node_config.get('num_actors', 1)
+        parents = node_config.get("parents", [])
+        evidence = node_config.get("evidence", [])
+        scaffolds = node_config.get("scaffolds", [])
+        observed = node_config.get(
+            "observed", False
+        )  # TODO: Remove from internal logic
+        data_path = node_config.get("observed", None)
+        resample = node_config.get("resample", False)
+        actor_config = node_config.get("ray", {})
+        num_actors = node_config.get("num_actors", 1)
 
         if actor_config != {}:
             actor_config = OmegaConf.to_container(actor_config, resolve=True)
@@ -218,7 +235,7 @@ def create_graph_from_config(graph_config, _cfg=None):
             simulator_cls = simulator
             simulator_config = {}
         else:
-            simulator_cls = simulator.get('_target_')
+            simulator_cls = simulator.get("_target_")
             simulator_config = simulator
             simulator_config = OmegaConf.to_container(simulator_config, resolve=True)
             simulator_config.pop("_target_", None)
@@ -230,9 +247,11 @@ def create_graph_from_config(graph_config, _cfg=None):
                 estimator_cls = estimator
                 estimator_config = {}
             else:
-                estimator_cls = estimator.get('_target_')
+                estimator_cls = estimator.get("_target_")
                 estimator_config = estimator
-                estimator_config = OmegaConf.to_container(estimator_config, resolve=True)
+                estimator_config = OmegaConf.to_container(
+                    estimator_config, resolve=True
+                )
                 estimator_config.pop("_target_", None)
         else:
             estimator_cls = None
@@ -251,10 +270,10 @@ def create_graph_from_config(graph_config, _cfg=None):
             simulator_config=simulator_config,
             estimator_config=estimator_config,
             actor_config=actor_config,
-            num_actors=num_actors
+            num_actors=num_actors,
         )
-        
+
         nodes.append(node)
-    
+
     # Create and return the graph
     return Graph(nodes), observations

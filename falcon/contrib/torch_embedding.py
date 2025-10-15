@@ -8,7 +8,7 @@ sequence of modules that execute sequentially with a shared data dictionary.
 ## Key Features
 
 1. **Sequential Execution**: Modules run in a flat list, easy to debug and understand
-2. **Shared Data Dictionary**: One dictionary stores all intermediate results  
+2. **Shared Data Dictionary**: One dictionary stores all intermediate results
 3. **Declarative Configuration**: Define complex pipelines using simple YAML/dict configs
 4. **Automatic Flattening**: Nested configurations are automatically linearized
 5. **PyTorch Native**: Full backpropagation support, standard nn.Module behavior
@@ -34,7 +34,7 @@ result = embedding({'x': torch.randn(32, 10)})  # -> torch.Size([32, 5])
 
 ## Configuration Keywords
 
-- **_target_**: Module class path (e.g., "torch.nn.Linear", "mymodule.MyClass")  
+- **_target_**: Module class path (e.g., "torch.nn.Linear", "mymodule.MyClass")
 - **_input_**: Input specification (string, list, or nested config)
 - All other keys become constructor arguments for the target class
 
@@ -65,7 +65,7 @@ config = {
     '_input_': {
         '_target_': 'torch.nn.Linear',
         'in_features': 100,
-        'out_features': 50,  
+        'out_features': 50,
         '_input_': 'raw_features'
     }
 }
@@ -84,15 +84,15 @@ config = {
     '_input_': [
         # Branch 1: Direct input
         'global_context',
-        
+
         # Branch 2: CNN processing
         {
             '_target_': 'mymodule.CNNEncoder',
             'channels': [3, 32, 64],
             '_input_': 'image_data'
         },
-        
-        # Branch 3: Multi-stage text processing  
+
+        # Branch 3: Multi-stage text processing
         {
             '_target_': 'mymodule.TextClassifier',
             'num_classes': 100,
@@ -107,7 +107,7 @@ config = {
 
 # This flattens to a 4-module pipeline:
 # 1. text_tokens -> BertModel -> temp_1
-# 2. image_data -> CNNEncoder -> temp_2  
+# 2. image_data -> CNNEncoder -> temp_2
 # 3. temp_1 -> TextClassifier -> temp_3
 # 4. [global_context, temp_2, temp_3] -> AttentionCombiner -> final_output
 
@@ -130,10 +130,10 @@ config = {
     '_input_': [
         # Raw parameters (for training)
         'theta',
-        
+
         # Processed observations
         {
-            '_target_': 'falcon.contrib.ObservationEncoder',  
+            '_target_': 'falcon.contrib.ObservationEncoder',
             'embedding_dim': 64,
             '_input_': {
                 '_target_': 'falcon.contrib.PCAProjector',
@@ -173,8 +173,8 @@ embedding = instantiate_embedding(config)
 # Inspect the pipeline structure
 print(f"Pipeline has {len(embedding.modules_list)} modules:")
 for i, (module, inputs, output) in enumerate(zip(
-    embedding.modules_list, 
-    embedding.input_keys_list, 
+    embedding.modules_list,
+    embedding.input_keys_list,
     embedding.output_keys
 )):
     print(f"  Step {i+1}: {module.__class__.__name__}")
@@ -236,27 +236,36 @@ import torch.nn as nn
 
 class EmbeddingWrapper(nn.Module):
     """Sequential execution of modules with shared data dictionary."""
-    
-    def __init__(self, modules: List[nn.Module], input_keys_list: List[List[str]], 
-                 output_keys: List[str], required_input_keys: List[str]):
+
+    def __init__(
+        self,
+        modules: List[nn.Module],
+        input_keys_list: List[List[str]],
+        output_keys: List[str],
+        required_input_keys: List[str],
+    ):
         super().__init__()
         self.modules_list = nn.ModuleList(modules)
         self.input_keys_list = input_keys_list
         self.output_keys = output_keys
         self.input_keys = required_input_keys
-    
+
     def forward(self, data_dict: Dict[str, Any]) -> Any:
         missing_keys = set(self.input_keys) - set(data_dict.keys())
         if missing_keys:
-            warnings.warn(f"Missing input keys: {missing_keys}, will use None values", UserWarning)
-        
+            warnings.warn(
+                f"Missing input keys: {missing_keys}, will use None values", UserWarning
+            )
+
         work_dict = data_dict.copy()
-        
-        for module, input_keys, output_key in zip(self.modules_list, self.input_keys_list, self.output_keys):
+
+        for module, input_keys, output_key in zip(
+            self.modules_list, self.input_keys_list, self.output_keys
+        ):
             module_inputs = [work_dict.get(key) for key in input_keys]
             output = module(*module_inputs)
             work_dict[output_key] = output
-        
+
         return work_dict[self.output_keys[-1]]
 
 
@@ -267,24 +276,27 @@ def _collect_input_keys(config: Union[Dict, str, List]) -> List[str]:
     elif isinstance(config, list):
         for item in config:
             keys.extend(_collect_input_keys(item))
-    elif isinstance(config, dict) and '_input_' in config:
-        keys.extend(_collect_input_keys(config['_input_']))
+    elif isinstance(config, dict) and "_input_" in config:
+        keys.extend(_collect_input_keys(config["_input_"]))
     return list(set(keys))
 
-def _flatten_config_to_modules(config: Dict[str, Any], temp_counter: int = 0) -> Tuple[List[nn.Module], List[List[str]], List[str], int]:
+
+def _flatten_config_to_modules(
+    config: Dict[str, Any], temp_counter: int = 0
+) -> Tuple[List[nn.Module], List[List[str]], List[str], int]:
     modules = []
     input_keys_list = []
     output_keys = []
-    
-    target = config['_target_']
+
+    target = config["_target_"]
     cls = target
     if isinstance(target, str):
         module_name, class_name = target.rsplit(".", 1)
         cls = getattr(importlib.import_module(module_name), class_name)
-    
-    input_config = config['_input_']
-    kwargs = {k: v for k, v in config.items() if k not in ['_target_', '_input_']}
-    
+
+    input_config = config["_input_"]
+    kwargs = {k: v for k, v in config.items() if k not in ["_target_", "_input_"]}
+
     if isinstance(input_config, str):
         input_keys_for_module = [input_config]
     elif isinstance(input_config, list):
@@ -292,19 +304,26 @@ def _flatten_config_to_modules(config: Dict[str, Any], temp_counter: int = 0) ->
         for item in input_config:
             if isinstance(item, str):
                 input_keys_for_module.append(item)
-            elif isinstance(item, dict) and '_target_' in item:
-                nested_modules, nested_input_keys_list, nested_output_keys, temp_counter = _flatten_config_to_modules(item, temp_counter)
+            elif isinstance(item, dict) and "_target_" in item:
+                (
+                    nested_modules,
+                    nested_input_keys_list,
+                    nested_output_keys,
+                    temp_counter,
+                ) = _flatten_config_to_modules(item, temp_counter)
                 modules.extend(nested_modules)
                 input_keys_list.extend(nested_input_keys_list)
                 output_keys.extend(nested_output_keys)
                 input_keys_for_module.append(nested_output_keys[-1])
     elif isinstance(input_config, dict):
-        nested_modules, nested_input_keys_list, nested_output_keys, temp_counter = _flatten_config_to_modules(input_config, temp_counter)
+        nested_modules, nested_input_keys_list, nested_output_keys, temp_counter = (
+            _flatten_config_to_modules(input_config, temp_counter)
+        )
         modules.extend(nested_modules)
         input_keys_list.extend(nested_input_keys_list)
         output_keys.extend(nested_output_keys)
         input_keys_for_module = [nested_output_keys[-1]]
-    
+
     instance = cls(**kwargs)
     temp_counter += 1
     output_key = f"temp_{temp_counter}"
@@ -313,8 +332,11 @@ def _flatten_config_to_modules(config: Dict[str, Any], temp_counter: int = 0) ->
     output_keys.append(output_key)
     return modules, input_keys_list, output_keys, temp_counter
 
+
 def instantiate_embedding(embedding_config: Dict[str, Any]) -> EmbeddingWrapper:
-    """Instantiate embedding pipeline from config.""" 
+    """Instantiate embedding pipeline from config."""
     required_input_keys = _collect_input_keys(embedding_config)
-    modules, input_keys_list, output_keys, _ = _flatten_config_to_modules(embedding_config)
+    modules, input_keys_list, output_keys, _ = _flatten_config_to_modules(
+        embedding_config
+    )
     return EmbeddingWrapper(modules, input_keys_list, output_keys, required_input_keys)

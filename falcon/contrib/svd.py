@@ -24,13 +24,13 @@ class PCAProjector(torch.nn.Module):
     def __init__(
         self,
         n_components: int = 10,
-        #input_dim: int,
+        # input_dim: int,
         oversampling: int = 10,
         buffer_size: int = 256,
         momentum: float = 0.1,
         normalize_output: bool = True,
         use_prior: bool = True,
-        #add_mean: bool = False,
+        # add_mean: bool = False,
     ) -> None:
         """
         Args:
@@ -44,19 +44,19 @@ class PCAProjector(torch.nn.Module):
         """
         super().__init__()
         self.n_components: int = n_components
-        #self.input_dim: int = input_dim
+        # self.input_dim: int = input_dim
         self.oversampling: int = oversampling
         self.buffer_size: int = buffer_size
-        #self.device: str = device
+        # self.device: str = device
         self.momentum: float = momentum
         self.normalize_output: bool = normalize_output
         self.use_prior: bool = use_prior
-        #self.add_mean: bool = add_mean
+        # self.add_mean: bool = add_mean
 
         # Running mean of the input data, updated incrementally
-        #self.mean: Optional[torch.Tensor] = None  # shape: (D,)
+        # self.mean: Optional[torch.Tensor] = None  # shape: (D,)
         # Number of samples accumulated so far (used for updating the mean)
-        #self.n_samples: int = 0
+        # self.n_samples: int = 0
 
         # Temporary buffer for incoming data points
         self.buffer: List[torch.Tensor] = []
@@ -75,14 +75,6 @@ class PCAProjector(torch.nn.Module):
             X: A batch of input data with shape (batch_size, D).
         """
         batch_size = X.shape[0]
-        # Move data to the specified device
-        #X = X.to(self.device)
-        
-#        if self.mean is None:
-#            self.mean = X.mean(dim=0)
-#        else:
-#            batch_mean = X.mean(dim=0)
-#            self.mean = (1 - self.momentum) * self.mean + self.momentum * batch_mean
 
         # Store in the buffer
         self.buffer.append(X)
@@ -109,7 +101,7 @@ class PCAProjector(torch.nn.Module):
         N = X_buffer.shape[0]
 
         # Center the buffer by subtracting the current global mean
-        #X_centered = X_buffer - self.mean
+        # X_centered = X_buffer - self.mean
         X_centered = X_buffer - X_buffer.mean(dim=0)
 
         # Dual covariance matrix K = (1/N) X_centered * X_centered^T
@@ -121,12 +113,12 @@ class PCAProjector(torch.nn.Module):
         eigvals, eigvecs = torch.linalg.eigh(K)  # ascending order
 
         # Select indices of the top-k eigenvalues
-        top_indices = torch.argsort(eigvals, descending=True)[:self.n_components]
+        top_indices = torch.argsort(eigvals, descending=True)[: self.n_components]
 
         # Extract the top-k eigenvalues
         Λ_new = eigvals[top_indices]  # shape: (k,)
         # Extract the corresponding eigenvectors
-        Q = eigvecs[:, top_indices]   # shape: (N, k)
+        Q = eigvecs[:, top_indices]  # shape: (N, k)
 
         # Project back to feature space to get top-k eigenvectors.
         # We do U_new = (X_centered^T @ Q) / sqrt(N * Λ_new).
@@ -143,20 +135,17 @@ class PCAProjector(torch.nn.Module):
             alpha = self.momentum
             # Weighted concatenation of the old and new components
             # We scale old components by sqrt(1 - alpha), new by sqrt(alpha) for energy balance
-            U_combined = torch.cat([
-                np.sqrt(1 - alpha) * self.components,
-                np.sqrt(alpha) * U_new
-            ], dim=0)  # shape: (2k, D)
+            U_combined = torch.cat(
+                [np.sqrt(1 - alpha) * self.components, np.sqrt(alpha) * U_new], dim=0
+            )  # shape: (2k, D)
 
             # SVD to re-orthonormalize the combined set of vectors
             U, S, Vt = torch.linalg.svd(U_combined, full_matrices=False)
 
             # Take the top-k vectors (right singular vectors)
-            self.components = Vt[:self.n_components]
+            self.components = Vt[: self.n_components]
             # Blend the eigenvalues (variances) in a simpler linear way
             self.eigenvalues = (1 - alpha) * self.eigenvalues + alpha * Λ_new
-
-       #print(self.mean)
 
     def forward(self, X: torch.Tensor) -> torch.Tensor:
         """
@@ -172,10 +161,12 @@ class PCAProjector(torch.nn.Module):
         """
         # If no PCA has been computed yet, we can't project
         if self.components is None:
-            raise ValueError("SVD components not computed yet. Call update() enough times first.")
+            raise ValueError(
+                "SVD components not computed yet. Call update() enough times first."
+            )
 
         # Shift input by the running mean
-        #X_centered = X - self.mean
+        # X_centered = X - self.mean
         # Project onto the principal components
         X_proj = X @ self.components.T  # shape: (batch_size, k)
 
@@ -184,7 +175,9 @@ class PCAProjector(torch.nn.Module):
         # assuming white noise on the inputs: X_proj / (1 + 1 / eigenvalues).
         if self.use_prior:
             if self.eigenvalues is None:
-                raise ValueError("Eigenvalues not available. PCA must be computed first.")
+                raise ValueError(
+                    "Eigenvalues not available. PCA must be computed first."
+                )
             X_proj = X_proj / (1.0 + (1.0 / self.eigenvalues)).unsqueeze(0)
 
         # Reconstruct from the principal components
@@ -193,7 +186,9 @@ class PCAProjector(torch.nn.Module):
         # Optionally normalize the output so that the average variance is ~1
         if self.normalize_output:
             if self.eigenvalues is None:
-                raise ValueError("Eigenvalues not available. PCA must be computed first.")
+                raise ValueError(
+                    "Eigenvalues not available. PCA must be computed first."
+                )
             # The sum of eigenvalues is the total variance in the top-k subspace
             # We divide by sqrt( average variance per feature ) = sqrt( sum / D )
             input_dim = X_reconstructed.shape[-1]

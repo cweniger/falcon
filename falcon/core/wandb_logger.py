@@ -2,26 +2,40 @@ from typing import Optional, Dict, Any
 import ray
 import wandb
 
-def start_wandb_logger(wandb_project: Optional[str] = None, wandb_group: Optional[str] = None, wandb_dir: Optional[str] = None):
-    logger = WandBManager.options(name='falcon:global_logger', lifetime='detached').remote(
+
+def start_wandb_logger(
+    wandb_project: Optional[str] = None,
+    wandb_group: Optional[str] = None,
+    wandb_dir: Optional[str] = None,
+):
+    logger = WandBManager.options(
+        name="falcon:global_logger", lifetime="detached"
+    ).remote(
         wandb_project=wandb_project,
         wandb_group=wandb_group,
         wandb_dir=wandb_dir,
     )
 
+
 def finish_wandb_logger():
     """
     Stop the W&B logger actor.
     """
-    logger = ray.get_actor(name='falcon:global_logger')
+    logger = ray.get_actor(name="falcon:global_logger")
     ray.get(logger.shutdown.remote())
     ray.kill(logger)
 
+
 @ray.remote
 class WandBWrapper:
-    def __init__(self, wandb_project: Optional[str] = None, wandb_group: Optional[str] = None, 
-                 wandb_name: Optional[str] = None, wandb_config: Optional[Dict[str, Any]] = None,
-                 wandb_dir: Optional[str] = None):
+    def __init__(
+        self,
+        wandb_project: Optional[str] = None,
+        wandb_group: Optional[str] = None,
+        wandb_name: Optional[str] = None,
+        wandb_config: Optional[Dict[str, Any]] = None,
+        wandb_dir: Optional[str] = None,
+    ):
         self.wandb_project = wandb_project
         self.wandb_group = wandb_group
         self.wandb_name = wandb_name
@@ -29,14 +43,14 @@ class WandBWrapper:
         self.wandb_dir = wandb_dir
 
         wandb_init_kwargs = {
-            'project': self.wandb_project,
-            'group': self.wandb_group,
-            'name': self.wandb_name,
-            'config': self.wandb_config or {},
-            'reinit': True
+            "project": self.wandb_project,
+            "group": self.wandb_group,
+            "name": self.wandb_name,
+            "config": self.wandb_config or {},
+            "reinit": True,
         }
         if self.wandb_dir:
-            wandb_init_kwargs['dir'] = self.wandb_dir
+            wandb_init_kwargs["dir"] = self.wandb_dir
 
         self.wandb_run = wandb.init(**wandb_init_kwargs)
 
@@ -56,9 +70,15 @@ class WandBWrapper:
         """
         self.wandb_run.finish()
 
+
 @ray.remote
 class WandBManager:
-    def __init__(self, wandb_project: Optional[str] = None, wandb_group: Optional[str] = None, wandb_dir: Optional[str] = None):
+    def __init__(
+        self,
+        wandb_project: Optional[str] = None,
+        wandb_group: Optional[str] = None,
+        wandb_dir: Optional[str] = None,
+    ):
         self.wandb_project = wandb_project
         self.wandb_group = wandb_group
         self.wandb_dir = wandb_dir
@@ -73,10 +93,15 @@ class WandBManager:
             wandb_group=self.wandb_group,
             wandb_name=actor_id,
             wandb_config=config,
-            wandb_dir=self.wandb_dir
+            wandb_dir=self.wandb_dir,
         )
 
-    def log(self, metrics: Dict[str, float], step: Optional[int] = None, actor_id: str = None):
+    def log(
+        self,
+        metrics: Dict[str, float],
+        step: Optional[int] = None,
+        actor_id: str = None,
+    ):
         """
         Log scalar metrics, wandb style.
         """

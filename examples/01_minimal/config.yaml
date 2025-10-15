@@ -1,73 +1,109 @@
-# Model-specific configuration using _target_ pattern
-# Updated to the new Falcon config schema
+# =============================================================================
+# Falcon Example Configuration: 01_minimal
+# -----------------------------------------------------------------------------
+# A minimal working example for running a simulation-based inference (SBI)
+# experiment using Falcon. This configuration defines:
+#
+#   • A simple 3-parameter model (z → x) using a declarative computation graph.
+#   • A training buffer configuration for adaptive simulation.
+#   • Integration with Weights & Biases (WandB) for experiment tracking.
+#
+# Structure overview:
+#   logging  – WandB project setup and output directory.
+#   paths    – Locations of user code and generated data.
+#   buffer   – Data collection and resampling behavior.
+#   graph    – Declarative model definition with simulators and estimators.
+#   sample   – Sampling parameters for posterior draws after training.
+#
+# Usage:
+#   falcon launch hydra.run.dir=outputs/01_minimal
+#   falcon sample posterior hydra.run.dir=outputs/01_minimal
+#
+# Notes:
+#   • All outputs (simulations, trained models, logs) are written under
+#     ${hydra:run.dir}, which defaults to ./outputs/DATE/TIME unless overridden.
+#   • ${hydra:run.dir} is referenced by buffer, graph, and WandB logging paths.
+# =============================================================================
 
-# Set model path to current directory (for local model.py)
-model_path: "src"
-
-# Ray initialization parameters
-ray:
-  init:
-    address: null   # set to None for local single-node
-
-# Directory configuration
-paths:
-  run_root: ${hydra:run.dir}
-  buffer: ${paths.run_root}/sim_dir         # same location as old 'sim_dir'
-  graph: ${paths.run_root}/graph_dir        # same location as old 'graph_dir'
-
-# WandB / logging configuration (renamed)
+# -----------------------------------------------------------------------------
+# WandB logging configuration
+# -----------------------------------------------------------------------------
 logging:
-  project: falcon4
-  group: v2_frozen
-  dir: ${paths.run_root}
+  project: falcon_examples              # WandB project name
+  group: 01_minimal                     # Logical group or experiment name
+  dir: ${hydra:run.dir}                 # Log directory (Hydra's resolved run path)
 
-# (Optional) Training buffer parameters — leave defaulted if unused in this example
+# -----------------------------------------------------------------------------
+# Directory configuration
+# -----------------------------------------------------------------------------
+paths:
+  import: "./src"                       # Local folder(s) with user-defined code (e.g. model.py)
+  buffer: ${hydra:run.dir}/sim_dir      # Directory where Falcon stores simulated training data
+  graph: ${hydra:run.dir}/graph_dir     # Directory for serialized graph and trained networks
+
+# -----------------------------------------------------------------------------
+# Training buffer parameters
+# -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 8192                # aligned with old n_train / num_initial_samples
-  max_training_samples: 8192
-  validation_window_size: 256               # old num_val_samples
-  resample_batch_size: 256                  # old num_resims
+  min_training_samples: 4096            # Minimum samples before training starts
+  max_training_samples: 32768           # Maximum number of samples retained in buffer
+  validation_window_size: 256           # Size of validation split (for early stopping)
+  resample_batch_size: 128              # Number of new samples drawn per resampling step
+  keep_resampling: true                 # Continue resampling after reaching max samples
+  resample_interval: 10                 # Resample every N training epochs
 
+# -----------------------------------------------------------------------------
 # Graph definition using declarative YAML
+# -----------------------------------------------------------------------------
 graph:
   z:
-    evidence: [x]
-    # No explicit parents (latent prior); scaffolds not used here
-    simulator:
+    evidence: [x]                       # Node z is inferred from observed x
+
+    simulator:                          # Defines the prior distribution for z
       _target_: falcon.contrib.HypercubeMappingPrior
-      priors:
+      priors:                           # Uniform priors for each parameter dimension
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
-    estimator:
-      _target_: falcon.contrib.SNPE_A
-      embedding:
-        _target_: model.E
-        _input_: [x]                        # equivalent to old 'embeddings: model.E'
-      num_epochs: 10                        # from training.max_epochs
-      #discard_samples: true                 # from old config
-      gamma: 0.5
-      lr_decay_factor: 0.1
+
+    estimator:                          # Posterior estimator network
+      _target_: falcon.contrib.SNPE_A   # Sequential Neural Posterior Estimation (SNPE-A)
+
+      net_type: nsf                     # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
+      theta_norm: true                  # Normalize parameter space
+      norm_momentum: 0.003              # Momentum for online normalization updates
+
+      embedding:                        # Neural embedding for observation x
+         _target_: model.E
+         _input_: [x]
+
+      # --- Training parameters ---
+      num_epochs: 300
+      batch_size: 128
       lr: 0.01
-      theta_norm: true
-      norm_momentum: 0.001
-      early_stop_patience: 32
-      scheduler_patience: 16
-      net_type: zuko_nice
+      scheduler_patience: 16            # LR decay after N stagnant epochs
+      lr_decay_factor: 0.5              # LR decay multiplier
+      early_stop_patience: 32           # Early stopping patience
+
+      # --- SNPE-specific parameters ---
+      gamma: 0.5                        # Mixing coefficient for amortization weighting
+      discard_samples: false
+      log_ratio_threshold: -20          # Stability cutoff for log ratios
+
     ray:
-      num_gpus: 0.                           # from actor_config.num_gpus
+      num_gpus: 0                       # GPU count per Ray worker (0 = CPU)
 
   x:
-    parents: [z]
-    simulator:
+    parents: [z]                        # Node x depends on latent parameters z
+    simulator:                          # Defines forward model p(x|z)
       _target_: model.Simulate
-      npar: 3
-    observed: "data/obs_3.npy"  # from observations.path
-    # NOTE: old 'observations.index: null' = use full arrays; keep default behavior.
-    ray:
-      num_gpus: 0
+      npar: 3                           # Number of parameters to sample from z
+    observed: "./data/obs_3.npy"        # Path to observed data array
 
+# -----------------------------------------------------------------------------
+# Sampling configuration (posterior draws after training)
+# -----------------------------------------------------------------------------
 sample:
   posterior:
-    n: 10000
-    path: samples_posterior.joblib
+    n: 1000                             # Number of posterior samples to draw
+    path: samples_posterior.joblib      # Output path for saved samples (under hydra.run.dir)

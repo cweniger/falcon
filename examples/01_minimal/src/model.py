@@ -12,11 +12,12 @@ SIGMA = 0.1  # Hardcoded sigma value
 
 class Simulate:
     """Gaussian simulator for generating observations.
-    
+
     Args:
         npar: Number of parameters (required)
         sigma: Standard deviation for noise (default: 0.1)
     """
+
     def __init__(self, npar: int, sigma: float = 1e-1):
         self.npar = npar
         self.sigma = sigma
@@ -31,10 +32,11 @@ class Simulate:
 
 class E(torch.nn.Module):
     """Embedding network with online normalization.
-    
+
     Args:
         momentum: Momentum for online normalization (default: 0.01)
     """
+
     def __init__(self, momentum: float = 1e-2):
         super(E, self).__init__()
         self.norm = falcon.contrib.LazyOnlineNorm(momentum=momentum)
