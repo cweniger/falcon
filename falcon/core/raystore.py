@@ -78,6 +78,18 @@ class DatasetManagerActor:
 
     def get_resample_interval(self):
         return self.resample_interval
+    
+    # FIXME: Logging should happen through wandb only, and not funneled through training nodes
+    def get_store_stats(self):
+        stats = {
+            "total_length": len(self.ray_store),
+            "validation": sum(self.status == SampleStatus.VALIDATION),
+            "training": sum(self.status == SampleStatus.TRAINING),
+            "disfavoured": sum(self.status == SampleStatus.DISFAVOURED),
+            "tombstone": sum(self.status == SampleStatus.TOMBSTONE),
+            "deleted": sum(self.status == SampleStatus.DELETED),
+        }
+        return stats
 
     def rotate_sample_buffer(self):
         """

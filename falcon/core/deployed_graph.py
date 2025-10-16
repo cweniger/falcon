@@ -135,7 +135,7 @@ class NodeWrapper:
         #        hook_fn = None
 
         await self.estimator_instance.train(
-            dataloader_train, dataloader_val, hook_fn=hook_fn
+            dataloader_train, dataloader_val, hook_fn=hook_fn, dataset_manager=dataset_manager
         )
         print("...training complete for:", self.name)
 

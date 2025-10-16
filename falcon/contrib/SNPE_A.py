@@ -17,6 +17,9 @@ from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
 import copy
 
+# FIXME: Logging should happen through wandb only
+import os
+import ray
 
 class Flow(torch.nn.Module):
     def __init__(
@@ -240,7 +243,16 @@ class SNPE_A:
         # History of training/validation IDs
         self._train_id_history = []
         self._validation_id_history = []
-
+        # FIXME: Logging should happen through wandb only
+        self.theta_mins_batches = []  # List of the minimum theta values ​​for each batch
+        self.theta_maxs_batches = []  # List of the maximum theta values ​​for each batch
+        # History of varaiables for plotting in epochs
+        self.epoch_list        = []
+        self.train_loss_post_history = []
+        self.val_loss_post_history = []
+        self.samples_total_history = []       
+        self.elapsed_minutes_history = []     
+       
         # Pausing and termination events
         self._pause_event = asyncio.Event()
         self._pause_event.set()  # initially running (interted logic)
@@ -384,20 +396,23 @@ class SNPE_A:
         rvbatch = RVBatch(samples, logprob=logprob_for_prior_samples)
         return rvbatch
 
-    async def train(self, dataloader_train, dataloader_val, hook_fn=None):
+    # FIXME: Logging should happen through wandb only, no dataset_manager dependece
+    async def train(self, dataloader_train, dataloader_val, hook_fn=None, dataset_manager=None):
         """Train the neural spline flow on the given data."""
         best_val_loss = float("inf")  # Best validation loss
         n_train_batch = 0
         n_val_batch = 0
         counter_checkpoint_posterior = 0
         counter_checkpoint_traindist = 0
+        t0 = time.perf_counter()
+
         for epoch in range(self.num_epochs):
             print(f"⌛ Epoch {epoch+1}/{self.num_epochs}")
             log({"epoch": epoch + 1})
 
             # Training loop
-            # loss_aux_avg = 0
-            # loss_train_avg = 0
+            loss_aux_avg = 0
+            loss_train_avg = 0
             num_samples = 0
             for batch in dataloader_train:
                 log({"n_train_batch": n_train_batch})
@@ -421,6 +436,13 @@ class SNPE_A:
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
+                # Calculate the θ min/max of this batch and save it to a list
+                with torch.no_grad():
+                    theta_min = theta.min(dim=0).values.cpu().numpy()  # shape (D,)
+                    theta_max = theta.max(dim=0).values.cpu().numpy()  # shape (D,)
+                self.theta_mins_batches.append(theta_min)
+                self.theta_maxs_batches.append(theta_max)
+
                 self._posterior.train()
                 losses_train = self._posterior.loss(uc, sc)
                 loss_train = torch.mean(losses_train)
@@ -437,6 +459,10 @@ class SNPE_A:
                 loss_total.backward()
                 self._optimizer.step()
 
+                num_samples += 1
+                loss_train_avg += loss_train.sum().item()
+                loss_aux_avg += loss_aux.sum().item()
+
                 # Run hook and allow other tasks to run
                 if hook_fn is not None:
                     hook_fn(self, batch)
@@ -445,6 +471,9 @@ class SNPE_A:
                 if self._break_flag:
                     self._break_flag = False
                     break
+
+            loss_train_avg /= num_samples
+            loss_aux_avg /= num_samples
 
             # Validation loop
             val_posterior_loss = 0
@@ -517,6 +546,25 @@ class SNPE_A:
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
+
+            # Record the data for this epoch for saving data
+            self.epoch_list.append(epoch + 1)
+            self.train_loss_post_history.append(loss_train_avg)     # posterior train loss
+            self.val_loss_post_history.append(val_posterior_loss)         # posterior val loss
+            try:
+                stats = ray.get(dataset_manager.get_store_stats.remote())
+                self.samples_total_history.append(stats["total_length"])
+            except Exception as e:
+                print(f"[warn] failed to fetch store stats from actor: {e}")
+
+            elapsed_min = (time.perf_counter() - t0) / 60.0
+            self.elapsed_minutes_history.append(elapsed_min)
+            log({"elapsed_minutes": elapsed_min})
+            # Fixme: time-budget
+            # if elapsed_min >= 150.0:
+            #     print(f"Time budget reached: {elapsed_min:.2f} min (>= 50). Stopping training.")
+            #     log({"early_stop_reason": "time_budget_reached", "elapsed_minutes": elapsed_min})
+            #     break
 
             if epochs_no_improve >= self.early_stop_patience:
                 print("Early stopping triggered.")
@@ -682,8 +730,6 @@ class SNPE_A:
         else:
             raise KeyError
 
-        #  Use q(z) = q(z|x0)^gamma as proposal
-        #  q(z|x) \propto p(x|z) q(z) is approximate posterior
 
         # Replace -inf and nan with -100
         log_weights = torch.nan_to_num(log_weights, nan=-100.0, neginf=-100.0)
@@ -699,11 +745,6 @@ class SNPE_A:
         log({"n_eff_max": n_eff.max()})
 
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
-
-        # samples_proposals have shape (num_proposals, num_samples, theta_dim)
-        # samples will have shape (num_samples, theta_dim)
-        # idx has shape (num_samples,) and ranges from 0 to num_proposals-1
-        # samples by samples_proposals[idx[i], i, :] for i in range(num_samples)
 
         samples = samples_proposals[idx, torch.arange(num_samples), :]
         samples = self.simulator_instance.forward(samples).to("cpu")
@@ -742,9 +783,18 @@ class SNPE_A:
         # Save best-fit network states
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
         torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
+        # FIXME: Logging should happen through wandb only
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
         torch.save(self._train_id_history, node_dir / "train_id_history.pth")
         torch.save(self._validation_id_history, node_dir / "validation_id_history.pth")
+        torch.save(self.theta_mins_batches,       node_dir / "theta_mins_batches.pth")
+        torch.save(self.theta_maxs_batches,       node_dir / "theta_maxs_batches.pth")
+        # epoch-wise
+        torch.save(self.epoch_list,               node_dir / "epochs.pth")
+        torch.save(self.train_loss_post_history,  node_dir / "loss_train_posterior.pth")
+        torch.save(self.val_loss_post_history,    node_dir / "loss_val_posterior.pth")
+        torch.save(self.samples_total_history,    node_dir / "n_samples_total.pth")
+        torch.save(self.elapsed_minutes_history,  node_dir / "elapsed_minutes.pth")
 
         # Save best-fit embedding networks if they exist
         if self._best_embedding is not None:
