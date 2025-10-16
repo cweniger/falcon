@@ -16,6 +16,8 @@ from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
 import copy
+
+# FIXME: Logging should happen through wandb only
 import os
 import ray
 
@@ -241,6 +243,7 @@ class SNPE_A:
         # History of training/validation IDs
         self._train_id_history = []
         self._validation_id_history = []
+        # FIXME: Logging should happen through wandb only
         self.theta_mins_batches = []  # List of the minimum theta values ​​for each batch
         self.theta_maxs_batches = []  # List of the maximum theta values ​​for each batch
         # History of varaiables for plotting in epochs
@@ -393,6 +396,7 @@ class SNPE_A:
         rvbatch = RVBatch(samples, logprob=logprob_for_prior_samples)
         return rvbatch
 
+    # FIXME: Logging should happen through wandb only, no dataset_manager dependece
     async def train(self, dataloader_train, dataloader_val, hook_fn=None, dataset_manager=None):
         """Train the neural spline flow on the given data."""
         best_val_loss = float("inf")  # Best validation loss
@@ -779,6 +783,7 @@ class SNPE_A:
         # Save best-fit network states
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
         torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
+        # FIXME: Logging should happen through wandb only
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
         torch.save(self._train_id_history, node_dir / "train_id_history.pth")
         torch.save(self._validation_id_history, node_dir / "validation_id_history.pth")
