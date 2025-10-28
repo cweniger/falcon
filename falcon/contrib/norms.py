@@ -17,7 +17,8 @@ class LazyOnlineNorm(nn.Module):
         super().__init__()
         self.momentum = momentum
         self.epsilon = epsilon
-        self.log_prefix = log_prefix + ":" if log_prefix else ""
+        self.log_prefix = log_prefix
+        #self.log_prefix = log_prefix + ":" if log_prefix else ""
         self.monotonic_variance = monotonic_variance
         self.use_log_update = use_log_update
         self.adaptive_momentum = adaptive_momentum
@@ -72,30 +73,46 @@ class LazyOnlineNorm(nn.Module):
 
             log(
                 {
-                    f"{self.log_prefix}running_mean_{i}": self.running_mean[i].item()
-                    for i in range(self.running_mean.shape[0])
-                }
-            )
-            log(
-                {
-                    f"{self.log_prefix}running_std_{i}": self.running_var[i].item()
-                    ** 0.5
-                    for i in range(self.running_var.shape[0])
-                }
-            )
-            log(
-                {
-                    f"{self.log_prefix}batch_mean_{i}": batch_mean[i].item()
-                    for i in range(batch_mean.shape[0])
-                }
-            )
-            log(
-                {
-                    f"{self.log_prefix}batch_std_{i}": batch_var[i].item() ** 0.5
-                    for i in range(batch_var.shape[0])
-                }
+                    "lazy_online_norm:mean_min": self.running_mean.min().item(),
+                    "lazy_online_norm:mean_max": self.running_mean.max().item(),
+                    "lazy_online_norm:std_min": self.running_var.min().item()**0.5,
+                    "lazy_online_norm:std_max": self.running_var.max().item()**0.5,
+                },
+                log_prefix = self.log_prefix
             )
 
+#            log(
+#                {
+#                    "running_mean_max": self.running_mean.max().item()
+#                }, log_prefix=self.log_prefix
+#            )
+#
+#            log(
+#                {
+#                    f"{self.log_prefix}running_mean_{i}": self.running_mean[i].item()
+#                    for i in range(self.running_mean.shape[0])
+#                }
+#            )
+#            log(
+#                {
+#                    f"{self.log_prefix}running_std_{i}": self.running_var[i].item()
+#                    ** 0.5
+#                    for i in range(self.running_var.shape[0])
+#                }
+#            )
+#            log(
+#                {
+#                    f"{self.log_prefix}batch_mean_{i}": batch_mean[i].item()
+#                    for i in range(batch_mean.shape[0])
+#                }
+#            )
+#            log(
+#                {
+#                    f"{self.log_prefix}batch_std_{i}": batch_var[i].item() ** 0.5
+#                    for i in range(batch_var.shape[0])
+#                }
+#            )
+#
         # Use minimum variance for normalization if monotonic_variance is enabled
         effective_var = (
             self.min_variance if self.monotonic_variance else self.running_var
