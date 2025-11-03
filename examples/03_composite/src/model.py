@@ -160,18 +160,10 @@ class SimulateAngles:
         return np.random.uniform(-1.5, 1.5).astype(np.float32)
 
 
-
-class E(torch.nn.Module):
-    def __init__(self, log_prefix=None):
+# FIXME: Remove Unsqueeze class and replace with general lambda-based solution
+class Unsqueeze(torch.nn.Module):
+    def __init__(self):
         super().__init__()
-        from falcon.contrib.norms import LazyOnlineNorm
 
-        #self.norm = LazyOnlineNorm(momentum=5e-3)
-        self.linear = torch.nn.LazyLinear(100)
-        self.log_prefix = (log_prefix + ":") if log_prefix else ""
-
-    def forward(self, x, *args):
-        #x = self.norm(x).float()
-        x = x.float()/100
-        x = self.linear(x.flatten(start_dim=1))
-        return x
+    def forward(self, x):
+        return x.unsqueeze(1)/50
