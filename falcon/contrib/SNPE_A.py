@@ -483,6 +483,7 @@ class SNPE_A:
             val_posterior_loss = 0
             val_traindist_loss = 0
             num_val_samples = 0
+            epochs_no_improve = 0
             for batch in dataloader_val:
                 log({"val:step": n_val_batch})
                 n_val_batch += 1
