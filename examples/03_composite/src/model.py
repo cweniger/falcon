@@ -84,18 +84,17 @@ def simulate_snake(theta, image_size=128, step_size=6, radius=2, blur_sigma=0.0)
     centers : np.ndarray, shape (32, 2)
         Float array of (x, y) centers of all 32 circles.
     """
-    theta = np.asarray(theta, dtype=float)
-    if theta.shape != (31,):
-        raise ValueError("theta must have shape (31,)")
 
     # Start in the image center
     cx = cy = image_size / 2.0
     centers = [(cx, cy)]
 
     # Generate all subsequent centers from headings
-    for ang in theta:
-        dx = step_size * np.cos(ang)
-        dy = -step_size * np.sin(ang)  # minus: y grows downward in images
+    ang = 0
+    for delta_ang in theta:
+        ang += delta_ang
+        dx = step_size * np.sin(ang)
+        dy = -step_size * np.cos(ang)  # minus: y grows downward in images
         cx += dx
         cy += dy
         centers.append((cx, cy))
@@ -116,12 +115,13 @@ def simulate_snake(theta, image_size=128, step_size=6, radius=2, blur_sigma=0.0)
 
 
 class DrawFalconLetters:
-    def __init__(self, font_size=20, image_size=128):
+    def __init__(self, text = "FALCON", font_size=20, image_size=128):
         self.font_size = font_size
         self.image_size = image_size
+        self.text = text
 
     def simulate(self, positions):
-        img = simulate_word(positions, "FALCON", image_size=self.image_size, font_size=self.font_size)
+        img = simulate_word(positions, self.text, image_size=self.image_size, font_size=self.font_size)
         return img.astype(np.float32)
     
 class DrawSnake:
@@ -142,8 +142,11 @@ class DrawSnake:
         return img.astype(np.float32)
     
 class SimulateData:
-    def simulate(self, img1, img2):
-        img = img1 + img2 + 1000
+    def __init__(self, background_level=1000):
+        self.background_level = background_level
+
+    def simulate(self, *imgs):
+        img = sum(imgs) + self.background_level
         x = np.random.poisson(img / 10)
         return x.astype(np.float32)
     
@@ -154,7 +157,7 @@ class SimulatePositions:
     
 class SimulateAngles:
     def simulate(self, size=31):
-        return np.random.uniform(-np.pi, np.pi, size).astype(np.float32)
+        return np.random.uniform(-1.5, 1.5).astype(np.float32)
 
 
 
