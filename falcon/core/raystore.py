@@ -41,6 +41,7 @@ class DatasetManagerActor:
         resample_interval=5,
         initial_samples_path=None,
         keep_resampling=True,
+        dump_config=None,
     ):
         self.max_training_samples = max_training_samples
         self.min_training_samples = min_training_samples
@@ -49,6 +50,7 @@ class DatasetManagerActor:
         self.keep_resampling = keep_resampling
         self.resample_interval = resample_interval
         self.initial_samples_path = initial_samples_path
+        self.dump_config = dump_config
 
         # Store
         self.ray_store = []
@@ -177,6 +179,16 @@ class DatasetManagerActor:
         log({"buffer:n_tombstone": sum(self.status == SampleStatus.TOMBSTONE)})
         log({"buffer:n_deleted": sum(self.status == SampleStatus.DELETED)})
 
+        self.dump_store()
+
+    def dump_store(self):
+        # FIXME: Samples should be stored within single file, and reasonable directory
+        if self.dump_config and self.dump_config.enabled:
+            dump_path = self.dump_config.path.format(step=len(self.ray_store))
+            sample_data = self.ray_store[-1]
+            sample_data = {key: ray.get(value) for key, value in sample_data.items()}
+            joblib.dump(sample_data, dump_path)
+
     def garbage_collect_tombstones(self):
         """
         Garbage collect tombstone samples with zero references.
@@ -268,6 +280,7 @@ def get_ray_dataset_manager(
     resample_interval=5,
     initial_samples_path=None,
     keep_resampling=True,
+    dump_config=None,
 ):
     dataset_manager_actor = DatasetManagerActor.remote(
         min_training_samples=min_training_samples,
@@ -277,6 +290,7 @@ def get_ray_dataset_manager(
         resample_interval=resample_interval,
         keep_resampling=keep_resampling,
         initial_samples_path=initial_samples_path,
+        dump_config=dump_config,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)
     return dataset_manager
