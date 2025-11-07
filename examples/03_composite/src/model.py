@@ -167,3 +167,26 @@ class Unsqueeze(torch.nn.Module):
 
     def forward(self, x):
         return x.unsqueeze(1)/50
+
+
+# Concatenate
+
+class Concatenate(torch.nn.Module):
+    def __init__(self, dim=1):
+        super().__init__()
+        self.dim = dim
+
+    def forward(self, *inputs):
+        return torch.cat(inputs, dim=self.dim)  
+
+class Linear(torch.nn.Module):
+    def __init__(self, out_features = 64):
+        super().__init__()
+        self.linear = torch.nn.LazyLinear(out_features)
+        self.norm = torch.nn.LazyBatchNorm1d()
+
+    def forward(self, x):
+        # flatten all but first dimension
+        x = x.view(x.size(0), -1)
+        x = self.norm(x)
+        return self.linear(x)

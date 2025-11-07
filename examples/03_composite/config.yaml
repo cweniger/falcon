@@ -44,16 +44,21 @@ graph:
     estimator:
       _target_: falcon.contrib.SNPE_A
       embedding:
-         _target_: timm.create_model
-         model_name: resnet18 #convnext_tiny
-         in_chans: 1
-         num_classes: 2048
-         pretrained: true
+         _target_: model.Concatenate
          _input_:
-           _target_: model.Unsqueeze
-           _input_: [x]
-      net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: false
+            - _target_: timm.create_model
+              model_name: resnet18 #convnext_tiny
+              in_chans: 1
+              num_classes: 512
+              pretrained: true
+              _input_:
+                _target_: model.Unsqueeze
+                _input_: [x]
+            - _target_: model.Linear
+              out_features: 512
+              _input_: [x]
+      net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      theta_norm: true
 
       num_epochs: 300
       batch_size: 128
@@ -94,7 +99,7 @@ graph:
            _target_: model.Unsqueeze
            _input_: [x]
       net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: false
+      theta_norm: true
 
       num_epochs: 300
       batch_size: 128
