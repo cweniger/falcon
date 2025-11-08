@@ -1,0 +1,60 @@
+# WandB logging configuration
+logging:
+  project: falcon_examples
+  group: 03_composite
+  dir: ${hydra:run.dir}
+
+# Directory configuration
+paths:
+  import: "./src"
+  buffer: ${hydra:run.dir}/sim_dir
+  graph: ${hydra:run.dir}/graph_dir
+
+# Training buffer parameters
+buffer:
+  min_training_samples: 3200
+  max_training_samples: 6400
+  validation_window_size: 256
+  resample_batch_size: 256
+  keep_resampling: true
+  resample_interval: 5
+  dump:
+    enabled: true
+    path: sample_{step}.joblib
+
+# Graph definition using declarative YAML
+graph:
+  z:
+    evidence: [x]
+    simulator: 
+      _target_: falcon.contrib.HypercubeMappingPrior
+      priors: 
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+
+  y:
+    parents: [z]
+    simulator:
+      _target_: model.Signal
+
+  n:
+    simulator: model.Noise
+
+  x:
+    parents: [y, n]
+    simulator:
+      _target_: model.Data
+
+sample:
+  prior:
+    n: 1000
+    path: samples_prior.joblib
+  proposal:
+    n: 1000
+    path: samples_proposal.joblib
+  posterior:
+    n: 1000
+    path: samples_posterior.joblib
