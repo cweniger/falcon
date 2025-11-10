@@ -38,8 +38,10 @@ graph:
     estimator:
       _target_: falcon.contrib.SNPE_A
       embedding:
-        _target_: embeddings.Linear
-        out_features: 128
+        _target_: embeddings.StreamingPCA
+        log_prefix: "embedding"
+        num_bins: 10000
+        num_pars: 4
         _input_: [x, y, n]
       net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
       theta_norm: true
