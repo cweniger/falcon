@@ -17,7 +17,7 @@ buffer:
   validation_window_size: 128
   resample_batch_size: 128
   keep_resampling: true
-  resample_interval: 5
+  resample_interval: 10
   dump:
     enabled: true
     path: buffer_dump/sample_{step}.joblib
@@ -41,7 +41,7 @@ graph:
         _target_: embeddings.StreamingPCA
         log_prefix: "embedding"
         num_bins: 10000
-        num_pars: 4
+        num_pars: 32
         _input_: [x, y, n]
       net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
       theta_norm: true
@@ -77,7 +77,7 @@ graph:
     parents: [y, n]
     simulator:
       _target_: model.Data
-    observed: "./data/observed.npy"
+    observed: "./data/obs_v1.npy"
 
 sample:
   prior:
