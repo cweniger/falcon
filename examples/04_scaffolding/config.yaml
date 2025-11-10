@@ -14,18 +14,19 @@ paths:
 buffer:
   min_training_samples: 3200
   max_training_samples: 6400
-  validation_window_size: 256
-  resample_batch_size: 256
+  validation_window_size: 128
+  resample_batch_size: 128
   keep_resampling: true
   resample_interval: 5
   dump:
     enabled: true
-    path: sample_{step}.joblib
+    path: buffer_dump/sample_{step}.joblib
 
 # Graph definition using declarative YAML
 graph:
   z:
     evidence: [x]
+    scaffolds: [y, n]
     simulator: 
       _target_: falcon.contrib.HypercubeMappingPrior
       priors: 
@@ -34,6 +35,31 @@ graph:
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.contrib.SNPE_A
+      embedding:
+        _target_: embeddings.Linear
+        out_features: 128
+        _input_: [x, y, n]
+      net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      theta_norm: true
+
+      num_epochs: 300
+      batch_size: 128
+      lr: 0.001
+      scheduler_patience: 16
+      lr_decay_factor: 0.5
+      early_stop_patience: 32
+
+      gamma: 0.5
+      discard_samples: false
+      log_ratio_threshold: -20
+
+      sample_reference_posterior: false
+      use_best_models_during_inference: true
+      reset_network_after_pause: false
+    ray:
+      num_gpus: 0.0
 
   y:
     parents: [z]
@@ -41,12 +67,15 @@ graph:
       _target_: model.Signal
 
   n:
-    simulator: model.Noise
+    parents: []
+    simulator:
+      _target_: model.Noise
 
   x:
     parents: [y, n]
     simulator:
       _target_: model.Data
+    observed: "./data/observed.npy"
 
 sample:
   prior:
