@@ -59,6 +59,21 @@ class MultiplexNodeWrapper:
     def load(self, node_dir):
         pass  # Silently ignore, multiplexed nodes are never saved
 
+    def pause(self):
+        """Pause all wrapped NodeWrapper actors."""
+        futures = [n.pause.remote() for n in self.wrapped_node_list]
+        ray.get(futures)
+
+    def resume(self):
+        """Resume all wrapped NodeWrapper actors."""
+        futures = [n.resume.remote() for n in self.wrapped_node_list]
+        ray.get(futures)
+
+    def interrupt(self):
+        """Interrupt all wrapped NodeWrapper actors."""
+        futures = [n.interrupt.remote() for n in self.wrapped_node_list]
+        ray.get(futures)
+
 
 @ray.remote
 class NodeWrapper:
