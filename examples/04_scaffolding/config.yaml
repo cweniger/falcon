@@ -1,7 +1,7 @@
 # WandB logging configuration
 logging:
   project: falcon_examples
-  group: 03_composite
+  group: 04_scaffolding
   dir: ${hydra:run.dir}
 
 # Directory configuration
@@ -17,7 +17,7 @@ buffer:
   validation_window_size: 128
   resample_batch_size: 128
   keep_resampling: true
-  resample_interval: 10
+  resample_interval: 5
   dump:
     enabled: true
     path: buffer_dump/sample_{step}.joblib
@@ -41,10 +41,10 @@ graph:
         _target_: embeddings.StreamingPCA
         log_prefix: "embedding"
         num_bins: 10000
-        num_pars: 32
+        num_pars: 256
         _input_: [x, y, n]
-      net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: true
+      net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      theta_norm: false
 
       num_epochs: 300
       batch_size: 128
