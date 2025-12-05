@@ -140,7 +140,11 @@ class PCAProjector(torch.nn.Module):
             )  # shape: (2k, D)
 
             # SVD to re-orthonormalize the combined set of vectors
+            U_combined = U_combined.double()
             U, S, Vt = torch.linalg.svd(U_combined, full_matrices=False)
+            U = U.float()
+            S = S.float()
+            Vt = Vt.float()
 
             # Take the top-k vectors (right singular vectors)
             self.components = Vt[: self.n_components]
