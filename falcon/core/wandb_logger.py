@@ -2,11 +2,14 @@ from typing import Optional, Dict, Any
 import ray
 import wandb
 
+from .local_logger import LocalLoggerWrapper
+
 
 def start_wandb_logger(
     wandb_project: Optional[str] = None,
     wandb_group: Optional[str] = None,
     wandb_dir: Optional[str] = None,
+    local_log_dir: Optional[str] = None,
 ):
     logger = WandBManager.options(
         name="falcon:global_logger", lifetime="detached"
@@ -14,6 +17,7 @@ def start_wandb_logger(
         wandb_project=wandb_project,
         wandb_group=wandb_group,
         wandb_dir=wandb_dir,
+        local_log_dir=local_log_dir,
     )
 
 
@@ -78,15 +82,18 @@ class WandBManager:
         wandb_project: Optional[str] = None,
         wandb_group: Optional[str] = None,
         wandb_dir: Optional[str] = None,
+        local_log_dir: Optional[str] = None,
     ):
         self.wandb_project = wandb_project
         self.wandb_group = wandb_group
         self.wandb_dir = wandb_dir
+        self.local_log_dir = local_log_dir
         self.wandb_runs = {}
+        self.local_loggers = {}
 
     def init(self, actor_id: str, config: Optional[Dict[str, Any]] = None):
         """
-        Initialize a new W&B run.
+        Initialize a new W&B run and local logger.
         """
         self.wandb_runs[actor_id] = WandBWrapper.remote(
             wandb_project=self.wandb_project,
@@ -95,6 +102,12 @@ class WandBManager:
             wandb_config=config,
             wandb_dir=self.wandb_dir,
         )
+        # Initialize local logger if directory is configured
+        if self.local_log_dir:
+            self.local_loggers[actor_id] = LocalLoggerWrapper.remote(
+                base_dir=self.local_log_dir,
+                actor_id=actor_id,
+            )
 
     def log(
         self,
@@ -103,13 +116,20 @@ class WandBManager:
         actor_id: str = None,
     ):
         """
-        Log scalar metrics, wandb style.
+        Log scalar metrics to both wandb and local storage.
         """
         self.wandb_runs[actor_id].log.remote(metrics, step=step)
+        # Also log to local logger if available
+        if actor_id in self.local_loggers:
+            self.local_loggers[actor_id].log.remote(metrics, step=step)
 
     def shutdown(self):
         """
-        Finish all W&B runs.
+        Finish all W&B runs and flush local loggers.
         """
+        # Shutdown wandb runs
         for _, wandb_run in self.wandb_runs.items():
             ray.get(wandb_run.shutdown.remote())
+        # Shutdown local loggers (flush remaining buffers)
+        for _, local_logger in self.local_loggers.items():
+            ray.get(local_logger.shutdown.remote())

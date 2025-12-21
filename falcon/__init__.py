@@ -4,4 +4,5 @@ from .core.raystore import get_ray_dataset_manager
 from .core.utils import LazyLoader
 from .core.logging import log
 from .core.wandb_logger import start_wandb_logger, finish_wandb_logger
+from .core.run_reader import read_run
 import falcon.contrib as contrib

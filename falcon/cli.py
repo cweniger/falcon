@@ -59,10 +59,12 @@ def launch_mode(cfg: DictConfig) -> None:
 
     # Initialise logger (should be done before any other falcon code)
     wandb_dir = cfg.logging.get("dir", None)
+    local_log_dir = cfg.paths.get("graph", None)  # Store local logs in graph directory
     falcon.start_wandb_logger(
         wandb_project=cfg.logging.project,
         wandb_group=cfg.logging.group,
         wandb_dir=wandb_dir,
+        local_log_dir=local_log_dir,
     )
 
     ########################
