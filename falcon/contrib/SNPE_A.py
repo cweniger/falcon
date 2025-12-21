@@ -34,11 +34,11 @@ class Flow(torch.nn.Module):
         adaptive_momentum=False,
     ):
         super(Flow, self).__init__()
-        self.log_prefix = log_prefix + ":" if log_prefix else ""
+        self.log_prefix = log_prefix
         self.theta_norm = (
             LazyOnlineNorm(
                 momentum=norm_momentum,
-                log_prefix=self.log_prefix + "OnlineNorm",
+                log_prefix=self.log_prefix,
                 use_log_update=use_log_update,
                 adaptive_momentum=adaptive_momentum,
             )
@@ -108,30 +108,34 @@ class Flow(torch.nn.Module):
         self.scale = 0.2
 
     def loss(self, theta, s):
-        log(
-            {
-                f"{self.log_prefix}target_{i}_min": theta[:, i].min().item()
-                for i in range(theta.shape[1])
-            }
-        )
-        log(
-            {
-                f"{self.log_prefix}target_{i}_max": theta[:, i].max().item()
-                for i in range(theta.shape[1])
-            }
-        )
-        log(
-            {
-                f"{self.log_prefix}summary_{i}_min": s[:, i].min().item()
-                for i in range(s.shape[1])
-            }
-        )
-        log(
-            {
-                f"{self.log_prefix}summary_{i}_max": s[:, i].max().item()
-                for i in range(s.shape[1])
-            }
-        )
+#        log(
+#            {
+#                f"target_{i}_min": theta[:, i].min().item()
+#                for i in range(theta.shape[1])
+#            },
+#            log_prefix = self.log_prefix
+#        )
+#        log(
+#            {
+#                f"target_{i}_max": theta[:, i].max().item()
+#                for i in range(theta.shape[1])
+#            },
+#            log_prefix = self.log_prefix
+#        )
+#        log(
+#            {
+#                f"summary_{i}_min": s[:, i].min().item()
+#                for i in range(s.shape[1])
+#            },
+#            log_prefix = self.log_prefix
+#        )
+#        log(
+#            {
+#                f"summary_{i}_max": s[:, i].max().item()
+#                for i in range(s.shape[1])
+#            },
+#            log_prefix = self.log_prefix
+#        )
 
         if self.theta_norm is not None:
             theta = self.theta_norm(theta)
@@ -183,7 +187,7 @@ class SNPE_A:
         theta_norm=True,
         norm_momentum=1e-2,
         net_type="zuko_nice",
-        sample_reference_posterior=True,
+        sample_reference_posterior=False,
         batch_size=128,
         embedding=None,
         _embedding_keywords=[],
@@ -275,7 +279,7 @@ class SNPE_A:
             theta,
             s,
             theta_norm=self.theta_norm,
-            log_prefix="posterior",
+            log_prefix="net",
             norm_momentum=self.norm_momentum,
             net_type=self.net_type,
             use_log_update=self._use_log_update,
@@ -286,7 +290,7 @@ class SNPE_A:
             theta,
             s * 0,
             theta_norm=self.theta_norm,
-            log_prefix="traindist",
+            log_prefix="net_aux",
             norm_momentum=self.norm_momentum,
             net_type=self.net_type,
             use_log_update=self._use_log_update,
@@ -299,7 +303,7 @@ class SNPE_A:
             theta,
             s,
             theta_norm=self.theta_norm,
-            log_prefix="best_posterior",
+            log_prefix="best_net",
             norm_momentum=self.norm_momentum,
             net_type=self.net_type,
             adaptive_momentum=self.adaptive_momentum,
@@ -311,7 +315,7 @@ class SNPE_A:
             theta,
             s * 0,
             theta_norm=self.theta_norm,
-            log_prefix="best_traindist",
+            log_prefix="best_net_aux",
             norm_momentum=self.norm_momentum,
             net_type=self.net_type,
             adaptive_momentum=self.adaptive_momentum,
@@ -415,7 +419,7 @@ class SNPE_A:
             loss_train_avg = 0
             num_samples = 0
             for batch in dataloader_train:
-                log({"n_train_batch": n_train_batch})
+                log({"train:step": n_train_batch})
                 n_train_batch += 1
                 ids, theta, theta_logprob, inf_conditions = (
                     batch[0],
@@ -425,8 +429,8 @@ class SNPE_A:
                 )
                 ts = time.time()
                 self._train_id_history.extend((ts, id) for id in ids.numpy().tolist())
-                log({"theta_logprob_min": theta_logprob.min().item()})
-                log({"theta_logprob_max": theta_logprob.max().item()})
+                log({"train:theta_logprob_min": theta_logprob.min().item()})
+                log({"train:theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
                     self._initialize_networks(u, inf_conditions)
@@ -447,13 +451,13 @@ class SNPE_A:
                 losses_train = self._posterior.loss(uc, sc)
                 loss_train = torch.mean(losses_train)
 
-                log({"loss_train_posterior": loss_train.item()})
+                log({"train:loss": loss_train.item()})
 
                 self._traindist.train()
                 losses_aux = self._traindist.loss(uc, sc.detach() * 0)
                 loss_aux = torch.mean(losses_aux)
 
-                log({"loss_train_traindist": loss_aux.item()})
+                log({"train:loss_aux": loss_aux.item()})
 
                 loss_total = loss_train + loss_aux
                 loss_total.backward()
@@ -479,8 +483,9 @@ class SNPE_A:
             val_posterior_loss = 0
             val_traindist_loss = 0
             num_val_samples = 0
+            epochs_no_improve = 0
             for batch in dataloader_val:
-                log({"n_val_batch": n_val_batch})
+                log({"val:step": n_val_batch})
                 n_val_batch += 1
                 ids, theta, theta_logprob, inf_conditions = (
                     batch[0],
@@ -492,8 +497,8 @@ class SNPE_A:
                 self._validation_id_history.extend(
                     (ts, id) for id in ids.numpy().tolist()
                 )
-                log({"theta_logprob_min": theta_logprob.min().item()})
-                log({"theta_logprob_max": theta_logprob.max().item()})
+                log({"val:theta_logprob_min": theta_logprob.min().item()})
+                log({"val:theta_logprob_max": theta_logprob.max().item()})
                 u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=False)
@@ -518,20 +523,20 @@ class SNPE_A:
             val_posterior_loss /= num_val_samples
             val_traindist_loss /= num_val_samples
 
-            log({"loss_val_posterior": val_posterior_loss})
-            log({"loss_val_traindist": val_traindist_loss})
+            log({"val:loss": val_posterior_loss})
+            log({"val:loss_aux": val_traindist_loss})
 
             # Check and save best checkpoints independently
             if val_posterior_loss < self.best_posterior_val_loss:
                 self.best_posterior_val_loss = val_posterior_loss
                 self._save_posterior_checkpoint()
-                log({"counter_checkpoint_posterior": counter_checkpoint_posterior})
+                log({"checkpoint:count": counter_checkpoint_posterior})
                 counter_checkpoint_posterior += 1
 
             if val_traindist_loss < self.best_traindist_val_loss:
                 self.best_traindist_val_loss = val_traindist_loss
                 self._save_traindist_checkpoint()
-                log({"counter_checkpoint_traindist": counter_checkpoint_traindist})
+                log({"checkpoint:count_aux": counter_checkpoint_traindist})
                 counter_checkpoint_traindist += 1
 
             # Use posterior validation loss for scheduler and early stopping
@@ -603,13 +608,13 @@ class SNPE_A:
             vector_std = posterior_samples.std(axis=0).cpu()
             log(
                 {
-                    f"posterior_mean_{i}": vector_mean[i].item()
+                    f"proposal_sample:posterior_mean_{i}": vector_mean[i].item()
                     for i in range(len(vector_mean))
                 },
             )
             log(
                 {
-                    f"posterior_std_{i}": vector_std[i].item()
+                    f"proposal_sample:posterior_std_{i}": vector_std[i].item()
                     for i in range(len(vector_std))
                 },
             )
@@ -622,22 +627,22 @@ class SNPE_A:
         )
         log(
             {
-                "proposal_mean": samples.mean().item(),
-                "proposal_std": samples.std().item(),
-                "proposal_logprob": logprob.mean().item(),
+                "proposal_sample:mean": samples.mean().item(),
+                "proposal_sample:std": samples.std().item(),
+                "proposal_sample:logprob": logprob.mean().item(),
             }
         )
-        vector_mean = samples.mean(axis=0).cpu()
-        vector_std = samples.std(axis=0).cpu()
-        log(
-            {
-                f"proposal_mean_{i}": vector_mean[i].item()
-                for i in range(len(vector_mean))
-            },
-        )
-        log(
-            {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
-        )
+#        vector_mean = samples.mean(axis=0).cpu()
+#        vector_std = samples.std(axis=0).cpu()
+#        log(
+#            {
+#                f"proposal_mean_{i}": vector_mean[i].item()
+#                for i in range(len(vector_mean))
+#            },
+#        )
+#        log(
+#            {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
+#        )
         samples = samples.numpy()
         return RVBatch(samples, logprob=logprob.numpy())
 
@@ -693,8 +698,8 @@ class SNPE_A:
 
         log(
             {
-                "traindist_mean": samples_proposals.mean().item(),
-                "traindist_std": samples_proposals.std().item(),
+                "importance_sample:proposal_mean": samples_proposals.mean().item(),
+                "importance_sample:proposal_std": samples_proposals.std().item(),
             }
         )
 
@@ -741,8 +746,8 @@ class SNPE_A:
 
         # Effective sample size diagnostics
         n_eff = 1 / ((weights**2).sum(dim=0)).cpu().detach().numpy()
-        log({"n_eff_min": n_eff.min()})
-        log({"n_eff_max": n_eff.max()})
+        log({"importance_sample:n_eff_min": n_eff.min()})
+        log({"importance_sample:n_eff_max": n_eff.max()})
 
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
 

@@ -33,6 +33,9 @@ def initialize_logging_for(actor_id):
         _logger_ref.init.remote(actor_id=actor_id)
 
 
-def log(metrics: dict, step=None):
+def log(metrics: dict, log_prefix=None):
     if _logger_ref:
-        _logger_ref.log.remote(metrics, step=step, actor_id=_actor_id)
+        metrics = {
+            (f"{_actor_id}:" if _actor_id else "") + (f"{log_prefix}:" if log_prefix else "") + k: v for k, v in metrics.items()
+        }
+        _logger_ref.log.remote(metrics, step=None, actor_id=_actor_id)

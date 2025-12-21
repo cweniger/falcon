@@ -96,6 +96,7 @@ def launch_mode(cfg: DictConfig) -> None:
         resample_interval=cfg.buffer.resample_interval,
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
+        dump_config=cfg.buffer.get("dump", None),
     )
 
     # 3) Launch training & simulations

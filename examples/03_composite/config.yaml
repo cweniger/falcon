@@ -1,0 +1,147 @@
+# WandB logging configuration
+logging:
+  project: falcon_examples
+  group: 03_composite
+  dir: ${hydra:run.dir}
+
+# Directory configuration
+paths:
+  import: "./src"
+  buffer: ${hydra:run.dir}/sim_dir
+  graph: ${hydra:run.dir}/graph_dir
+
+# Training buffer parameters
+buffer:
+  min_training_samples: 3200
+  max_training_samples: 6400
+  validation_window_size: 256
+  resample_batch_size: 256
+  keep_resampling: true
+  resample_interval: 5
+  dump:
+    enabled: true
+    path: sample_{step}.joblib
+
+# Graph definition using declarative YAML
+graph:
+  z1:
+    evidence: [x]
+    simulator: 
+      _target_: falcon.contrib.HypercubeMappingPrior
+      priors: 
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.contrib.SNPE_A
+      embedding:
+         _target_: model.Concatenate
+         _input_:
+            - _target_: timm.create_model
+              model_name: resnet18 #convnext_tiny
+              in_chans: 1
+              num_classes: 512
+              pretrained: true
+              _input_:
+                _target_: model.Unsqueeze
+                _input_: [x]
+            - _target_: model.Linear
+              out_features: 512
+              _input_: [x]
+      net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      theta_norm: true
+
+      num_epochs: 300
+      batch_size: 128
+      lr: 0.001
+      scheduler_patience: 16
+      lr_decay_factor: 0.5
+      early_stop_patience: 32
+
+      gamma: 0.5
+      discard_samples: false
+      log_ratio_threshold: -20
+
+      sample_reference_posterior: false
+      use_best_models_during_inference: true
+      reset_network_after_pause: false
+    ray:
+      num_gpus: 0.5
+
+  z2:
+    evidence: [x]
+    simulator: 
+      _target_: falcon.contrib.HypercubeMappingPrior
+      priors: 
+        - ['uniform', -1.2, 1.2]
+        - ['uniform', -1.2, 1.2]
+        - ['uniform', -1.2, 1.2]
+        - ['uniform', -1.2, 1.2]
+        - ['uniform', -1.2, 1.2]
+    estimator:
+      _target_: falcon.contrib.SNPE_A
+      embedding:
+         _target_: timm.create_model
+         model_name: resnet18 #convnext_tiny
+         in_chans: 1
+         num_classes: 4096
+         pretrained: true
+         _input_:
+           _target_: model.Unsqueeze
+           _input_: [x]
+      net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      theta_norm: true
+
+      num_epochs: 300
+      batch_size: 128
+      lr: 0.001
+      scheduler_patience: 16
+      lr_decay_factor: 0.5
+      early_stop_patience: 32
+
+      gamma: 0.5
+      discard_samples: false
+      log_ratio_threshold: -20
+
+      sample_reference_posterior: false
+      use_best_models_during_inference: true
+      reset_network_after_pause: false
+    ray:
+      num_gpus: 0.5
+
+  img1:
+    parents: [z1]
+    simulator:
+      _target_: model.DrawFalconLetters
+      text: "FALCON"
+
+  img2:
+    parents: [z2]
+    simulator: model.DrawSnake
+
+  x:
+    parents: [img1, img2]
+    simulator:
+      _target_: model.SimulateData
+      background_level: 10
+    observed: "./data/x_obs_FALCON_spiral_short.npy"
+
+sample:
+  prior:
+    n: 1000
+    path: samples_prior.joblib
+  proposal:
+    n: 1000
+    path: samples_proposal.joblib
+  posterior:
+    n: 1000
+    path: samples_posterior.joblib
