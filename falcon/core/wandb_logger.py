@@ -5,14 +5,32 @@ This module provides WandB-specific logging implementations:
 - WandBBackend: Non-Ray backend for single-process use
 - WandBLoggerActor: Ray actor for distributed logging
 - create_wandb_factory: Factory function for LoggerManager integration
+
+WandB is an optional dependency. If not installed, attempting to use
+WandB backends will raise an ImportError with installation instructions.
 """
 
 from typing import Any, Dict, Optional
 
 import ray
-import wandb
 
 from .logger import LoggerBackend
+
+# Optional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    WANDB_AVAILABLE = False
+
+
+def _check_wandb_available():
+    """Raise ImportError if wandb is not installed."""
+    if not WANDB_AVAILABLE:
+        raise ImportError(
+            "WandB is not installed. Install it with: pip install wandb"
+        )
 
 
 class WandBBackend(LoggerBackend):
@@ -26,6 +44,9 @@ class WandBBackend(LoggerBackend):
         name: Run name.
         config: Run configuration dict.
         dir: Directory for WandB files.
+
+    Raises:
+        ImportError: If wandb is not installed.
     """
 
     def __init__(
@@ -36,6 +57,8 @@ class WandBBackend(LoggerBackend):
         config: Optional[Dict[str, Any]] = None,
         dir: Optional[str] = None,
     ):
+        _check_wandb_available()
+
         wandb_kwargs = {
             "project": project,
             "group": group,
@@ -66,6 +89,9 @@ class WandBLoggerActor:
 
     Provides the same interface as WandBBackend but runs as a Ray actor
     for distributed logging scenarios.
+
+    Raises:
+        ImportError: If wandb is not installed.
     """
 
     def __init__(
@@ -108,11 +134,15 @@ def create_wandb_factory(
     Returns:
         Factory function that creates WandBLoggerActor instances.
 
+    Raises:
+        ImportError: If wandb is not installed.
+
     Example:
         manager = LoggerManager.remote({
             "wandb": create_wandb_factory(project="my_project"),
         })
     """
+    _check_wandb_available()
 
     def factory(actor_id: str, config: Optional[Dict[str, Any]] = None):
         return WandBLoggerActor.remote(
@@ -140,7 +170,12 @@ def start_wandb_logger(
 
     This is a convenience function that creates a LoggerManager with
     WandB and optionally local file backends.
+
+    Raises:
+        ImportError: If wandb is not installed.
     """
+    _check_wandb_available()
+
     from .logger import LoggerManager
     from .local_logger import create_local_factory
 

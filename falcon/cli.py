@@ -20,6 +20,76 @@ import sbi.analysis
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
+from falcon.core.logger import LoggerManager
+from falcon.core.local_logger import create_local_factory
+from falcon.core.wandb_logger import WANDB_AVAILABLE, create_wandb_factory
+
+
+def _init_logging(cfg):
+    """Initialize logging backends based on config.
+
+    Supports both new nested config structure and legacy flat structure:
+
+    New structure:
+        logging:
+          wandb:
+            enabled: true
+            project: my_project
+            group: my_group
+            dir: ${hydra:run.dir}
+          local:
+            enabled: true
+            dir: ${paths.graph}
+
+    Legacy structure (backwards compatible):
+        logging:
+          project: my_project
+          group: my_group
+          dir: ${hydra:run.dir}
+    """
+    factories = {}
+
+    # Check for new nested structure vs legacy flat structure
+    if "wandb" in cfg.logging:
+        # New structure
+        wandb_cfg = cfg.logging.wandb
+        local_cfg = cfg.logging.get("local", {})
+
+        # WandB backend
+        wandb_enabled = wandb_cfg.get("enabled", True)
+        if wandb_enabled:
+            if not WANDB_AVAILABLE:
+                print("Warning: wandb logging enabled but wandb not installed, skipping")
+            else:
+                factories["wandb"] = create_wandb_factory(
+                    project=wandb_cfg.get("project"),
+                    group=wandb_cfg.get("group"),
+                    dir=wandb_cfg.get("dir"),
+                )
+
+        # Local backend
+        local_enabled = local_cfg.get("enabled", True)
+        if local_enabled:
+            local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
+            if local_dir:
+                factories["local"] = create_local_factory(local_dir)
+    else:
+        # Legacy flat structure
+        if WANDB_AVAILABLE:
+            factories["wandb"] = create_wandb_factory(
+                project=cfg.logging.get("project"),
+                group=cfg.logging.get("group"),
+                dir=cfg.logging.get("dir"),
+            )
+        local_dir = cfg.paths.get("graph")
+        if local_dir:
+            factories["local"] = create_local_factory(local_dir)
+
+    # Start the logger manager
+    if factories:
+        LoggerManager.options(
+            name="falcon:global_logger", lifetime="detached"
+        ).remote(backend_factories=factories)
 
 
 def parse_operational_flags():
@@ -58,14 +128,7 @@ def launch_mode(cfg: DictConfig) -> None:
 #            sys.path.insert(0, str(model_path))
 
     # Initialise logger (should be done before any other falcon code)
-    wandb_dir = cfg.logging.get("dir", None)
-    local_log_dir = cfg.paths.get("graph", None)  # Store local logs in graph directory
-    falcon.start_wandb_logger(
-        wandb_project=cfg.logging.project,
-        wandb_group=cfg.logging.group,
-        wandb_dir=wandb_dir,
-        local_log_dir=local_log_dir,
-    )
+    _init_logging(cfg)
 
     ########################
     ### Model definition ###

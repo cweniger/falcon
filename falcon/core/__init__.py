@@ -13,6 +13,7 @@ from .local_logger import (
     create_local_factory,
 )
 from .wandb_logger import (
+    WANDB_AVAILABLE,
     WandBBackend,
     WandBLoggerActor,
     create_wandb_factory,
