@@ -1,8 +1,13 @@
-# WandB configuration
+# Logging configuration
 logging:
-  project: falcon_examples
-  group: 02_bimodal_rounds_fill
-  dir: ${hydra:run.dir}
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 02_bimodal_rounds_fill
+    dir: ${hydra:run.dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
 
 # Directory configuration (relative to Hydra output directory)
 paths:

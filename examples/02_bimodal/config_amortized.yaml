@@ -1,8 +1,13 @@
-# WandB logging configuration
+# Logging configuration
 logging:
-  project: falcon_examples
-  group: 02_bimodal_amortized
-  dir: ${hydra:run.dir}
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 02_bimodal_amortized
+    dir: ${hydra:run.dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
 
 # Directory configuration
 paths:
