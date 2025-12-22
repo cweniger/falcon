@@ -1,8 +1,133 @@
-from typing import Optional, Dict, Any
+"""
+WandB logging backend.
+
+This module provides WandB-specific logging implementations:
+- WandBBackend: Non-Ray backend for single-process use
+- WandBLoggerActor: Ray actor for distributed logging
+- create_wandb_factory: Factory function for LoggerManager integration
+"""
+
+from typing import Any, Dict, Optional
+
 import ray
 import wandb
 
-from .local_logger import LocalLoggerWrapper
+from .logger import LoggerBackend
+
+
+class WandBBackend(LoggerBackend):
+    """WandB logging backend (non-Ray version).
+
+    Logs metrics to Weights & Biases. Suitable for single-process use.
+
+    Args:
+        project: WandB project name.
+        group: WandB group name.
+        name: Run name.
+        config: Run configuration dict.
+        dir: Directory for WandB files.
+    """
+
+    def __init__(
+        self,
+        project: Optional[str] = None,
+        group: Optional[str] = None,
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        dir: Optional[str] = None,
+    ):
+        wandb_kwargs = {
+            "project": project,
+            "group": group,
+            "name": name,
+            "config": config or {},
+            "reinit": True,
+        }
+        if dir:
+            wandb_kwargs["dir"] = dir
+
+        self.run = wandb.init(**wandb_kwargs)
+
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+        """Log metrics to WandB."""
+        try:
+            self.run.log(metrics, step=step)
+        except Exception as e:
+            print(f"WandB logging error: {e}")
+
+    def shutdown(self) -> None:
+        """Finish the WandB run."""
+        self.run.finish()
+
+
+@ray.remote
+class WandBLoggerActor:
+    """Ray actor wrapper for WandBBackend.
+
+    Provides the same interface as WandBBackend but runs as a Ray actor
+    for distributed logging scenarios.
+    """
+
+    def __init__(
+        self,
+        project: Optional[str] = None,
+        group: Optional[str] = None,
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        dir: Optional[str] = None,
+    ):
+        self._backend = WandBBackend(
+            project=project,
+            group=group,
+            name=name,
+            config=config,
+            dir=dir,
+        )
+
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+        """Log metrics (delegates to WandBBackend)."""
+        self._backend.log(metrics, step)
+
+    def shutdown(self) -> None:
+        """Shutdown the backend (delegates to WandBBackend)."""
+        self._backend.shutdown()
+
+
+def create_wandb_factory(
+    project: Optional[str] = None,
+    group: Optional[str] = None,
+    dir: Optional[str] = None,
+):
+    """Create a WandB backend factory for use with LoggerManager.
+
+    Args:
+        project: WandB project name.
+        group: WandB group name.
+        dir: Directory for WandB files.
+
+    Returns:
+        Factory function that creates WandBLoggerActor instances.
+
+    Example:
+        manager = LoggerManager.remote({
+            "wandb": create_wandb_factory(project="my_project"),
+        })
+    """
+
+    def factory(actor_id: str, config: Optional[Dict[str, Any]] = None):
+        return WandBLoggerActor.remote(
+            project=project,
+            group=group,
+            name=actor_id,
+            config=config,
+            dir=dir,
+        )
+
+    return factory
+
+
+# Backwards compatibility aliases and helpers
+WandBWrapper = WandBLoggerActor
 
 
 def start_wandb_logger(
@@ -11,125 +136,31 @@ def start_wandb_logger(
     wandb_dir: Optional[str] = None,
     local_log_dir: Optional[str] = None,
 ):
-    logger = WandBManager.options(
-        name="falcon:global_logger", lifetime="detached"
-    ).remote(
-        wandb_project=wandb_project,
-        wandb_group=wandb_group,
-        wandb_dir=wandb_dir,
-        local_log_dir=local_log_dir,
+    """Start the global logger manager as a detached Ray actor.
+
+    This is a convenience function that creates a LoggerManager with
+    WandB and optionally local file backends.
+    """
+    from .logger import LoggerManager
+    from .local_logger import create_local_factory
+
+    factories = {
+        "wandb": create_wandb_factory(
+            project=wandb_project,
+            group=wandb_group,
+            dir=wandb_dir,
+        ),
+    }
+    if local_log_dir:
+        factories["local"] = create_local_factory(local_log_dir)
+
+    LoggerManager.options(name="falcon:global_logger", lifetime="detached").remote(
+        backend_factories=factories
     )
 
 
 def finish_wandb_logger():
-    """
-    Stop the W&B logger actor.
-    """
+    """Stop the global logger manager."""
     logger = ray.get_actor(name="falcon:global_logger")
     ray.get(logger.shutdown.remote())
     ray.kill(logger)
-
-
-@ray.remote
-class WandBWrapper:
-    def __init__(
-        self,
-        wandb_project: Optional[str] = None,
-        wandb_group: Optional[str] = None,
-        wandb_name: Optional[str] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        wandb_dir: Optional[str] = None,
-    ):
-        self.wandb_project = wandb_project
-        self.wandb_group = wandb_group
-        self.wandb_name = wandb_name
-        self.wandb_config = wandb_config
-        self.wandb_dir = wandb_dir
-
-        wandb_init_kwargs = {
-            "project": self.wandb_project,
-            "group": self.wandb_group,
-            "name": self.wandb_name,
-            "config": self.wandb_config or {},
-            "reinit": True,
-        }
-        if self.wandb_dir:
-            wandb_init_kwargs["dir"] = self.wandb_dir
-
-        self.wandb_run = wandb.init(**wandb_init_kwargs)
-
-    def log(self, metrics: Dict[str, float], step: Optional[int] = None):
-        """
-        Log scalar metrics, wandb style.
-        """
-        try:
-            self.wandb_run.log(metrics, step=step)
-        except:
-            # Handle the case where the actor is not available
-            print("Error logging metrics:", self.wandb_name, metrics)
-
-    def shutdown(self):
-        """
-        Finish the W&B run.
-        """
-        self.wandb_run.finish()
-
-
-@ray.remote
-class WandBManager:
-    def __init__(
-        self,
-        wandb_project: Optional[str] = None,
-        wandb_group: Optional[str] = None,
-        wandb_dir: Optional[str] = None,
-        local_log_dir: Optional[str] = None,
-    ):
-        self.wandb_project = wandb_project
-        self.wandb_group = wandb_group
-        self.wandb_dir = wandb_dir
-        self.local_log_dir = local_log_dir
-        self.wandb_runs = {}
-        self.local_loggers = {}
-
-    def init(self, actor_id: str, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize a new W&B run and local logger.
-        """
-        self.wandb_runs[actor_id] = WandBWrapper.remote(
-            wandb_project=self.wandb_project,
-            wandb_group=self.wandb_group,
-            wandb_name=actor_id,
-            wandb_config=config,
-            wandb_dir=self.wandb_dir,
-        )
-        # Initialize local logger if directory is configured
-        if self.local_log_dir:
-            self.local_loggers[actor_id] = LocalLoggerWrapper.remote(
-                base_dir=self.local_log_dir,
-                actor_id=actor_id,
-            )
-
-    def log(
-        self,
-        metrics: Dict[str, float],
-        step: Optional[int] = None,
-        actor_id: str = None,
-    ):
-        """
-        Log scalar metrics to both wandb and local storage.
-        """
-        self.wandb_runs[actor_id].log.remote(metrics, step=step)
-        # Also log to local logger if available
-        if actor_id in self.local_loggers:
-            self.local_loggers[actor_id].log.remote(metrics, step=step)
-
-    def shutdown(self):
-        """
-        Finish all W&B runs and flush local loggers.
-        """
-        # Shutdown wandb runs
-        for _, wandb_run in self.wandb_runs.items():
-            ray.get(wandb_run.shutdown.remote())
-        # Shutdown local loggers (flush remaining buffers)
-        for _, local_logger in self.local_loggers.items():
-            ray.get(local_logger.shutdown.remote())
