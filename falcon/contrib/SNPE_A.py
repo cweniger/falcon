@@ -1,13 +1,15 @@
 import asyncio
 from pathlib import Path
+import copy
+import time
 
 import torch
 import numpy as np
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
-import time
 
-import sbi.utils  # Don't remove this import, it is needed for sbi.neural_nets.net_builders
+import ray
+import sbi.utils  # Don't remove - needed for sbi.neural_nets.net_builders
 from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
@@ -15,11 +17,25 @@ from falcon.core.utils import LazyLoader, RVBatch
 from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
-import copy
 
-# FIXME: Logging should happen through wandb only
-import os
-import ray
+
+# Network builder registry
+NET_BUILDERS = {
+    "nsf": net_builders.build_nsf,
+    "made": net_builders.build_made,
+    "maf": net_builders.build_maf,
+    "maf_rqs": net_builders.build_maf_rqs,
+    "zuko_nice": net_builders.build_zuko_nice,
+    "zuko_maf": net_builders.build_zuko_maf,
+    "zuko_nsf": net_builders.build_zuko_nsf,
+    "zuko_ncsf": net_builders.build_zuko_ncsf,
+    "zuko_sospf": net_builders.build_zuko_sospf,
+    "zuko_naf": net_builders.build_zuko_naf,
+    "zuko_unaf": net_builders.build_zuko_unaf,
+    "zuko_gf": net_builders.build_zuko_gf,
+    "zuko_bpf": net_builders.build_zuko_bpf,
+}
+
 
 class Flow(torch.nn.Module):
     def __init__(
@@ -27,128 +43,42 @@ class Flow(torch.nn.Module):
         theta,
         s,
         theta_norm=False,
-        log_prefix=None,
         norm_momentum=3e-3,
         net_type="nsf",
         use_log_update=False,
         adaptive_momentum=False,
     ):
-        super(Flow, self).__init__()
-        self.log_prefix = log_prefix
+        super().__init__()
         self.theta_norm = (
             LazyOnlineNorm(
                 momentum=norm_momentum,
-                log_prefix=self.log_prefix,
                 use_log_update=use_log_update,
                 adaptive_momentum=adaptive_momentum,
             )
             if theta_norm
             else None
         )
-        if net_type == "nsf":
-            self.net = net_builders.build_nsf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "made":
-            self.net = net_builders.build_made(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "maf":
-            self.net = net_builders.build_maf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "maf_rqs":
-            self.net = net_builders.build_maf_rqs(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_nice":
-            self.net = net_builders.build_zuko_nice(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_maf":
-            self.net = net_builders.build_zuko_maf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_nsf":
-            self.net = net_builders.build_zuko_nsf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_ncsf":
-            self.net = net_builders.build_zuko_ncsf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_sospf":
-            self.net = net_builders.build_zuko_sospf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_naf":
-            self.net = net_builders.build_zuko_naf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_unaf":
-            self.net = net_builders.build_zuko_unaf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_cnf":
-            self.net = net_builders.build_zuko_cnf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_gf":
-            self.net = net_builders.build_zuko_gf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        elif net_type == "zuko_bpf":
-            self.net = net_builders.build_zuko_bpf(
-                theta.float(), s.float(), z_score_x=None, z_score_y=None
-            )
-        else:
-            raise ValueError("Netowrk type not known", net_type)
+
+        builder = NET_BUILDERS.get(net_type)
+        if builder is None:
+            raise ValueError(f"Unknown net_type: {net_type}. Available: {list(NET_BUILDERS.keys())}")
+        self.net = builder(theta.float(), s.float(), z_score_x=None, z_score_y=None)
+
         if self.theta_norm is not None:
-            theta = self.theta_norm(theta)
+            self.theta_norm(theta)  # Initialize normalization stats
         self.scale = 0.2
 
     def loss(self, theta, s):
-#        log(
-#            {
-#                f"target_{i}_min": theta[:, i].min().item()
-#                for i in range(theta.shape[1])
-#            },
-#            log_prefix = self.log_prefix
-#        )
-#        log(
-#            {
-#                f"target_{i}_max": theta[:, i].max().item()
-#                for i in range(theta.shape[1])
-#            },
-#            log_prefix = self.log_prefix
-#        )
-#        log(
-#            {
-#                f"summary_{i}_min": s[:, i].min().item()
-#                for i in range(s.shape[1])
-#            },
-#            log_prefix = self.log_prefix
-#        )
-#        log(
-#            {
-#                f"summary_{i}_max": s[:, i].max().item()
-#                for i in range(s.shape[1])
-#            },
-#            log_prefix = self.log_prefix
-#        )
-
         if self.theta_norm is not None:
             theta = self.theta_norm(theta)
         theta = theta.float() * self.scale
         loss = self.net.loss(theta, condition=s.float())
         loss = loss - np.log(self.scale) * theta.shape[-1]
         if self.theta_norm is not None:
-            volume = self.theta_norm.volume()
-            loss = loss + torch.log(volume)
+            loss = loss + torch.log(self.theta_norm.volume())
         return loss
 
     def sample(self, num_samples, s):
-        # Return (num_samples, num_conditions, theta_dim) - standard pyro
         samples = self.net.sample((num_samples,), condition=s).detach()
         samples = samples / self.scale
         if self.theta_norm is not None:
@@ -156,19 +86,13 @@ class Flow(torch.nn.Module):
         return samples
 
     def log_prob(self, theta, s):
-        # Pyro convention: sample_shape + batch_shape + event_shape
-        # Has to work for general (*batch_shape, theta_dim)
-        # (num_proposals, num_conditions, theta_dim)
         if self.theta_norm is not None:
             theta = self.theta_norm(theta).detach()
         theta = theta * self.scale
-        log_prob = self.net.log_prob(
-            theta.float(), condition=s.float()
-        )  # (num_proposals, num_samples)
+        log_prob = self.net.log_prob(theta.float(), condition=s.float())
         log_prob = log_prob + np.log(self.scale) * theta.shape[-1]
         if self.theta_norm is not None:
-            volume = self.theta_norm.volume().detach()
-            log_prob = log_prob - torch.log(volume)
+            log_prob = log_prob - torch.log(self.theta_norm.volume().detach())
         return log_prob
 
 
@@ -197,19 +121,19 @@ class SNPE_A:
         log_ratio_threshold=-20.0,
         reset_network_after_pause=False,
     ):
-        # Configuration
         self.param_dim = simulator_instance.param_dim
-
-        # Auto-detect device if not specified
+        self.device = (
+            torch.device(device) if device else
+            torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        )
         if device is None:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             print(f"Auto-detected device: {self.device}")
-        else:
-            self.device = torch.device(device)
+
+        # Store config
         self.num_epochs = num_epochs
-        self.lr_decay_factor = lr_decay_factor  # Factor to reduce LR
-        self.scheduler_patience = scheduler_patience  # Patience for scheduler
-        self.early_stop_patience = early_stop_patience  # Patience for early stopping
+        self.lr_decay_factor = lr_decay_factor
+        self.scheduler_patience = scheduler_patience
+        self.early_stop_patience = early_stop_patience
         self.discard_samples = discard_samples
         self.gamma = gamma
         self.lr = lr
@@ -223,118 +147,88 @@ class SNPE_A:
         self.log_ratio_threshold = log_ratio_threshold
         self.reset_network_after_pause = reset_network_after_pause
 
-        # New embedding instantiation
+        # Embedding
         self._embedding = instantiate_embedding(embedding).to(self.device)
         self.embedding_keyword_order = _embedding_keywords
 
-        # Prior distribution
+        # Prior/simulator
         self.simulator_instance = simulator_instance
 
-        # Runtime variables
+        # Networks (initialized lazily)
         self.networks_initialized = False
-        self.best_posterior_val_loss = float("inf")  # Best posterior validation loss
-        self.best_traindist_val_loss = float("inf")  # Best traindist validation loss
-
-        # Training networks (what optimizer tracks)
         self._posterior = None
         self._traindist = None
-
-        # Best-fit networks (for inference only)
         self._best_posterior = None
         self._best_traindist = None
         self._best_embedding = None
+        self.best_posterior_val_loss = float("inf")
+        self.best_traindist_val_loss = float("inf")
 
-        # History of training/validation IDs
-        self._train_id_history = []
-        self._validation_id_history = []
-        # FIXME: Logging should happen through wandb only
-        self.theta_mins_batches = []  # List of the minimum theta values ​​for each batch
-        self.theta_maxs_batches = []  # List of the maximum theta values ​​for each batch
-        # History of varaiables for plotting in epochs
-        self.epoch_list        = []
-        self.train_loss_post_history = []
-        self.val_loss_post_history = []
-        self.samples_total_history = []       
-        self.elapsed_minutes_history = []     
-       
-        # Pausing and termination events
+        # Consolidated history tracking
+        self.history = {
+            "train_ids": [],
+            "val_ids": [],
+            "theta_mins": [],
+            "theta_maxs": [],
+            "epochs": [],
+            "train_loss": [],
+            "val_loss": [],
+            "n_samples": [],
+            "elapsed_min": [],
+        }
+
+        # Async control
         self._pause_event = asyncio.Event()
-        self._pause_event.set()  # initially running (interted logic)
+        self._pause_event.set()
         self._terminated = False
         self._break_flag = False
 
+    def _make_flow(self, theta, s, is_conditional=True):
+        """Create a Flow network with standard settings."""
+        return Flow(
+            theta,
+            s if is_conditional else s * 0,
+            theta_norm=self.theta_norm,
+            norm_momentum=self.norm_momentum,
+            net_type=self.net_type,
+            use_log_update=self._use_log_update,
+            adaptive_momentum=self.adaptive_momentum,
+        )
+
     def _initialize_networks(self, theta, conditions):
         self._init_parameters = [theta, conditions]
-        inf_conditions = conditions
-        print("Initializing LearnableDistribution...")
+        print("Initializing networks...")
         print("GPU available:", torch.cuda.is_available())
 
-        # Initialize neural spline flow for posterior distribution
-        inf_conditions = [c.to(self.device) for c in inf_conditions]
+        inf_conditions = [c.to(self.device) for c in conditions]
         s = self._summary(inf_conditions, train=False).detach()
         theta = theta.to(self.device)
 
         # Training networks
-        self._posterior = Flow(
-            theta,
-            s,
-            theta_norm=self.theta_norm,
-            log_prefix="net",
-            norm_momentum=self.norm_momentum,
-            net_type=self.net_type,
-            use_log_update=self._use_log_update,
-            adaptive_momentum=self.adaptive_momentum,
-        )
+        self._posterior = self._make_flow(theta, s, is_conditional=True)
         self._posterior.to(self.device)
-        self._traindist = Flow(
-            theta,
-            s * 0,
-            theta_norm=self.theta_norm,
-            log_prefix="net_aux",
-            norm_momentum=self.norm_momentum,
-            net_type=self.net_type,
-            use_log_update=self._use_log_update,
-            adaptive_momentum=self.adaptive_momentum,
-        )
+
+        self._traindist = self._make_flow(theta, s, is_conditional=False)
         self._traindist.to(self.device)
 
-        # Best-fit networks (initialized as copies of training networks)
-        self._best_posterior = Flow(
-            theta,
-            s,
-            theta_norm=self.theta_norm,
-            log_prefix="best_net",
-            norm_momentum=self.norm_momentum,
-            net_type=self.net_type,
-            adaptive_momentum=self.adaptive_momentum,
-        )
+        # Best-fit networks (copies of training networks)
+        self._best_posterior = self._make_flow(theta, s, is_conditional=True)
         self._best_posterior.to(self.device)
         self._best_posterior.load_state_dict(self._posterior.state_dict())
 
-        self._best_traindist = Flow(
-            theta,
-            s * 0,
-            theta_norm=self.theta_norm,
-            log_prefix="best_net_aux",
-            norm_momentum=self.norm_momentum,
-            net_type=self.net_type,
-            adaptive_momentum=self.adaptive_momentum,
-        )
+        self._best_traindist = self._make_flow(theta, s, is_conditional=False)
         self._best_traindist.to(self.device)
         self._best_traindist.load_state_dict(self._traindist.state_dict())
 
-        # Best-fit embeddings (if applicable)
-        if hasattr(self, "_embedding"):
-            self._best_embedding = copy.deepcopy(self._embedding)
+        self._best_embedding = copy.deepcopy(self._embedding)
 
-        # Initialize optimizer
-        parameters = list(self._posterior.parameters())
-        parameters += list(self._traindist.parameters())
-        if hasattr(self._embedding, "parameters"):
-            parameters += list(self._embedding.parameters())
+        # Optimizer
+        parameters = (
+            list(self._posterior.parameters()) +
+            list(self._traindist.parameters()) +
+            list(self._embedding.parameters())
+        )
         self._optimizer = AdamW(parameters, lr=self.lr)
-
-        # Initialize Learning Rate Scheduler
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
@@ -342,163 +236,136 @@ class SNPE_A:
             patience=self.scheduler_patience,
         )
 
-        # Set flag
         self.networks_initialized = True
-        print("...done initializing LearnableDistribution.")
+        print("...done initializing networks.")
 
-    def _save_posterior_checkpoint(self):
-        """Copy current posterior + embeddings state to best-fit networks."""
-        cloned_state = {k: v.clone() for k, v in self._posterior.state_dict().items()}
-        self._best_posterior.load_state_dict(cloned_state)
-        if self._best_embedding is None:
-            self._best_embedding = copy.deepcopy(self._embedding)
+    def _save_checkpoint(self, network_type="posterior"):
+        """Save current network state to best-fit checkpoint."""
+        if network_type == "posterior":
+            self._best_posterior.load_state_dict(
+                {k: v.clone() for k, v in self._posterior.state_dict().items()}
+            )
+            self._best_embedding.load_state_dict(
+                {k: v.clone() for k, v in self._embedding.state_dict().items()}
+            )
         else:
-            cloned_embedding_state = {
-                k: v.clone() for k, v in self._embedding.state_dict().items()
-            }
-            self._best_embedding.load_state_dict(cloned_embedding_state)
-
-    def _save_traindist_checkpoint(self):
-        """Copy current traindist state to best-fit network."""
-        cloned_state = {k: v.clone() for k, v in self._traindist.state_dict().items()}
-        self._best_traindist.load_state_dict(cloned_state)
-
-    def _align_singleton_batch_dims(self, tensors, length=None):
-        """Broadcast singleton batch dimensions of tensors in a list to same length."""
-        if length is None:
-            length = max([len(t) for t in tensors])
-        return [t.expand(length, *t.shape[1:]) for t in tensors]
+            self._best_traindist.load_state_dict(
+                {k: v.clone() for k, v in self._traindist.state_dict().items()}
+            )
 
     def _summary(self, inf_conditions, train=True, use_best_fit=False):
-        """Run conditions through embedding networks and concatenate them."""
+        """Run conditions through embedding network."""
         embedding = (
             self._best_embedding
             if use_best_fit and self._best_embedding is not None
             else self._embedding
         )
+        embedding.train() if train else embedding.eval()
 
-        if train:
-            embedding.train()
-        else:
-            embedding.eval()
-
-        # TODO: Remove annoying hack once batches are dicts
+        # TODO: Remove hack once batches are dicts
         inf_conditions = inf_conditions + [None] * 10
-        # s = self._embedding({k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)})
-        s = embedding(
+        return embedding(
             {k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)}
         )
-        return s
 
     def prior_sample(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
         assert parent_conditions == [], "Conditions are not supported."
         samples = self.simulator_instance.simulate_batch(num_samples)
-        logprob_for_prior_samples = np.ones(num_samples) * (
-            -np.log(4) ** self.param_dim
-        )  # Uniform prior on [-2, 2]^D
-        rvbatch = RVBatch(samples, logprob=logprob_for_prior_samples)
-        return rvbatch
+        logprob = np.ones(num_samples) * (-np.log(4) ** self.param_dim)
+        return RVBatch(samples, logprob=logprob)
 
-    # FIXME: Logging should happen through wandb only, no dataset_manager dependece
     async def train(self, dataloader_train, dataloader_val, hook_fn=None, dataset_manager=None):
-        """Train the neural spline flow on the given data."""
-        best_val_loss = float("inf")  # Best validation loss
+        """Train the neural spline flow."""
+        best_val_loss = float("inf")
         n_train_batch = 0
         n_val_batch = 0
-        counter_checkpoint_posterior = 0
-        counter_checkpoint_traindist = 0
+        counter_post = 0
+        counter_aux = 0
         t0 = time.perf_counter()
 
         for epoch in range(self.num_epochs):
-            print(f"⌛ Epoch {epoch+1}/{self.num_epochs}")
+            print(f"Epoch {epoch+1}/{self.num_epochs}")
             log({"epoch": epoch + 1})
 
             # Training loop
-            loss_aux_avg = 0
             loss_train_avg = 0
-            num_samples = 0
+            loss_aux_avg = 0
+            num_batches = 0
+
             for batch in dataloader_train:
                 log({"train:step": n_train_batch})
                 n_train_batch += 1
-                ids, theta, theta_logprob, inf_conditions = (
-                    batch[0],
-                    batch[1],
-                    batch[2],
-                    batch[3:],
-                )
+
+                ids, theta, theta_logprob = batch[0], batch[1], batch[2]
+                inf_conditions = batch[3:]
+
                 ts = time.time()
-                self._train_id_history.extend((ts, id) for id in ids.numpy().tolist())
+                self.history["train_ids"].extend((ts, id) for id in ids.numpy().tolist())
+
                 log({"train:theta_logprob_min": theta_logprob.min().item()})
                 log({"train:theta_logprob_max": theta_logprob.max().item()})
+
                 u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
                     self._initialize_networks(u, inf_conditions)
+
                 self._optimizer.zero_grad()
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=True)
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
-                # Calculate the θ min/max of this batch and save it to a list
+                # Track theta ranges
                 with torch.no_grad():
-                    theta_min = theta.min(dim=0).values.cpu().numpy()  # shape (D,)
-                    theta_max = theta.max(dim=0).values.cpu().numpy()  # shape (D,)
-                self.theta_mins_batches.append(theta_min)
-                self.theta_maxs_batches.append(theta_max)
+                    self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
+                    self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
+                # Compute losses
                 self._posterior.train()
-                losses_train = self._posterior.loss(uc, sc)
-                loss_train = torch.mean(losses_train)
-
+                loss_train = self._posterior.loss(uc, sc).mean()
                 log({"train:loss": loss_train.item()})
 
                 self._traindist.train()
-                losses_aux = self._traindist.loss(uc, sc.detach() * 0)
-                loss_aux = torch.mean(losses_aux)
-
+                loss_aux = self._traindist.loss(uc, sc.detach() * 0).mean()
                 log({"train:loss_aux": loss_aux.item()})
 
-                loss_total = loss_train + loss_aux
-                loss_total.backward()
+                (loss_train + loss_aux).backward()
                 self._optimizer.step()
 
-                num_samples += 1
-                loss_train_avg += loss_train.sum().item()
-                loss_aux_avg += loss_aux.sum().item()
+                num_batches += 1
+                loss_train_avg += loss_train.item()
+                loss_aux_avg += loss_aux.item()
 
-                # Run hook and allow other tasks to run
                 if hook_fn is not None:
                     hook_fn(self, batch)
                 await asyncio.sleep(0)
-                await self._pause_event.wait()  # pauses here if pause() called
+                await self._pause_event.wait()
                 if self._break_flag:
                     self._break_flag = False
                     break
 
-            loss_train_avg /= num_samples
-            loss_aux_avg /= num_samples
+            loss_train_avg /= num_batches
+            loss_aux_avg /= num_batches
 
             # Validation loop
-            val_posterior_loss = 0
-            val_traindist_loss = 0
-            num_val_samples = 0
-            epochs_no_improve = 0
+            val_post_loss = 0
+            val_aux_loss = 0
+            num_val = 0
+
             for batch in dataloader_val:
                 log({"val:step": n_val_batch})
                 n_val_batch += 1
-                ids, theta, theta_logprob, inf_conditions = (
-                    batch[0],
-                    batch[1],
-                    batch[2],
-                    batch[3:],
-                )
+
+                ids, theta, theta_logprob = batch[0], batch[1], batch[2]
+                inf_conditions = batch[3:]
+
                 ts = time.time()
-                self._validation_id_history.extend(
-                    (ts, id) for id in ids.numpy().tolist()
-                )
+                self.history["val_ids"].extend((ts, id) for id in ids.numpy().tolist())
+
                 log({"val:theta_logprob_min": theta_logprob.min().item()})
                 log({"val:theta_logprob_max": theta_logprob.max().item()})
+
                 u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
                 s = self._summary(inf_conditions, train=False)
@@ -506,153 +373,74 @@ class SNPE_A:
                 sc = s.to(self.device)
 
                 self._posterior.eval()
-                posterior_losses = self._posterior.loss(uc, sc)
-                val_posterior_loss += torch.sum(posterior_losses).item()
+                val_post_loss += self._posterior.loss(uc, sc).sum().item()
 
                 self._traindist.eval()
-                traindist_losses = self._traindist.loss(uc, sc * 0)
-                val_traindist_loss += torch.sum(traindist_losses).item()
+                val_aux_loss += self._traindist.loss(uc, sc * 0).sum().item()
 
-                num_val_samples += uc.shape[0]
+                num_val += uc.shape[0]
                 await asyncio.sleep(0)
-                await self._pause_event.wait()  # pauses here if pause() called
+                await self._pause_event.wait()
                 if self._break_flag:
                     self._break_flag = False
                     break
 
-            val_posterior_loss /= num_val_samples
-            val_traindist_loss /= num_val_samples
+            val_post_loss /= num_val
+            val_aux_loss /= num_val
 
-            log({"val:loss": val_posterior_loss})
-            log({"val:loss_aux": val_traindist_loss})
+            log({"val:loss": val_post_loss})
+            log({"val:loss_aux": val_aux_loss})
 
-            # Check and save best checkpoints independently
-            if val_posterior_loss < self.best_posterior_val_loss:
-                self.best_posterior_val_loss = val_posterior_loss
-                self._save_posterior_checkpoint()
-                log({"checkpoint:count": counter_checkpoint_posterior})
-                counter_checkpoint_posterior += 1
+            # Checkpointing
+            if val_post_loss < self.best_posterior_val_loss:
+                self.best_posterior_val_loss = val_post_loss
+                self._save_checkpoint("posterior")
+                log({"checkpoint:count": counter_post})
+                counter_post += 1
 
-            if val_traindist_loss < self.best_traindist_val_loss:
-                self.best_traindist_val_loss = val_traindist_loss
-                self._save_traindist_checkpoint()
-                log({"checkpoint:count_aux": counter_checkpoint_traindist})
-                counter_checkpoint_traindist += 1
+            if val_aux_loss < self.best_traindist_val_loss:
+                self.best_traindist_val_loss = val_aux_loss
+                self._save_checkpoint("traindist")
+                log({"checkpoint:count_aux": counter_aux})
+                counter_aux += 1
 
-            # Use posterior validation loss for scheduler and early stopping
-            self._scheduler.step(val_posterior_loss)
+            self._scheduler.step(val_post_loss)
+            log({"lr": self._optimizer.param_groups[0]["lr"]})
 
-            lr_current = self._optimizer.param_groups[0]["lr"]
-            log({"lr": lr_current})
-
-            # Early Stopping based on posterior validation loss
-            if val_posterior_loss < best_val_loss:
-                best_val_loss = val_posterior_loss
+            # Early stopping
+            if val_post_loss < best_val_loss:
+                best_val_loss = val_post_loss
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
 
-            # Record the data for this epoch for saving data
-            self.epoch_list.append(epoch + 1)
-            self.train_loss_post_history.append(loss_train_avg)     # posterior train loss
-            self.val_loss_post_history.append(val_posterior_loss)         # posterior val loss
+            # Record history
+            self.history["epochs"].append(epoch + 1)
+            self.history["train_loss"].append(loss_train_avg)
+            self.history["val_loss"].append(val_post_loss)
+
             try:
                 stats = ray.get(dataset_manager.get_store_stats.remote())
-                self.samples_total_history.append(stats["total_length"])
-            except Exception as e:
-                print(f"[warn] failed to fetch store stats from actor: {e}")
+                self.history["n_samples"].append(stats["total_length"])
+            except Exception:
+                pass
 
-            elapsed_min = (time.perf_counter() - t0) / 60.0
-            self.elapsed_minutes_history.append(elapsed_min)
-            log({"elapsed_minutes": elapsed_min})
-            # Fixme: time-budget
-            # if elapsed_min >= 150.0:
-            #     print(f"Time budget reached: {elapsed_min:.2f} min (>= 50). Stopping training.")
-            #     log({"early_stop_reason": "time_budget_reached", "elapsed_minutes": elapsed_min})
-            #     break
+            elapsed = (time.perf_counter() - t0) / 60.0
+            self.history["elapsed_min"].append(elapsed)
+            log({"elapsed_minutes": elapsed})
 
             if epochs_no_improve >= self.early_stop_patience:
                 print("Early stopping triggered.")
                 break
 
-            await self._pause_event.wait()  # pauses here if pause() called
+            await self._pause_event.wait()
             if self._terminated:
                 break
 
-        # Training complete - best-fit networks are already updated via checkpoints
-
-    def conditioned_sample(
-        self, num_samples, parent_conditions=[], evidence_conditions=[]
-    ):
-        samples, logprob = self._aux_sample(
-            num_samples,
-            mode="posterior",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
-        samples = samples.numpy()
-        return RVBatch(samples, logprob=logprob.numpy())
-
-    def proposal_sample(
-        self, num_samples, parent_conditions=[], evidence_conditions=[]
-    ):
-        # Sample from posterior and log values for reference
-        if self.sample_reference_posterior:
-            posterior_samples, _ = self._aux_sample(
-                128,
-                mode="posterior",
-                parent_conditions=parent_conditions,
-                evidence_conditions=evidence_conditions,
-            )
-            vector_mean = posterior_samples.mean(axis=0).cpu()
-            vector_std = posterior_samples.std(axis=0).cpu()
-            log(
-                {
-                    f"proposal_sample:posterior_mean_{i}": vector_mean[i].item()
-                    for i in range(len(vector_mean))
-                },
-            )
-            log(
-                {
-                    f"proposal_sample:posterior_std_{i}": vector_std[i].item()
-                    for i in range(len(vector_std))
-                },
-            )
-
-        samples, logprob = self._aux_sample(
-            num_samples,
-            mode="proposal",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
-        log(
-            {
-                "proposal_sample:mean": samples.mean().item(),
-                "proposal_sample:std": samples.std().item(),
-                "proposal_sample:logprob": logprob.mean().item(),
-            }
-        )
-#        vector_mean = samples.mean(axis=0).cpu()
-#        vector_std = samples.std(axis=0).cpu()
-#        log(
-#            {
-#                f"proposal_mean_{i}": vector_mean[i].item()
-#                for i in range(len(vector_mean))
-#            },
-#        )
-#        log(
-#            {f"proposal_std_{i}": vector_std[i].item() for i in range(len(vector_std))},
-#        )
-        samples = samples.numpy()
-        return RVBatch(samples, logprob=logprob.numpy())
-
-    def _aux_sample(
-        self, num_samples, mode=None, parent_conditions=[], evidence_conditions=[]
-    ):
-        """Sample from the proposal distribution given conditions."""
+    def _aux_sample(self, num_samples, mode="posterior", parent_conditions=[], evidence_conditions=[]):
+        """Sample using importance sampling."""
         inf_conditions = parent_conditions + evidence_conditions
-        # Run conditions through summary network
-        assert inf_conditions is not None, "Conditions must be provided."
+        assert inf_conditions, "Conditions must be provided."
         inf_conditions = [c.to(self.device) for c in inf_conditions]
 
         if self._use_best_models_during_inference:
@@ -662,166 +450,134 @@ class SNPE_A:
         else:
             posterior_net = self._posterior
             traindist_net = self._traindist
-            s = self._summary(inf_conditions, train=False, use_best_fit=False)
+            s = self._summary(inf_conditions, train=False)
 
-        (s,) = self._align_singleton_batch_dims([s], length=num_samples)
+        s = s.expand(num_samples, *s.shape[1:])
 
+        # Generate proposals from posterior
         num_proposals = 256
-        proposal_mode = "posterior"
-
-        if proposal_mode == "traindist":
-            traindist_net.eval()
-            samples_proposals = traindist_net.sample(num_proposals, s * 0).detach()
-            # (num_proposals, num_samples, theta_dim)
-
-            log_prob_dist = traindist_net.log_prob(
-                samples_proposals, s * 0
-            )  # (num_proposals, num_samples)
-        elif proposal_mode == "posterior":
-            posterior_net.eval()
-            samples_proposals = posterior_net.sample(num_proposals, s).detach()
-            # (num_proposals, num_samples, theta_dim)
-
-            log_prob_dist = posterior_net.log_prob(
-                samples_proposals, s
-            )  # (num_proposals, num_samples)
-        else:
-            traindist_net.eval()
-            samples_proposals = traindist_net.sample(num_proposals, s * 0).detach()
-            log_prob_dist = traindist_net.log_prob(
-                samples_proposals, s * 0
-            )  # (num_proposals, num_samples)
-            # Generate uniform proposals on [-2, 2]
-            samples_proposals = torch.empty_like(samples_proposals)
-            samples_proposals.uniform_(-2, 2)
-            log_prob_dist = log_prob_dist * 0
-
-        log(
-            {
-                "importance_sample:proposal_mean": samples_proposals.mean().item(),
-                "importance_sample:proposal_std": samples_proposals.std().item(),
-            }
-        )
-
         posterior_net.eval()
-        log_prob_post = posterior_net.log_prob(
-            samples_proposals, s
-        )  # (num_proposals, num_samples)
+        samples_proposals = posterior_net.sample(num_proposals, s).detach()
 
+        log({
+            "importance_sample:proposal_mean": samples_proposals.mean().item(),
+            "importance_sample:proposal_std": samples_proposals.std().item(),
+        })
+
+        # Compute log probs
+        log_prob_post = posterior_net.log_prob(samples_proposals, s)
         traindist_net.eval()
-        log_prob_dist = traindist_net.log_prob(
-            samples_proposals, s * 0
-        )  # (num_proposals, num_samples)
+        log_prob_dist = traindist_net.log_prob(samples_proposals, s * 0)
 
-        # Generate "mask" that equals one if samples are outside the [-2, 2] box
+        # Mask samples outside [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
-        mask = mask.any(dim=-1).float() * 100  # (num_proposals, num_samples)
+        mask = mask.any(dim=-1).float() * 100
 
-        gamma = self.gamma
-
+        # Compute importance weights
         if mode == "proposal":
-            # Proposal samples, based on auxiliary distribution
-            log_weights = -1.0 / (1.0 + gamma) * log_prob_post - mask
-
-        elif mode == "posterior":
-            # General posterior samples, based on auxiliary distribution alone
-            # log_weights = -gamma / (1 + gamma) * log_prob_post - mask
+            log_weights = -1.0 / (1.0 + self.gamma) * log_prob_post - mask
+        else:  # "posterior" or "prior" - same formula
             log_weights = -log_prob_dist - mask
 
-        elif mode == "prior":
-            # Prior samples, based on auxiliary distribution
-            log_weights = -log_prob_dist - mask
-
-        else:
-            raise KeyError
-
-
-        # Replace -inf and nan with -100
         log_weights = torch.nan_to_num(log_weights, nan=-100.0, neginf=-100.0)
-
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
-        weights = torch.exp(
-            log_weights
-        )  # (num_proposals, num_samples) - sum up to one in first dimension
+        weights = torch.exp(log_weights)
 
-        # Effective sample size diagnostics
-        n_eff = 1 / ((weights**2).sum(dim=0)).cpu().detach().numpy()
+        # Effective sample size
+        n_eff = 1 / (weights**2).sum(dim=0).cpu().detach().numpy()
         log({"importance_sample:n_eff_min": n_eff.min()})
         log({"importance_sample:n_eff_max": n_eff.max()})
 
+        # Resample
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
-
         samples = samples_proposals[idx, torch.arange(num_samples), :]
-        samples = self.simulator_instance.forward(samples).to("cpu")
-
-        # FIXME: For now always return log_prob under posterior
-        logprob = log_prob_post[idx, torch.arange(num_samples)].to("cpu")
+        samples = self.simulator_instance.forward(samples).cpu()
+        logprob = log_prob_post[idx, torch.arange(num_samples)].cpu()
 
         return samples, logprob.detach()
 
-    def discardable(
-        self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]
-    ):
-        if self.discard_samples is False:
+    def conditioned_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
+        samples, logprob = self._aux_sample(
+            num_samples, mode="posterior",
+            parent_conditions=parent_conditions,
+            evidence_conditions=evidence_conditions,
+        )
+        return RVBatch(samples.numpy(), logprob=logprob.numpy())
+
+    def proposal_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
+        if self.sample_reference_posterior:
+            post_samples, _ = self._aux_sample(
+                128, mode="posterior",
+                parent_conditions=parent_conditions,
+                evidence_conditions=evidence_conditions,
+            )
+            mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
+            log({f"proposal_sample:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
+            log({f"proposal_sample:posterior_std_{i}": std[i].item() for i in range(len(std))})
+
+        samples, logprob = self._aux_sample(
+            num_samples, mode="proposal",
+            parent_conditions=parent_conditions,
+            evidence_conditions=evidence_conditions,
+        )
+        log({
+            "proposal_sample:mean": samples.mean().item(),
+            "proposal_sample:std": samples.std().item(),
+            "proposal_sample:logprob": logprob.mean().item(),
+        })
+        return RVBatch(samples.numpy(), logprob=logprob.numpy())
+
+    def discardable(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
+        if not self.discard_samples:
             return torch.zeros(len(theta), dtype=torch.bool)
+
         inf_conditions = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
         inf_conditions = [c.to(self.device) for c in inf_conditions]
         s = self._summary(inf_conditions, train=False, use_best_fit=True)
-        u, s = self._align_singleton_batch_dims([u, s])
+
+        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
+        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
+
         u = u.to(self.device)
-        posterior_net = self._posterior
-        posterior_net.eval()
-        log_prob = posterior_net.log_prob(u.unsqueeze(0), s).squeeze(0).to("cpu")
+        self._posterior.eval()
+        log_prob = self._posterior.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
         log_ratio = log_prob - theta_logprob
-        discard = log_ratio < self.log_ratio_threshold
-        return discard
+        return log_ratio < self.log_ratio_threshold
 
     def save(self, node_dir: Path):
-        # Save best-fit model states to files
         print("Saving:", str(node_dir))
         if not self.networks_initialized:
-            raise RuntimeError(
-                "Networks not initialized. Call _initialize_networks() first."
-            )
+            raise RuntimeError("Networks not initialized.")
 
-        # Save best-fit network states
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
         torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
-        # FIXME: Logging should happen through wandb only
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
-        torch.save(self._train_id_history, node_dir / "train_id_history.pth")
-        torch.save(self._validation_id_history, node_dir / "validation_id_history.pth")
-        torch.save(self.theta_mins_batches,       node_dir / "theta_mins_batches.pth")
-        torch.save(self.theta_maxs_batches,       node_dir / "theta_maxs_batches.pth")
-        # epoch-wise
-        torch.save(self.epoch_list,               node_dir / "epochs.pth")
-        torch.save(self.train_loss_post_history,  node_dir / "loss_train_posterior.pth")
-        torch.save(self.val_loss_post_history,    node_dir / "loss_val_posterior.pth")
-        torch.save(self.samples_total_history,    node_dir / "n_samples_total.pth")
-        torch.save(self.elapsed_minutes_history,  node_dir / "elapsed_minutes.pth")
 
-        # Save best-fit embedding networks if they exist
+        # Save history
+        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
+        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
+        torch.save(self.history["theta_mins"], node_dir / "theta_mins_batches.pth")
+        torch.save(self.history["theta_maxs"], node_dir / "theta_maxs_batches.pth")
+        torch.save(self.history["epochs"], node_dir / "epochs.pth")
+        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
+        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
+        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
+        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
+
         if self._best_embedding is not None:
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
 
     def load(self, node_dir: Path):
-        # Load best-fit model states from files
-        print("💾 Loading:", str(node_dir))
+        print("Loading:", str(node_dir))
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 
-        # Load saved states into best-fit networks
-        posterior_state = torch.load(node_dir / "posterior.pth")
-        traindist_state = torch.load(node_dir / "traindist.pth")
+        self._best_posterior.load_state_dict(torch.load(node_dir / "posterior.pth"))
+        self._best_traindist.load_state_dict(torch.load(node_dir / "traindist.pth"))
 
-        self._best_posterior.load_state_dict(posterior_state)
-        self._best_traindist.load_state_dict(traindist_state)
-
-        # Load embedding networks if they exist
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
-            embedding_state = torch.load(node_dir / "embedding.pth")
-            self._best_embedding.load_state_dict(embedding_state)
+            self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
 
     def pause(self):
         self._pause_event.clear()
@@ -834,4 +590,4 @@ class SNPE_A:
 
     def interrupt(self):
         self._terminated = True
-        self._pause_event.set()  # unblock if currently paused
+        self._pause_event.set()
