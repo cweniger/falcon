@@ -157,12 +157,12 @@ class SNPE_A:
         # Networks (initialized lazily)
         self.networks_initialized = False
         self._posterior = None
-        self._traindist = None
+        self._marginal_flow = None
         self._best_posterior = None
-        self._best_traindist = None
+        self._best_marginal_flow = None
         self._best_embedding = None
         self.best_posterior_val_loss = float("inf")
-        self.best_traindist_val_loss = float("inf")
+        self.best_marginal_flow_val_loss = float("inf")
 
         # Consolidated history tracking
         self.history = {
@@ -183,7 +183,7 @@ class SNPE_A:
         self._terminated = False
         self._break_flag = False
 
-    def _make_flow(self, theta, s, is_conditional=True):
+    def _create_flow(self, theta, s, is_conditional=True):
         """Create a Flow network with standard settings."""
         return Flow(
             theta,
@@ -200,32 +200,32 @@ class SNPE_A:
         print("Initializing networks...")
         print("GPU available:", torch.cuda.is_available())
 
-        inf_conditions = [c.to(self.device) for c in conditions]
-        s = self._summary(inf_conditions, train=False).detach()
+        conditions = [c.to(self.device) for c in conditions]
+        s = self._embed(conditions, train=False).detach()
         theta = theta.to(self.device)
 
         # Training networks
-        self._posterior = self._make_flow(theta, s, is_conditional=True)
+        self._posterior = self._create_flow(theta, s, is_conditional=True)
         self._posterior.to(self.device)
 
-        self._traindist = self._make_flow(theta, s, is_conditional=False)
-        self._traindist.to(self.device)
+        self._marginal_flow = self._create_flow(theta, s, is_conditional=False)
+        self._marginal_flow.to(self.device)
 
         # Best-fit networks (copies of training networks)
-        self._best_posterior = self._make_flow(theta, s, is_conditional=True)
+        self._best_posterior = self._create_flow(theta, s, is_conditional=True)
         self._best_posterior.to(self.device)
         self._best_posterior.load_state_dict(self._posterior.state_dict())
 
-        self._best_traindist = self._make_flow(theta, s, is_conditional=False)
-        self._best_traindist.to(self.device)
-        self._best_traindist.load_state_dict(self._traindist.state_dict())
+        self._best_marginal_flow = self._create_flow(theta, s, is_conditional=False)
+        self._best_marginal_flow.to(self.device)
+        self._best_marginal_flow.load_state_dict(self._marginal_flow.state_dict())
 
         self._best_embedding = copy.deepcopy(self._embedding)
 
         # Optimizer
         parameters = (
             list(self._posterior.parameters()) +
-            list(self._traindist.parameters()) +
+            list(self._marginal_flow.parameters()) +
             list(self._embedding.parameters())
         )
         self._optimizer = AdamW(parameters, lr=self.lr)
@@ -239,8 +239,8 @@ class SNPE_A:
         self.networks_initialized = True
         print("...done initializing networks.")
 
-    def _save_checkpoint(self, network_type="posterior"):
-        """Save current network state to best-fit checkpoint."""
+    def _update_best_weights(self, network_type="posterior"):
+        """Copy current network weights to best-fit checkpoint."""
         if network_type == "posterior":
             self._best_posterior.load_state_dict(
                 {k: v.clone() for k, v in self._posterior.state_dict().items()}
@@ -249,11 +249,11 @@ class SNPE_A:
                 {k: v.clone() for k, v in self._embedding.state_dict().items()}
             )
         else:
-            self._best_traindist.load_state_dict(
-                {k: v.clone() for k, v in self._traindist.state_dict().items()}
+            self._best_marginal_flow.load_state_dict(
+                {k: v.clone() for k, v in self._marginal_flow.state_dict().items()}
             )
 
-    def _summary(self, inf_conditions, train=True, use_best_fit=False):
+    def _embed(self, conditions, train=True, use_best_fit=False):
         """Run conditions through embedding network."""
         embedding = (
             self._best_embedding
@@ -263,12 +263,12 @@ class SNPE_A:
         embedding.train() if train else embedding.eval()
 
         # TODO: Remove hack once batches are dicts
-        inf_conditions = inf_conditions + [None] * 10
+        conditions = conditions + [None] * 10
         return embedding(
-            {k: inf_conditions[i] for i, k in enumerate(self.embedding_keyword_order)}
+            {k: conditions[i] for i, k in enumerate(self.embedding_keyword_order)}
         )
 
-    def prior_sample(self, num_samples, parent_conditions=[]):
+    def sample_prior(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
         assert parent_conditions == [], "Conditions are not supported."
         samples = self.simulator_instance.simulate_batch(num_samples)
@@ -312,7 +312,7 @@ class SNPE_A:
 
                 self._optimizer.zero_grad()
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
-                s = self._summary(inf_conditions, train=True)
+                s = self._embed(inf_conditions, train=True)
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
@@ -326,8 +326,8 @@ class SNPE_A:
                 loss_train = self._posterior.loss(uc, sc).mean()
                 log({"train:loss": loss_train.item()})
 
-                self._traindist.train()
-                loss_aux = self._traindist.loss(uc, sc.detach() * 0).mean()
+                self._marginal_flow.train()
+                loss_aux = self._marginal_flow.loss(uc, sc.detach() * 0).mean()
                 log({"train:loss_aux": loss_aux.item()})
 
                 (loss_train + loss_aux).backward()
@@ -368,15 +368,15 @@ class SNPE_A:
 
                 u = self.simulator_instance.inverse(theta)
                 inf_conditions = [c.to(self.device) for c in inf_conditions]
-                s = self._summary(inf_conditions, train=False)
+                s = self._embed(inf_conditions, train=False)
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
                 self._posterior.eval()
                 val_post_loss += self._posterior.loss(uc, sc).sum().item()
 
-                self._traindist.eval()
-                val_aux_loss += self._traindist.loss(uc, sc * 0).sum().item()
+                self._marginal_flow.eval()
+                val_aux_loss += self._marginal_flow.loss(uc, sc * 0).sum().item()
 
                 num_val += uc.shape[0]
                 await asyncio.sleep(0)
@@ -394,13 +394,13 @@ class SNPE_A:
             # Checkpointing
             if val_post_loss < self.best_posterior_val_loss:
                 self.best_posterior_val_loss = val_post_loss
-                self._save_checkpoint("posterior")
+                self._update_best_weights("posterior")
                 log({"checkpoint:count": counter_post})
                 counter_post += 1
 
-            if val_aux_loss < self.best_traindist_val_loss:
-                self.best_traindist_val_loss = val_aux_loss
-                self._save_checkpoint("traindist")
+            if val_aux_loss < self.best_marginal_flow_val_loss:
+                self.best_marginal_flow_val_loss = val_aux_loss
+                self._update_best_weights("marginal")
                 log({"checkpoint:count_aux": counter_aux})
                 counter_aux += 1
 
@@ -437,20 +437,20 @@ class SNPE_A:
             if self._terminated:
                 break
 
-    def _aux_sample(self, num_samples, mode="posterior", parent_conditions=[], evidence_conditions=[]):
+    def _importance_sample(self, num_samples, mode="posterior", parent_conditions=[], evidence_conditions=[]):
         """Sample using importance sampling."""
-        inf_conditions = parent_conditions + evidence_conditions
-        assert inf_conditions, "Conditions must be provided."
-        inf_conditions = [c.to(self.device) for c in inf_conditions]
+        conditions = parent_conditions + evidence_conditions
+        assert conditions, "Conditions must be provided."
+        conditions = [c.to(self.device) for c in conditions]
 
         if self._use_best_models_during_inference:
             posterior_net = self._best_posterior
-            traindist_net = self._best_traindist
-            s = self._summary(inf_conditions, train=False, use_best_fit=True)
+            marginal_net = self._best_marginal_flow
+            s = self._embed(conditions, train=False, use_best_fit=True)
         else:
             posterior_net = self._posterior
-            traindist_net = self._traindist
-            s = self._summary(inf_conditions, train=False)
+            marginal_net = self._marginal_flow
+            s = self._embed(conditions, train=False)
 
         s = s.expand(num_samples, *s.shape[1:])
 
@@ -466,8 +466,8 @@ class SNPE_A:
 
         # Compute log probs
         log_prob_post = posterior_net.log_prob(samples_proposals, s)
-        traindist_net.eval()
-        log_prob_dist = traindist_net.log_prob(samples_proposals, s * 0)
+        marginal_net.eval()
+        log_prob_dist = marginal_net.log_prob(samples_proposals, s * 0)
 
         # Mask samples outside [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
@@ -496,45 +496,48 @@ class SNPE_A:
 
         return samples, logprob.detach()
 
-    def conditioned_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
-        samples, logprob = self._aux_sample(
+    def sample_posterior(self, num_samples, parent_conditions=[], evidence_conditions=[]):
+        """Sample from the posterior distribution q(θ|x)."""
+        samples, logprob = self._importance_sample(
             num_samples, mode="posterior",
             parent_conditions=parent_conditions,
             evidence_conditions=evidence_conditions,
         )
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
-    def proposal_sample(self, num_samples, parent_conditions=[], evidence_conditions=[]):
+    def sample_proposal(self, num_samples, parent_conditions=[], evidence_conditions=[]):
+        """Sample from the widened proposal distribution for adaptive resampling."""
         if self.sample_reference_posterior:
-            post_samples, _ = self._aux_sample(
+            post_samples, _ = self._importance_sample(
                 128, mode="posterior",
                 parent_conditions=parent_conditions,
                 evidence_conditions=evidence_conditions,
             )
             mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
-            log({f"proposal_sample:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
-            log({f"proposal_sample:posterior_std_{i}": std[i].item() for i in range(len(std))})
+            log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
+            log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
 
-        samples, logprob = self._aux_sample(
+        samples, logprob = self._importance_sample(
             num_samples, mode="proposal",
             parent_conditions=parent_conditions,
             evidence_conditions=evidence_conditions,
         )
         log({
-            "proposal_sample:mean": samples.mean().item(),
-            "proposal_sample:std": samples.std().item(),
-            "proposal_sample:logprob": logprob.mean().item(),
+            "sample_proposal:mean": samples.mean().item(),
+            "sample_proposal:std": samples.std().item(),
+            "sample_proposal:logprob": logprob.mean().item(),
         })
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
-    def discardable(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
+    def get_discard_mask(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
+        """Return boolean mask of low-likelihood samples to discard."""
         if not self.discard_samples:
             return torch.zeros(len(theta), dtype=torch.bool)
 
-        inf_conditions = parent_conditions + evidence_conditions
+        conditions = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
-        inf_conditions = [c.to(self.device) for c in inf_conditions]
-        s = self._summary(inf_conditions, train=False, use_best_fit=True)
+        conditions = [c.to(self.device) for c in conditions]
+        s = self._embed(conditions, train=False, use_best_fit=True)
 
         u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
         s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
@@ -551,7 +554,7 @@ class SNPE_A:
             raise RuntimeError("Networks not initialized.")
 
         torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
-        torch.save(self._best_traindist.state_dict(), node_dir / "traindist.pth")
+        torch.save(self._best_marginal_flow.state_dict(), node_dir / "marginal_flow.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
 
         # Save history
@@ -574,7 +577,7 @@ class SNPE_A:
         self._initialize_networks(init_parameters[0], init_parameters[1])
 
         self._best_posterior.load_state_dict(torch.load(node_dir / "posterior.pth"))
-        self._best_traindist.load_state_dict(torch.load(node_dir / "traindist.pth"))
+        self._best_marginal_flow.load_state_dict(torch.load(node_dir / "marginal_flow.pth"))
 
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))

@@ -43,10 +43,10 @@ class MultiplexNodeWrapper:
         samples = np.concatenate(samples, axis=0)
         return samples
 
-    def conditioned_sample(self, *args, **kwargs):
+    def sample_posterior(self, *args, **kwargs):
         raise NotImplementedError
 
-    def proposal_sample(self, *args, **kwargs):
+    def sample_proposal(self, *args, **kwargs):
         raise NotImplementedError
 
     def shutdown(self):
@@ -125,7 +125,7 @@ class NodeWrapper:
                 if k in observations.keys():
                     conditions[i] = observations[k]
             # Corresponding id
-            mask = module.discardable(theta, theta_logprob, conditions)
+            mask = module.get_discard_mask(theta, theta_logprob, conditions)
             ids = ids[mask]
             ids = list(ids.numpy())
 
@@ -141,7 +141,7 @@ class NodeWrapper:
 
     def sample(self, n_samples, incoming=None):
         if self.estimator_instance is not None:
-            samples = self.estimator_instance.prior_sample(
+            samples = self.estimator_instance.sample_prior(
                 n_samples, parent_conditions=incoming
             )
             samples = as_rvbatch(samples)
@@ -155,10 +155,10 @@ class NodeWrapper:
                 samples.append(self.simulator_instance.simulate(*params))
             return np.stack(samples)
 
-    def conditioned_sample(
+    def sample_posterior(
         self, n_samples, parent_conditions=[], evidence_conditions=[]
     ):
-        samples = self.estimator_instance.conditioned_sample(
+        samples = self.estimator_instance.sample_posterior(
             n_samples,
             parent_conditions=parent_conditions,
             evidence_conditions=evidence_conditions,
@@ -166,8 +166,8 @@ class NodeWrapper:
         samples = as_rvbatch(samples)
         return samples
 
-    def proposal_sample(self, n_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self.estimator_instance.proposal_sample(
+    def sample_proposal(self, n_samples, parent_conditions=[], evidence_conditions=[]):
+        samples = self.estimator_instance.sample_proposal(
             n_samples,
             parent_conditions=parent_conditions,
             evidence_conditions=evidence_conditions,
@@ -257,7 +257,7 @@ class DeployedGraph:
                 trace[f"{name}.logprob"] = rvbatch.logprob
         return trace
 
-    def conditioned_sample(self, num_samples, conditions={}):
+    def sample_posterior(self, num_samples, conditions={}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
         trace = conditions.copy()
@@ -273,7 +273,7 @@ class DeployedGraph:
                 trace[parent] for parent in self.graph.get_parents(name)
             ]
             rvbatch = ray.get(
-                self.wrapped_nodes_dict[name].conditioned_sample.remote(
+                self.wrapped_nodes_dict[name].sample_posterior.remote(
                     num_samples,
                     parent_conditions=parent_conditions,
                     evidence_conditions=evidence_conditions,
@@ -285,7 +285,7 @@ class DeployedGraph:
 
         return trace
 
-    def proposal_sample(self, num_samples, conditions={}):
+    def sample_proposal(self, num_samples, conditions={}):
         """Run the graph using deployed nodes and return results."""
         sorted_node_names = self.graph.sorted_inference_node_names
         trace = conditions.copy()
@@ -301,7 +301,7 @@ class DeployedGraph:
                 trace[parent] for parent in self.graph.get_evidence(name)
             ]
             rvbatch = ray.get(
-                self.wrapped_nodes_dict[name].proposal_sample.remote(
+                self.wrapped_nodes_dict[name].sample_proposal.remote(
                     num_samples,
                     parent_conditions=parent_conditions,
                     evidence_conditions=evidence_conditions,
@@ -354,7 +354,7 @@ class DeployedGraph:
             self.pause()
             while num_new_samples > 0:
                 this_n = min(num_new_samples, 512)
-                new_samples = self.proposal_sample(this_n, observations)
+                new_samples = self.sample_proposal(this_n, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]
                 new_samples = self.sample(this_n, conditions=new_samples)
