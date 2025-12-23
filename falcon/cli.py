@@ -153,13 +153,13 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     elif sample_type == "posterior":
         # TODO: Implement posterior sampling (requires trained model and observations)
         deployed_graph.load(Path(cfg.paths.graph))
-        samples = deployed_graph.conditioned_sample(num_samples, observations)
+        samples = deployed_graph.sample_posterior(num_samples, observations)
 
     elif sample_type == "proposal":
         # Proposal sampling requires observations for conditioning
         # Load observations from config
         deployed_graph.load(Path(cfg.paths.graph))
-        samples = deployed_graph.proposal_sample(num_samples, observations)
+        samples = deployed_graph.sample_proposal(num_samples, observations)
 
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
