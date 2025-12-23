@@ -156,12 +156,12 @@ class SNPE_A:
 
         # Networks (initialized lazily)
         self.networks_initialized = False
-        self._posterior = None
+        self._conditional_flow = None
         self._marginal_flow = None
-        self._best_posterior = None
+        self._best_conditional_flow = None
         self._best_marginal_flow = None
         self._best_embedding = None
-        self.best_posterior_val_loss = float("inf")
+        self.best_conditional_flow_val_loss = float("inf")
         self.best_marginal_flow_val_loss = float("inf")
 
         # Consolidated history tracking
@@ -205,16 +205,16 @@ class SNPE_A:
         theta = theta.to(self.device)
 
         # Training networks
-        self._posterior = self._create_flow(theta, s, is_conditional=True)
-        self._posterior.to(self.device)
+        self._conditional_flow = self._create_flow(theta, s, is_conditional=True)
+        self._conditional_flow.to(self.device)
 
         self._marginal_flow = self._create_flow(theta, s, is_conditional=False)
         self._marginal_flow.to(self.device)
 
         # Best-fit networks (copies of training networks)
-        self._best_posterior = self._create_flow(theta, s, is_conditional=True)
-        self._best_posterior.to(self.device)
-        self._best_posterior.load_state_dict(self._posterior.state_dict())
+        self._best_conditional_flow = self._create_flow(theta, s, is_conditional=True)
+        self._best_conditional_flow.to(self.device)
+        self._best_conditional_flow.load_state_dict(self._conditional_flow.state_dict())
 
         self._best_marginal_flow = self._create_flow(theta, s, is_conditional=False)
         self._best_marginal_flow.to(self.device)
@@ -224,7 +224,7 @@ class SNPE_A:
 
         # Optimizer
         parameters = (
-            list(self._posterior.parameters()) +
+            list(self._conditional_flow.parameters()) +
             list(self._marginal_flow.parameters()) +
             list(self._embedding.parameters())
         )
@@ -239,11 +239,11 @@ class SNPE_A:
         self.networks_initialized = True
         print("...done initializing networks.")
 
-    def _update_best_weights(self, network_type="posterior"):
+    def _update_best_weights(self, network_type="conditional"):
         """Copy current network weights to best-fit checkpoint."""
-        if network_type == "posterior":
-            self._best_posterior.load_state_dict(
-                {k: v.clone() for k, v in self._posterior.state_dict().items()}
+        if network_type == "conditional":
+            self._best_conditional_flow.load_state_dict(
+                {k: v.clone() for k, v in self._conditional_flow.state_dict().items()}
             )
             self._best_embedding.load_state_dict(
                 {k: v.clone() for k, v in self._embedding.state_dict().items()}
@@ -322,8 +322,8 @@ class SNPE_A:
                     self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
                 # Compute losses
-                self._posterior.train()
-                loss_train = self._posterior.loss(uc, sc).mean()
+                self._conditional_flow.train()
+                loss_train = self._conditional_flow.loss(uc, sc).mean()
                 log({"train:loss": loss_train.item()})
 
                 self._marginal_flow.train()
@@ -372,8 +372,8 @@ class SNPE_A:
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
-                self._posterior.eval()
-                val_post_loss += self._posterior.loss(uc, sc).sum().item()
+                self._conditional_flow.eval()
+                val_post_loss += self._conditional_flow.loss(uc, sc).sum().item()
 
                 self._marginal_flow.eval()
                 val_aux_loss += self._marginal_flow.loss(uc, sc * 0).sum().item()
@@ -392,9 +392,9 @@ class SNPE_A:
             log({"val:loss_aux": val_aux_loss})
 
             # Checkpointing
-            if val_post_loss < self.best_posterior_val_loss:
-                self.best_posterior_val_loss = val_post_loss
-                self._update_best_weights("posterior")
+            if val_post_loss < self.best_conditional_flow_val_loss:
+                self.best_conditional_flow_val_loss = val_post_loss
+                self._update_best_weights("conditional")
                 log({"checkpoint:count": counter_post})
                 counter_post += 1
 
@@ -444,20 +444,20 @@ class SNPE_A:
         conditions = [c.to(self.device) for c in conditions]
 
         if self._use_best_models_during_inference:
-            posterior_net = self._best_posterior
+            conditional_net = self._best_conditional_flow
             marginal_net = self._best_marginal_flow
             s = self._embed(conditions, train=False, use_best_fit=True)
         else:
-            posterior_net = self._posterior
+            conditional_net = self._conditional_flow
             marginal_net = self._marginal_flow
             s = self._embed(conditions, train=False)
 
         s = s.expand(num_samples, *s.shape[1:])
 
-        # Generate proposals from posterior
+        # Generate proposals from conditional flow
         num_proposals = 256
-        posterior_net.eval()
-        samples_proposals = posterior_net.sample(num_proposals, s).detach()
+        conditional_net.eval()
+        samples_proposals = conditional_net.sample(num_proposals, s).detach()
 
         log({
             "importance_sample:proposal_mean": samples_proposals.mean().item(),
@@ -465,9 +465,9 @@ class SNPE_A:
         })
 
         # Compute log probs
-        log_prob_post = posterior_net.log_prob(samples_proposals, s)
+        log_prob_cond = conditional_net.log_prob(samples_proposals, s)
         marginal_net.eval()
-        log_prob_dist = marginal_net.log_prob(samples_proposals, s * 0)
+        log_prob_marg = marginal_net.log_prob(samples_proposals, s * 0)
 
         # Mask samples outside [-2, 2] box
         mask = (samples_proposals < -2) | (samples_proposals > 2)
@@ -475,9 +475,9 @@ class SNPE_A:
 
         # Compute importance weights
         if mode == "proposal":
-            log_weights = -1.0 / (1.0 + self.gamma) * log_prob_post - mask
-        else:  # "posterior" or "prior" - same formula
-            log_weights = -log_prob_dist - mask
+            log_weights = -1.0 / (1.0 + self.gamma) * log_prob_cond - mask
+        else:  # "posterior" - reweight by marginal
+            log_weights = -log_prob_marg - mask
 
         log_weights = torch.nan_to_num(log_weights, nan=-100.0, neginf=-100.0)
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
@@ -492,7 +492,7 @@ class SNPE_A:
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
         samples = samples_proposals[idx, torch.arange(num_samples), :]
         samples = self.simulator_instance.forward(samples).cpu()
-        logprob = log_prob_post[idx, torch.arange(num_samples)].cpu()
+        logprob = log_prob_cond[idx, torch.arange(num_samples)].cpu()
 
         return samples, logprob.detach()
 
@@ -543,8 +543,8 @@ class SNPE_A:
         s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
 
         u = u.to(self.device)
-        self._posterior.eval()
-        log_prob = self._posterior.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
+        self._conditional_flow.eval()
+        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
         log_ratio = log_prob - theta_logprob
         return log_ratio < self.log_ratio_threshold
 
@@ -553,7 +553,7 @@ class SNPE_A:
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
-        torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
+        torch.save(self._best_conditional_flow.state_dict(), node_dir / "conditional_flow.pth")
         torch.save(self._best_marginal_flow.state_dict(), node_dir / "marginal_flow.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
 
@@ -576,7 +576,7 @@ class SNPE_A:
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 
-        self._best_posterior.load_state_dict(torch.load(node_dir / "posterior.pth"))
+        self._best_conditional_flow.load_state_dict(torch.load(node_dir / "conditional_flow.pth"))
         self._best_marginal_flow.load_state_dict(torch.load(node_dir / "marginal_flow.pth"))
 
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
