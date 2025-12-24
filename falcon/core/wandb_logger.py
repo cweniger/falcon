@@ -71,8 +71,17 @@ class WandBBackend(LoggerBackend):
 
         self.run = wandb.init(**wandb_kwargs)
 
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        """Log metrics to WandB."""
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log metrics to WandB.
+
+        Note: WandB manages its own timestamps; walltime parameter is accepted
+        for interface compatibility but not used.
+        """
         try:
             self.run.log(metrics, step=step)
         except Exception as e:
@@ -110,9 +119,14 @@ class WandBLoggerActor:
             dir=dir,
         )
 
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
         """Log metrics (delegates to WandBBackend)."""
-        self._backend.log(metrics, step)
+        self._backend.log(metrics, step, walltime)
 
     def shutdown(self) -> None:
         """Shutdown the backend (delegates to WandBBackend)."""
@@ -144,58 +158,16 @@ def create_wandb_factory(
     """
     _check_wandb_available()
 
-    def factory(actor_id: str, config: Optional[Dict[str, Any]] = None):
+    def factory(actor_id: str):
         return WandBLoggerActor.remote(
             project=project,
             group=group,
             name=actor_id,
-            config=config,
             dir=dir,
         )
 
     return factory
 
 
-# Backwards compatibility aliases and helpers
+# Backwards compatibility alias
 WandBWrapper = WandBLoggerActor
-
-
-def start_wandb_logger(
-    wandb_project: Optional[str] = None,
-    wandb_group: Optional[str] = None,
-    wandb_dir: Optional[str] = None,
-    local_log_dir: Optional[str] = None,
-):
-    """Start the global logger manager as a detached Ray actor.
-
-    This is a convenience function that creates a LoggerManager with
-    WandB and optionally local file backends.
-
-    Raises:
-        ImportError: If wandb is not installed.
-    """
-    _check_wandb_available()
-
-    from .logger import LoggerManager
-    from .local_logger import create_local_factory
-
-    factories = {
-        "wandb": create_wandb_factory(
-            project=wandb_project,
-            group=wandb_group,
-            dir=wandb_dir,
-        ),
-    }
-    if local_log_dir:
-        factories["local"] = create_local_factory(local_log_dir)
-
-    LoggerManager.options(name="falcon:global_logger", lifetime="detached").remote(
-        backend_factories=factories
-    )
-
-
-def finish_wandb_logger():
-    """Stop the global logger manager."""
-    logger = ray.get_actor(name="falcon:global_logger")
-    ray.get(logger.shutdown.remote())
-    ray.kill(logger)

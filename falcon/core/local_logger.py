@@ -52,10 +52,13 @@ class LocalFileBackend(LoggerBackend):
     Args:
         base_dir: Base directory for storing metrics.
         name: Identifier for this logger (used in directory structure).
-        buffer_size: Number of entries to buffer before flushing.
+        buffer_size: Number of entries to buffer before flushing to disk.
+            Default is 100, balancing write frequency with data safety.
+            Lower values (e.g., 10) provide more frequent saves but more I/O.
+            Higher values (e.g., 1000) reduce I/O but risk data loss on crash.
     """
 
-    def __init__(self, base_dir: str, name: str = "default", buffer_size: int = 5):
+    def __init__(self, base_dir: str, name: str = "default", buffer_size: int = 100):
         self.base_dir = Path(base_dir)
         self.name = name
         self.metrics_dir = self.base_dir / name / "metrics"
@@ -68,9 +71,22 @@ class LocalFileBackend(LoggerBackend):
 
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
 
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
-        """Log metrics to buffer, flushing when buffer is full."""
-        walltime = time.time()
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log metrics to buffer, flushing when buffer is full.
+
+        Args:
+            metrics: Dictionary mapping metric names to values.
+            step: Optional step/iteration number.
+            walltime: Optional timestamp (epoch seconds). If not provided,
+                current time is used.
+        """
+        if walltime is None:
+            walltime = time.time()
 
         for key, value in metrics.items():
             value = self._normalize_value(value)
@@ -150,27 +166,32 @@ class LocalLoggerActor:
     Args:
         base_dir: Base directory for storing metrics.
         name: Identifier for this logger.
-        buffer_size: Number of entries to buffer before flushing.
+        buffer_size: Number of entries to buffer before flushing (default: 100).
     """
 
-    def __init__(self, base_dir: str, name: str = "default", buffer_size: int = 5):
+    def __init__(self, base_dir: str, name: str = "default", buffer_size: int = 100):
         self._backend = LocalFileBackend(base_dir, name, buffer_size)
 
-    def log(self, metrics: Dict[str, Any], step: Optional[int] = None) -> None:
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
         """Log metrics (delegates to LocalFileBackend)."""
-        self._backend.log(metrics, step)
+        self._backend.log(metrics, step, walltime)
 
     def shutdown(self) -> None:
         """Shutdown the backend (delegates to LocalFileBackend)."""
         self._backend.shutdown()
 
 
-def create_local_factory(base_dir: str, buffer_size: int = 5):
+def create_local_factory(base_dir: str, buffer_size: int = 100):
     """Create a local file backend factory for use with LoggerManager.
 
     Args:
         base_dir: Base directory for storing metrics.
-        buffer_size: Number of entries to buffer before flushing.
+        buffer_size: Number of entries to buffer before flushing (default: 100).
 
     Returns:
         Factory function that creates LocalLoggerActor instances.
@@ -181,7 +202,7 @@ def create_local_factory(base_dir: str, buffer_size: int = 5):
         })
     """
 
-    def factory(actor_id: str, config: Optional[Dict[str, Any]] = None):
+    def factory(actor_id: str):
         return LocalLoggerActor.remote(
             base_dir=base_dir,
             name=actor_id,
