@@ -26,12 +26,17 @@
 # =============================================================================
 
 # -----------------------------------------------------------------------------
-# WandB logging configuration
+# Logging configuration
 # -----------------------------------------------------------------------------
 logging:
-  project: falcon_examples              # WandB project name
-  group: 01_minimal                     # Logical group or experiment name
-  dir: ${hydra:run.dir}                 # Log directory (Hydra's resolved run path)
+  wandb:                                  # WandB-specific settings (optional if wandb not installed)
+    enabled: false                        # Set to false to disable wandb logging
+    project: falcon_examples              # WandB project name
+    group: 01_minimal                     # Experiment group (for organizing runs)
+    dir: ${hydra:run.dir}                 # Directory for wandb files
+  local:
+    enabled: true                         # Local file-based logging
+    dir: ${paths.graph}                   # Reuses graph directory for metrics
 
 # -----------------------------------------------------------------------------
 # Directory configuration

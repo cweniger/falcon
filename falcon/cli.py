@@ -20,6 +20,7 @@ import sbi.analysis
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
+from falcon.core.logger import init_logging
 
 
 def parse_operational_flags():
@@ -58,12 +59,7 @@ def launch_mode(cfg: DictConfig) -> None:
 #            sys.path.insert(0, str(model_path))
 
     # Initialise logger (should be done before any other falcon code)
-    wandb_dir = cfg.logging.get("dir", None)
-    falcon.start_wandb_logger(
-        wandb_project=cfg.logging.project,
-        wandb_group=cfg.logging.group,
-        wandb_dir=wandb_dir,
-    )
+    init_logging(cfg)
 
     ########################
     ### Model definition ###
@@ -108,7 +104,7 @@ def launch_mode(cfg: DictConfig) -> None:
     ##########################
 
     deployed_graph.shutdown()
-    falcon.finish_wandb_logger()
+    falcon.finish_logging()
 
 
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:

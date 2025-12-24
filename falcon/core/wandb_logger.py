@@ -1,115 +1,173 @@
-from typing import Optional, Dict, Any
+"""
+WandB logging backend.
+
+This module provides WandB-specific logging implementations:
+- WandBBackend: Non-Ray backend for single-process use
+- WandBLoggerActor: Ray actor for distributed logging
+- create_wandb_factory: Factory function for LoggerManager integration
+
+WandB is an optional dependency. If not installed, attempting to use
+WandB backends will raise an ImportError with installation instructions.
+"""
+
+from typing import Any, Dict, Optional
+
 import ray
-import wandb
+
+from .logger import LoggerBackend
+
+# Optional wandb import
+try:
+    import wandb
+    WANDB_AVAILABLE = True
+except ImportError:
+    wandb = None
+    WANDB_AVAILABLE = False
 
 
-def start_wandb_logger(
-    wandb_project: Optional[str] = None,
-    wandb_group: Optional[str] = None,
-    wandb_dir: Optional[str] = None,
-):
-    logger = WandBManager.options(
-        name="falcon:global_logger", lifetime="detached"
-    ).remote(
-        wandb_project=wandb_project,
-        wandb_group=wandb_group,
-        wandb_dir=wandb_dir,
-    )
+def _check_wandb_available():
+    """Raise ImportError if wandb is not installed."""
+    if not WANDB_AVAILABLE:
+        raise ImportError(
+            "WandB is not installed. Install it with: pip install wandb"
+        )
 
 
-def finish_wandb_logger():
+class WandBBackend(LoggerBackend):
+    """WandB logging backend (non-Ray version).
+
+    Logs metrics to Weights & Biases. Suitable for single-process use.
+
+    Args:
+        project: WandB project name.
+        group: WandB group name.
+        name: Run name.
+        config: Run configuration dict.
+        dir: Directory for WandB files.
+
+    Raises:
+        ImportError: If wandb is not installed.
     """
-    Stop the W&B logger actor.
-    """
-    logger = ray.get_actor(name="falcon:global_logger")
-    ray.get(logger.shutdown.remote())
-    ray.kill(logger)
 
-
-@ray.remote
-class WandBWrapper:
     def __init__(
         self,
-        wandb_project: Optional[str] = None,
-        wandb_group: Optional[str] = None,
-        wandb_name: Optional[str] = None,
-        wandb_config: Optional[Dict[str, Any]] = None,
-        wandb_dir: Optional[str] = None,
+        project: Optional[str] = None,
+        group: Optional[str] = None,
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        dir: Optional[str] = None,
     ):
-        self.wandb_project = wandb_project
-        self.wandb_group = wandb_group
-        self.wandb_name = wandb_name
-        self.wandb_config = wandb_config
-        self.wandb_dir = wandb_dir
+        _check_wandb_available()
 
-        wandb_init_kwargs = {
-            "project": self.wandb_project,
-            "group": self.wandb_group,
-            "name": self.wandb_name,
-            "config": self.wandb_config or {},
+        wandb_kwargs = {
+            "project": project,
+            "group": group,
+            "name": name,
+            "config": config or {},
             "reinit": True,
         }
-        if self.wandb_dir:
-            wandb_init_kwargs["dir"] = self.wandb_dir
+        if dir:
+            wandb_kwargs["dir"] = dir
 
-        self.wandb_run = wandb.init(**wandb_init_kwargs)
+        self.run = wandb.init(**wandb_kwargs)
 
-    def log(self, metrics: Dict[str, float], step: Optional[int] = None):
-        """
-        Log scalar metrics, wandb style.
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log metrics to WandB.
+
+        Note: WandB manages its own timestamps; walltime parameter is accepted
+        for interface compatibility but not used.
         """
         try:
-            self.wandb_run.log(metrics, step=step)
-        except:
-            # Handle the case where the actor is not available
-            print("Error logging metrics:", self.wandb_name, metrics)
+            self.run.log(metrics, step=step)
+        except Exception as e:
+            print(f"WandB logging error: {e}")
 
-    def shutdown(self):
-        """
-        Finish the W&B run.
-        """
-        self.wandb_run.finish()
+    def shutdown(self) -> None:
+        """Finish the WandB run."""
+        self.run.finish()
 
 
 @ray.remote
-class WandBManager:
+class WandBLoggerActor:
+    """Ray actor wrapper for WandBBackend.
+
+    Provides the same interface as WandBBackend but runs as a Ray actor
+    for distributed logging scenarios.
+
+    Raises:
+        ImportError: If wandb is not installed.
+    """
+
     def __init__(
         self,
-        wandb_project: Optional[str] = None,
-        wandb_group: Optional[str] = None,
-        wandb_dir: Optional[str] = None,
+        project: Optional[str] = None,
+        group: Optional[str] = None,
+        name: Optional[str] = None,
+        config: Optional[Dict[str, Any]] = None,
+        dir: Optional[str] = None,
     ):
-        self.wandb_project = wandb_project
-        self.wandb_group = wandb_group
-        self.wandb_dir = wandb_dir
-        self.wandb_runs = {}
-
-    def init(self, actor_id: str, config: Optional[Dict[str, Any]] = None):
-        """
-        Initialize a new W&B run.
-        """
-        self.wandb_runs[actor_id] = WandBWrapper.remote(
-            wandb_project=self.wandb_project,
-            wandb_group=self.wandb_group,
-            wandb_name=actor_id,
-            wandb_config=config,
-            wandb_dir=self.wandb_dir,
+        self._backend = WandBBackend(
+            project=project,
+            group=group,
+            name=name,
+            config=config,
+            dir=dir,
         )
 
     def log(
         self,
-        metrics: Dict[str, float],
+        metrics: Dict[str, Any],
         step: Optional[int] = None,
-        actor_id: str = None,
-    ):
-        """
-        Log scalar metrics, wandb style.
-        """
-        self.wandb_runs[actor_id].log.remote(metrics, step=step)
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log metrics (delegates to WandBBackend)."""
+        self._backend.log(metrics, step, walltime)
 
-    def shutdown(self):
-        """
-        Finish all W&B runs.
-        """
-        for _, wandb_run in self.wandb_runs.items():
-            ray.get(wandb_run.shutdown.remote())
+    def shutdown(self) -> None:
+        """Shutdown the backend (delegates to WandBBackend)."""
+        self._backend.shutdown()
+
+
+def create_wandb_factory(
+    project: Optional[str] = None,
+    group: Optional[str] = None,
+    dir: Optional[str] = None,
+):
+    """Create a WandB backend factory for use with LoggerManager.
+
+    Args:
+        project: WandB project name.
+        group: WandB group name.
+        dir: Directory for WandB files.
+
+    Returns:
+        Factory function that creates WandBLoggerActor instances.
+
+    Raises:
+        ImportError: If wandb is not installed.
+
+    Example:
+        manager = LoggerManager.remote({
+            "wandb": create_wandb_factory(project="my_project"),
+        })
+    """
+    _check_wandb_available()
+
+    def factory(actor_id: str):
+        return WandBLoggerActor.remote(
+            project=project,
+            group=group,
+            name=actor_id,
+            dir=dir,
+        )
+
+    return factory
+
+
+# Backwards compatibility alias
+WandBWrapper = WandBLoggerActor
