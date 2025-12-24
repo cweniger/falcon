@@ -83,7 +83,7 @@ graph:
          _input_: [x]
 
       # --- Training parameters ---
-      num_epochs: 10
+      num_epochs: 300
       batch_size: 128
       lr: 0.01
       scheduler_patience: 16            # LR decay after N stagnant epochs
