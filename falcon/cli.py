@@ -1,21 +1,19 @@
 #!/usr/bin/env python3
 """
 Falcon Adaptive Training - Standalone CLI Tool
-Usage: python adaptive.py --config-path ./model-repo --config-name config
+Usage: falcon launch [--config-name=config] [key=value ...]
+       falcon sample prior|posterior|proposal [--config-name=config] [key=value ...]
 """
 
 import sys
 import os
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
+from datetime import datetime
 import joblib
 import torch
 import ray
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import sbi.analysis
+from omegaconf import OmegaConf, DictConfig
 
 import falcon
 from falcon.core.utils import load_observations
@@ -23,28 +21,33 @@ from falcon.core.graph import create_graph_from_config
 from falcon.core.logger import init_logging
 
 
-def parse_operational_flags():
-    """Extract all operational flags (--*) from sys.argv, leaving Hydra args."""
+# Register custom OmegaConf resolvers
+OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
-    # Extract all operational flags (anything starting with "--")
-    operational_flags = [arg for arg in sys.argv if arg.startswith("--")]
-    hydra_args = [arg for arg in sys.argv if not arg.startswith("--")]
 
-    # Update sys.argv to only contain hydra arguments
-    sys.argv[:] = hydra_args
+def load_config(config_name: str = "config", overrides: list = None) -> DictConfig:
+    """Load config from current directory with CLI overrides."""
+    config_path = Path.cwd() / f"{config_name}.yaml"
 
-    # Helper to parse flag values
-    def get_flag_value(flag_name):
-        for flag in operational_flags:
-            if flag.startswith(f"{flag_name}="):
-                return flag.split("=", 1)[1]
-        return None
+    if not config_path.exists():
+        raise FileNotFoundError(f"Config not found: {config_path}")
 
-    # Helper to check if flag exists
-    def has_flag(flag_name):
-        return flag_name in operational_flags
+    cfg = OmegaConf.load(config_path)
 
-    return operational_flags, get_flag_value, has_flag
+    # Apply CLI overrides (key=value format)
+    if overrides:
+        override_cfg = OmegaConf.from_dotlist(overrides)
+        cfg = OmegaConf.merge(cfg, override_cfg)
+
+    # Resolve all interpolations
+    OmegaConf.resolve(cfg)
+
+    # Create run_dir if specified
+    run_dir = cfg.get("run_dir")
+    if run_dir:
+        Path(run_dir).mkdir(parents=True, exist_ok=True)
+
+    return cfg
 
 
 def launch_mode(cfg: DictConfig) -> None:
@@ -208,46 +211,51 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     deployed_graph.shutdown()
 
 
-@hydra.main(version_base=None, config_path=os.getcwd(), config_name="config")
-def launch_main(cfg: DictConfig) -> None:
-    """Launch mode entry point."""
-    launch_mode(cfg)
+def parse_args():
+    """Parse falcon CLI arguments."""
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
+        print("Usage:")
+        print("  falcon launch [--config-name=X] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal [--config-name=X] [key=value ...]")
+        sys.exit(1)
+
+    mode = sys.argv[1]
+    args = sys.argv[2:]
+
+    sample_type = None
+    if mode == "sample":
+        if not args or args[0] not in ["prior", "posterior", "proposal"]:
+            print("Error: sample requires type: prior, posterior, or proposal")
+            sys.exit(1)
+        sample_type = args.pop(0)
+
+    # Extract --config-name and collect overrides
+    config_name = "config"
+    overrides = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg.startswith("--config-name="):
+            config_name = arg.split("=", 1)[1]
+        elif arg == "--config-name" and i + 1 < len(args):
+            config_name = args[i + 1]
+            i += 1
+        elif "=" in arg and not arg.startswith("-"):
+            overrides.append(arg)
+        i += 1
+
+    return mode, sample_type, config_name, overrides
 
 
 def main():
-    """Main CLI entry point with explicit mode dispatch."""
+    """Main CLI entry point."""
+    mode, sample_type, config_name, overrides = parse_args()
+    cfg = load_config(config_name, overrides)
 
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
-        print("Error: Must specify mode. Usage:")
-        print("  falcon launch [hydra_options...]")
-        print("  falcon sample prior [hydra_options...]")
-        print("  falcon sample proposal [hydra_options...]")
-        print("  falcon sample posterior [hydra_options...]")
-        sys.exit(1)
-
-    mode = sys.argv.pop(1)  # Remove mode from sys.argv
-
-    if mode == "sample":
-        sample_type = sys.argv.pop(1)
-        if sample_type not in ["prior", "proposal", "posterior"]:
-            print(f"Error: Unknown sample type: {sample_type}")
-            sys.exit(1)
-
-        # Create a modified main function that injects operational parameters
-        def make_sample_main(sample_type):
-            @hydra.main(
-                version_base=None, config_path=os.getcwd(), config_name="config"
-            )
-            def sample_main_with_params(cfg: DictConfig) -> None:
-                sample_mode(cfg, sample_type)
-
-            return sample_main_with_params
-
-        # Create and call the sample function
-        sample_main_func = make_sample_main(sample_type)
-        sample_main_func()
-    else:  # mode == 'launch'
-        launch_main()
+    if mode == "launch":
+        launch_mode(cfg)
+    else:
+        sample_mode(cfg, sample_type)
 
 
 if __name__ == "__main__":

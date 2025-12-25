@@ -1,19 +1,22 @@
+# Output directory (override with run_dir=path/to/output on command line)
+run_dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
+
 # Logging configuration
 logging:
   wandb:
     enabled: false
     project: falcon_examples
     group: 02_bimodal_rounds_renew
-    dir: ${hydra:run.dir}
+    dir: ${run_dir}
   local:
     enabled: true
     dir: ${paths.graph}
 
-# Directory configuration (relative to Hydra output directory)
+# Directory configuration
 paths:
   import: "./src"
-  buffer: ${hydra:run.dir}/sim_dir
-  graph: ${hydra:run.dir}/graph_dir
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
 
 # Training buffer parameters
 buffer:
