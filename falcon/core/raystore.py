@@ -4,7 +4,6 @@ from enum import IntEnum
 import joblib
 
 import ray
-import torch
 from torch.utils.data import IterableDataset
 
 from falcon.core.logging import initialize_logging_for, log
@@ -437,23 +436,27 @@ def batch_collate_fn(dataset_manager):
     """
 
     def collate(samples):
-        """Collate samples into a Batch object."""
+        """Collate samples into a Batch object with numpy arrays.
+
+        Returns numpy arrays for framework-agnostic data transport.
+        Estimators convert to their framework (PyTorch, JAX, etc.) as needed.
+        """
         # samples is list of (index, {key: value}) tuples
         ids = np.array([s[0] for s in samples])
 
-        # Stack values for each key
+        # Stack values for each key as numpy arrays
         data = {}
         keys = samples[0][1].keys()
         for key in keys:
             values = [s[1][key] for s in samples]
-            # Stack numpy arrays or torch tensors
             if isinstance(values[0], np.ndarray):
-                data[key] = torch.from_numpy(np.stack(values))
-            elif isinstance(values[0], torch.Tensor):
-                data[key] = torch.stack(values)
+                data[key] = np.stack(values)
+            elif hasattr(values[0], 'numpy'):
+                # torch tensor - convert to numpy
+                data[key] = np.stack([v.numpy() for v in values])
             else:
-                # Scalar or other - convert to tensor
-                data[key] = torch.tensor(values)
+                # Scalar or other - convert to numpy array
+                data[key] = np.array(values)
 
         return Batch(ids, data, dataset_manager)
 

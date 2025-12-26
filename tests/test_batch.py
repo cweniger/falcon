@@ -152,7 +152,7 @@ class TestBatchCollateFn:
         assert 'x' in batch
 
     def test_collate_stacks_numpy_arrays(self):
-        """Collate should stack numpy arrays into tensors."""
+        """Collate should stack numpy arrays into numpy arrays."""
         mock_dm = MagicMock()
         collate = batch_collate_fn(mock_dm)
 
@@ -164,12 +164,13 @@ class TestBatchCollateFn:
 
         batch = collate(samples)
 
+        assert isinstance(batch['theta'], np.ndarray)
         assert batch['theta'].shape == (3, 2)
-        assert torch.equal(batch['theta'][0], torch.tensor([1.0, 2.0]))
-        assert torch.equal(batch['theta'][2], torch.tensor([5.0, 6.0]))
+        np.testing.assert_array_equal(batch['theta'][0], np.array([1.0, 2.0]))
+        np.testing.assert_array_equal(batch['theta'][2], np.array([5.0, 6.0]))
 
     def test_collate_stacks_tensors(self):
-        """Collate should stack torch tensors."""
+        """Collate should convert torch tensors to numpy arrays."""
         mock_dm = MagicMock()
         collate = batch_collate_fn(mock_dm)
 
@@ -180,6 +181,7 @@ class TestBatchCollateFn:
 
         batch = collate(samples)
 
+        assert isinstance(batch['x'], np.ndarray)
         assert batch['x'].shape == (2, 1)
 
     def test_collate_preserves_ids(self):

@@ -277,6 +277,19 @@ class SNPE_A:
         embedding.train() if train else embedding.eval()
         return embedding(conditions)
 
+    def _to_torch(self, x):
+        """Convert numpy array to torch tensor.
+
+        Args:
+            x: numpy array or torch tensor
+
+        Returns:
+            torch tensor
+        """
+        if isinstance(x, np.ndarray):
+            return torch.from_numpy(x)
+        return x
+
     def _unpack_batch(self, batch):
         """Unpack batch into (ids, theta, theta_logprob, conditions).
 
@@ -290,13 +303,16 @@ class SNPE_A:
             Tuple of (ids, theta, theta_logprob, conditions_dict)
         """
         if isinstance(batch, Batch):
-            # New Batch format - dictionary access
+            # New Batch format - dictionary access with numpy arrays
             theta_key = self.theta_key
-            ids = batch._ids  # Access internal IDs for logging
-            theta = batch[theta_key]
-            theta_logprob = batch[f"{theta_key}.logprob"]
-            # Build conditions dict from condition_keys
-            conditions = {k: batch[k] for k in self.condition_keys if k in batch}
+            ids = batch._ids  # Access internal IDs for logging (numpy array)
+            # Convert numpy arrays to torch tensors
+            theta = self._to_torch(batch[theta_key])
+            theta_logprob = self._to_torch(batch[f"{theta_key}.logprob"])
+            # Build conditions dict from condition_keys, converting to torch
+            conditions = {
+                k: self._to_torch(batch[k]) for k in self.condition_keys if k in batch
+            }
             return ids, theta, theta_logprob, conditions, batch
         else:
             # Legacy tuple format
