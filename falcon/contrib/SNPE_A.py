@@ -14,6 +14,7 @@ from sbi.neural_nets import net_builders
 
 from falcon.core.logging import log
 from falcon.core.utils import LazyLoader, RVBatch
+from falcon.core.raystore import Batch
 from falcon.contrib.torch_embedding import instantiate_embedding
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
@@ -115,6 +116,8 @@ class SNPE_A:
         batch_size=128,
         embedding=None,
         _embedding_keywords=[],
+        theta_key=None,
+        condition_keys=None,
         use_best_models_during_inference=True,
         use_log_update=False,
         adaptive_momentum=False,
@@ -131,6 +134,7 @@ class SNPE_A:
 
         # Store config
         self.num_epochs = num_epochs
+        self.batch_size = batch_size
         self.lr_decay_factor = lr_decay_factor
         self.scheduler_patience = scheduler_patience
         self.early_stop_patience = early_stop_patience
@@ -147,9 +151,13 @@ class SNPE_A:
         self.log_ratio_threshold = log_ratio_threshold
         self.reset_network_after_pause = reset_network_after_pause
 
+        # Key configuration for Batch access
+        self.theta_key = theta_key
+        # Support both new condition_keys and legacy _embedding_keywords
+        self.condition_keys = condition_keys if condition_keys is not None else _embedding_keywords
+
         # Embedding
         self._embedding = instantiate_embedding(embedding).to(self.device)
-        self.embedding_keyword_order = _embedding_keywords
 
         # Prior/simulator
         self.simulator_instance = simulator_instance
@@ -195,12 +203,12 @@ class SNPE_A:
             adaptive_momentum=self.adaptive_momentum,
         )
 
-    def _initialize_networks(self, theta, conditions):
+    def _initialize_networks(self, theta, conditions: dict):
         self._init_parameters = [theta, conditions]
         print("Initializing networks...")
         print("GPU available:", torch.cuda.is_available())
 
-        conditions = [c.to(self.device) for c in conditions]
+        conditions = {k: v.to(self.device) for k, v in conditions.items()}
         s = self._embed(conditions, train=False).detach()
         theta = theta.to(self.device)
 
@@ -253,20 +261,78 @@ class SNPE_A:
                 {k: v.clone() for k, v in self._marginal_flow.state_dict().items()}
             )
 
-    def _embed(self, conditions, train=True, use_best_fit=False):
-        """Run conditions through embedding network."""
+    def _embed(self, conditions: dict, train=True, use_best_fit=False):
+        """Run conditions through embedding network.
+
+        Args:
+            conditions: Dict mapping condition keys to tensors {key: tensor}
+            train: Whether to set embedding to train mode
+            use_best_fit: Whether to use best-fit embedding weights
+        """
         embedding = (
             self._best_embedding
             if use_best_fit and self._best_embedding is not None
             else self._embedding
         )
         embedding.train() if train else embedding.eval()
+        return embedding(conditions)
 
-        # TODO: Remove hack once batches are dicts
-        conditions = conditions + [None] * 10
-        return embedding(
-            {k: conditions[i] for i, k in enumerate(self.embedding_keyword_order)}
-        )
+    def _unpack_batch(self, batch):
+        """Unpack batch into (ids, theta, theta_logprob, conditions).
+
+        Supports both new Batch objects with dictionary access and
+        legacy tuple format for backward compatibility.
+
+        Args:
+            batch: Either a Batch object or tuple (ids, theta, logprob, *conditions)
+
+        Returns:
+            Tuple of (ids, theta, theta_logprob, conditions_dict)
+        """
+        if isinstance(batch, Batch):
+            # New Batch format - dictionary access
+            theta_key = self.theta_key
+            ids = batch._ids  # Access internal IDs for logging
+            theta = batch[theta_key]
+            theta_logprob = batch[f"{theta_key}.logprob"]
+            # Build conditions dict from condition_keys
+            conditions = {k: batch[k] for k in self.condition_keys if k in batch}
+            return ids, theta, theta_logprob, conditions, batch
+        else:
+            # Legacy tuple format
+            ids, theta, theta_logprob = batch[0], batch[1], batch[2]
+            inf_conditions = batch[3:]
+            # Convert to dict for embedding
+            conditions = {k: inf_conditions[i] for i, k in enumerate(self.condition_keys)}
+            return ids, theta, theta_logprob, conditions, None
+
+    def _compute_discard_mask(self, theta, theta_logprob, conditions):
+        """Compute boolean mask of samples to discard based on log-likelihood ratio.
+
+        Internal method used with new Batch format. Works with conditions as dict.
+
+        Args:
+            theta: Parameter tensor
+            theta_logprob: Log probability tensor from proposal
+            conditions: Dict of condition tensors (already on device)
+
+        Returns:
+            Boolean mask where True = discard sample
+        """
+        if not self.discard_samples:
+            return None
+
+        u = self.simulator_instance.inverse(theta)
+        s = self._embed(conditions, train=False, use_best_fit=True)
+
+        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
+        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
+
+        u = u.to(self.device)
+        self._conditional_flow.eval()
+        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
+        log_ratio = log_prob - theta_logprob.cpu()
+        return log_ratio < self.log_ratio_threshold
 
     def sample_prior(self, num_samples, parent_conditions=[]):
         """Sample from the prior distribution."""
@@ -276,7 +342,17 @@ class SNPE_A:
         return RVBatch(samples, logprob=logprob)
 
     async def train(self, dataloader_train, dataloader_val, hook_fn=None, dataset_manager=None):
-        """Train the neural spline flow."""
+        """Train the neural spline flow.
+
+        Supports both new Batch objects (with dictionary access and batch.discard())
+        and legacy tuple format for backward compatibility.
+
+        Args:
+            dataloader_train: Training data loader
+            dataloader_val: Validation data loader
+            hook_fn: Legacy hook function for discarding (deprecated, use Batch.discard)
+            dataset_manager: Legacy dataset manager (deprecated, use Batch.discard)
+        """
         best_val_loss = float("inf")
         n_train_batch = 0
         n_val_batch = 0
@@ -297,22 +373,26 @@ class SNPE_A:
                 log({"train:step": n_train_batch})
                 n_train_batch += 1
 
-                ids, theta, theta_logprob = batch[0], batch[1], batch[2]
-                inf_conditions = batch[3:]
+                # Unpack batch (supports both Batch objects and legacy tuples)
+                ids, theta, theta_logprob, conditions, batch_obj = self._unpack_batch(batch)
 
                 ts = time.time()
-                self.history["train_ids"].extend((ts, id) for id in ids.numpy().tolist())
+                if hasattr(ids, 'numpy'):
+                    self.history["train_ids"].extend((ts, id) for id in ids.numpy().tolist())
+                else:
+                    self.history["train_ids"].extend((ts, id) for id in ids.tolist())
 
                 log({"train:theta_logprob_min": theta_logprob.min().item()})
                 log({"train:theta_logprob_max": theta_logprob.max().item()})
 
                 u = self.simulator_instance.inverse(theta)
                 if not self.networks_initialized:
-                    self._initialize_networks(u, inf_conditions)
+                    self._initialize_networks(u, conditions)
 
                 self._optimizer.zero_grad()
-                inf_conditions = [c.to(self.device) for c in inf_conditions]
-                s = self._embed(inf_conditions, train=True)
+                # Move conditions to device
+                conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+                s = self._embed(conditions_device, train=True)
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
@@ -337,8 +417,15 @@ class SNPE_A:
                 loss_train_avg += loss_train.item()
                 loss_aux_avg += loss_aux.item()
 
-                if hook_fn is not None:
+                # Handle sample discarding
+                if batch_obj is not None:
+                    # New Batch format - use batch.discard() directly
+                    discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
+                    batch_obj.discard(discard_mask)
+                elif hook_fn is not None:
+                    # Legacy format - use hook_fn
                     hook_fn(self, batch)
+
                 await asyncio.sleep(0)
                 await self._pause_event.wait()
                 if self._break_flag:
@@ -357,18 +444,21 @@ class SNPE_A:
                 log({"val:step": n_val_batch})
                 n_val_batch += 1
 
-                ids, theta, theta_logprob = batch[0], batch[1], batch[2]
-                inf_conditions = batch[3:]
+                # Unpack batch (supports both Batch objects and legacy tuples)
+                ids, theta, theta_logprob, conditions, _ = self._unpack_batch(batch)
 
                 ts = time.time()
-                self.history["val_ids"].extend((ts, id) for id in ids.numpy().tolist())
+                if hasattr(ids, 'numpy'):
+                    self.history["val_ids"].extend((ts, id) for id in ids.numpy().tolist())
+                else:
+                    self.history["val_ids"].extend((ts, id) for id in ids.tolist())
 
                 log({"val:theta_logprob_min": theta_logprob.min().item()})
                 log({"val:theta_logprob_max": theta_logprob.max().item()})
 
                 u = self.simulator_instance.inverse(theta)
-                inf_conditions = [c.to(self.device) for c in inf_conditions]
-                s = self._embed(inf_conditions, train=False)
+                conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+                s = self._embed(conditions_device, train=False)
                 uc = u.to(self.device)
                 sc = s.to(self.device)
 
@@ -439,9 +529,12 @@ class SNPE_A:
 
     def _importance_sample(self, num_samples, mode="posterior", parent_conditions=[], evidence_conditions=[]):
         """Sample using importance sampling."""
-        conditions = parent_conditions + evidence_conditions
-        assert conditions, "Conditions must be provided."
-        conditions = [c.to(self.device) for c in conditions]
+        conditions_list = parent_conditions + evidence_conditions
+        assert conditions_list, "Conditions must be provided."
+        # Convert list to dict using condition_keys
+        conditions = {
+            k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
+        }
 
         if self._use_best_models_during_inference:
             conditional_net = self._best_conditional_flow
@@ -534,9 +627,12 @@ class SNPE_A:
         if not self.discard_samples:
             return torch.zeros(len(theta), dtype=torch.bool)
 
-        conditions = parent_conditions + evidence_conditions
+        conditions_list = parent_conditions + evidence_conditions
         u = self.simulator_instance.inverse(theta)
-        conditions = [c.to(self.device) for c in conditions]
+        # Convert list to dict using condition_keys
+        conditions = {
+            k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
+        }
         s = self._embed(conditions, train=False, use_best_fit=True)
 
         u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u

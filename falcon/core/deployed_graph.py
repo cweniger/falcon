@@ -10,6 +10,7 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
+from falcon.core.raystore import BatchDatasetView, batch_collate_fn
 from .utils import LazyLoader, as_rvbatch
 
 
@@ -74,14 +75,18 @@ class NodeWrapper:
         simulator_cls = LazyLoader(node.simulator_cls)
         self.simulator_instance = simulator_cls(**node.simulator_config)
 
-        _embedding_keywords = self.node.evidence + self.node.scaffolds
-        print("Embedding keywords:", _embedding_keywords)
+        # Condition keys for embedding (evidence + scaffolds)
+        self.condition_keys = self.node.evidence + self.node.scaffolds
+        print("Condition keys:", self.condition_keys)
 
         if node.estimator_cls is not None:
             estimator_cls = LazyLoader(node.estimator_cls)
             self.estimator_instance = estimator_cls(
                 self.simulator_instance,
-                _embedding_keywords=_embedding_keywords,
+                theta_key=node.name,
+                condition_keys=self.condition_keys,
+                # Keep legacy parameter for backward compatibility
+                _embedding_keywords=self.condition_keys,
                 **node.estimator_config,
             )
         else:
@@ -98,44 +103,30 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         print("Training started for:", self.name)
-        keys_train = (
-            [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
-        )
-        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
+        keys = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
 
         batch_size = self.node.estimator_config.get("batch_size", 128)
 
+        # Use new BatchDatasetView with Batch objects
         dataset_train = ray.get(
-            dataset_manager.get_train_dataset_view.remote(keys_train, filter=None)
+            dataset_manager.get_train_batch_dataset_view.remote(keys, filter=None)
         )
         dataset_val = ray.get(
-            dataset_manager.get_val_dataset_view.remote(keys_val, filter=None)
+            dataset_manager.get_val_batch_dataset_view.remote(keys, filter=None)
         )
-        dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
-        dataloader_val = DataLoader(dataset_val, batch_size=batch_size)
 
-        def hook_fn(module, batch):
-            ids, theta, theta_logprob, conditions = (
-                batch[0],
-                batch[1],
-                batch[2],
-                batch[3:],
-            )
-            for i, k in enumerate(self.evidence):
-                if k in observations.keys():
-                    conditions[i] = observations[k]
-            # Corresponding id
-            mask = module.get_discard_mask(theta, theta_logprob, conditions)
-            ids = ids[mask]
-            ids = list(ids.numpy())
+        # Create collate function that produces Batch objects
+        collate_fn = batch_collate_fn(dataset_manager)
 
-            # Deactivate samples
-            dataset_manager.deactivate.remote(ids)
+        dataloader_train = DataLoader(dataset_train, batch_size=batch_size, collate_fn=collate_fn)
+        dataloader_val = DataLoader(dataset_val, batch_size=batch_size, collate_fn=collate_fn)
 
-        #        hook_fn = None
+        # Substitute observations into batch data
+        # This is handled by modifying the batch before training
+        # The estimator now handles discarding internally via batch.discard()
 
         await self.estimator_instance.train(
-            dataloader_train, dataloader_val, hook_fn=hook_fn, dataset_manager=dataset_manager
+            dataloader_train, dataloader_val, hook_fn=None, dataset_manager=dataset_manager
         )
         print("...training complete for:", self.name)
 
