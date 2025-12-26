@@ -463,6 +463,72 @@ def batch_collate_fn(dataset_manager):
     return collate
 
 
+class BufferView:
+    """View into the sample buffer for estimator training.
+
+    Passed to estimator.train() - estimator requests dataloaders with specific keys.
+
+    Example:
+        async def train(self, buffer: BufferView):
+            keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+            train_loader = buffer.train_loader(keys, batch_size=self.batch_size)
+            val_loader = buffer.val_loader(keys, batch_size=self.batch_size)
+            for batch in train_loader:
+                theta = batch[self.theta_key]
+                ...
+    """
+
+    def __init__(self, dataset_manager):
+        """Initialize buffer view.
+
+        Args:
+            dataset_manager: Ray actor for dataset management
+        """
+        self._dataset_manager = dataset_manager
+
+    def train_loader(self, keys: list, batch_size: int = 128, **kwargs):
+        """Create training dataloader with specified keys.
+
+        Args:
+            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
+            batch_size: Batch size for dataloader
+            **kwargs: Additional arguments passed to DataLoader
+
+        Returns:
+            DataLoader yielding Batch objects with numpy arrays
+        """
+        from torch.utils.data import DataLoader
+
+        dataset = ray.get(
+            self._dataset_manager.get_train_batch_dataset_view.remote(keys, filter=None)
+        )
+        collate_fn = batch_collate_fn(self._dataset_manager)
+        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
+
+    def val_loader(self, keys: list, batch_size: int = 128, **kwargs):
+        """Create validation dataloader with specified keys.
+
+        Args:
+            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
+            batch_size: Batch size for dataloader
+            **kwargs: Additional arguments passed to DataLoader
+
+        Returns:
+            DataLoader yielding Batch objects with numpy arrays
+        """
+        from torch.utils.data import DataLoader
+
+        dataset = ray.get(
+            self._dataset_manager.get_val_batch_dataset_view.remote(keys, filter=None)
+        )
+        collate_fn = batch_collate_fn(self._dataset_manager)
+        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
+
+    def get_stats(self):
+        """Get buffer statistics (total samples, etc.)."""
+        return ray.get(self._dataset_manager.get_store_stats.remote())
+
+
 def get_ray_dataset_manager(
     min_training_samples=None,
     max_training_samples=None,

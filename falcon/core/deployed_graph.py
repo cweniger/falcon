@@ -1,6 +1,5 @@
 import time
 import ray
-from torch.utils.data import DataLoader
 import asyncio
 import torch
 import os
@@ -10,7 +9,7 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
-from falcon.core.raystore import BatchDatasetView, batch_collate_fn
+from falcon.core.raystore import BufferView
 from .utils import LazyLoader, as_rvbatch
 
 
@@ -103,31 +102,18 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         print("Training started for:", self.name)
-        keys = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
+        print("Condition keys:", self.evidence + self.scaffolds)
 
-        batch_size = self.node.estimator_config.get("batch_size", 128)
+        # Create BufferView - estimator controls what keys it needs
+        buffer = BufferView(dataset_manager)
 
-        # Use new BatchDatasetView with Batch objects
-        dataset_train = ray.get(
-            dataset_manager.get_train_batch_dataset_view.remote(keys, filter=None)
-        )
-        dataset_val = ray.get(
-            dataset_manager.get_val_batch_dataset_view.remote(keys, filter=None)
-        )
+        # Set theta_key and condition_keys on estimator if not already set
+        if hasattr(self.estimator_instance, 'theta_key') and self.estimator_instance.theta_key is None:
+            self.estimator_instance.theta_key = self.name
+        if hasattr(self.estimator_instance, 'condition_keys') and not self.estimator_instance.condition_keys:
+            self.estimator_instance.condition_keys = self.evidence + self.scaffolds
 
-        # Create collate function that produces Batch objects
-        collate_fn = batch_collate_fn(dataset_manager)
-
-        dataloader_train = DataLoader(dataset_train, batch_size=batch_size, collate_fn=collate_fn)
-        dataloader_val = DataLoader(dataset_val, batch_size=batch_size, collate_fn=collate_fn)
-
-        # Substitute observations into batch data
-        # This is handled by modifying the batch before training
-        # The estimator now handles discarding internally via batch.discard()
-
-        await self.estimator_instance.train(
-            dataloader_train, dataloader_val, hook_fn=None, dataset_manager=dataset_manager
-        )
+        await self.estimator_instance.train(buffer)
         print("...training complete for:", self.name)
 
     def sample(self, n_samples, incoming=None):

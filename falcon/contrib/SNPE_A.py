@@ -357,18 +357,17 @@ class SNPE_A:
         logprob = np.ones(num_samples) * (-np.log(4) ** self.param_dim)
         return RVBatch(samples, logprob=logprob)
 
-    async def train(self, dataloader_train, dataloader_val, hook_fn=None, dataset_manager=None):
+    async def train(self, buffer):
         """Train the neural spline flow.
 
-        Supports both new Batch objects (with dictionary access and batch.discard())
-        and legacy tuple format for backward compatibility.
-
         Args:
-            dataloader_train: Training data loader
-            dataloader_val: Validation data loader
-            hook_fn: Legacy hook function for discarding (deprecated, use Batch.discard)
-            dataset_manager: Legacy dataset manager (deprecated, use Batch.discard)
+            buffer: BufferView providing access to training/validation data
         """
+        # Request dataloaders with the keys we need
+        keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+        dataloader_train = buffer.train_loader(keys, batch_size=self.batch_size)
+        dataloader_val = buffer.val_loader(keys, batch_size=self.batch_size)
+
         best_val_loss = float("inf")
         n_train_batch = 0
         n_val_batch = 0
@@ -433,14 +432,10 @@ class SNPE_A:
                 loss_train_avg += loss_train.item()
                 loss_aux_avg += loss_aux.item()
 
-                # Handle sample discarding
+                # Handle sample discarding via batch.discard()
                 if batch_obj is not None:
-                    # New Batch format - use batch.discard() directly
                     discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
                     batch_obj.discard(discard_mask)
-                elif hook_fn is not None:
-                    # Legacy format - use hook_fn
-                    hook_fn(self, batch)
 
                 await asyncio.sleep(0)
                 await self._pause_event.wait()
@@ -526,7 +521,7 @@ class SNPE_A:
             self.history["val_loss"].append(val_post_loss)
 
             try:
-                stats = ray.get(dataset_manager.get_store_stats.remote())
+                stats = buffer.get_stats()
                 self.history["n_samples"].append(stats["total_length"])
             except Exception:
                 pass
