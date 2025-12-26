@@ -9,6 +9,81 @@ from torch.utils.data import IterableDataset
 from falcon.core.logging import initialize_logging_for, log
 
 
+class Batch:
+    """Bidirectional batch - provides data and accepts feedback.
+
+    Provides dictionary-style access to batch data and allows marking
+    samples as disfavoured via the discard() method.
+
+    Example:
+        for batch in dataloader:
+            theta = batch['z']
+            logprob = batch['z.logprob']
+            x = batch['x']
+
+            # Discard low-likelihood samples
+            mask = logprob < threshold
+            batch.discard(mask)
+    """
+
+    def __init__(self, ids: np.ndarray, data: dict, dataset_manager):
+        """Initialize batch with sample IDs, data dict, and dataset manager.
+
+        Args:
+            ids: Array of sample IDs for feedback (e.g., discard)
+            data: Dictionary mapping keys to tensors {key: tensor}
+            dataset_manager: Ray actor for dataset management
+        """
+        self._ids = ids
+        self._data = data
+        self._dataset_manager = dataset_manager
+
+    def __getitem__(self, key: str):
+        """Dictionary-style access: batch['theta']"""
+        return self._data[key]
+
+    def __contains__(self, key: str):
+        """Check if key exists: 'theta' in batch"""
+        return key in self._data
+
+    def keys(self):
+        """Return available keys."""
+        return self._data.keys()
+
+    def __len__(self):
+        """Return batch size."""
+        return len(self._ids)
+
+    def discard(self, mask):
+        """Mark samples as disfavoured based on boolean mask.
+
+        Args:
+            mask: Boolean array/tensor where True = discard sample
+        """
+        if mask is None:
+            return
+        if hasattr(mask, 'cpu'):
+            mask = mask.cpu().numpy()
+        if hasattr(mask, 'any') and mask.any():
+            ids_to_discard = self._ids[mask].tolist()
+            self._dataset_manager.deactivate.remote(ids_to_discard)
+        elif isinstance(mask, (list, np.ndarray)) and any(mask):
+            ids_to_discard = self._ids[mask].tolist()
+            self._dataset_manager.deactivate.remote(ids_to_discard)
+
+    def get(self, key: str, default=None):
+        """Get value with optional default."""
+        return self._data.get(key, default)
+
+    def items(self):
+        """Return key-value pairs."""
+        return self._data.items()
+
+    def values(self):
+        """Return values."""
+        return self._data.values()
+
+
 class DatasetManager:
     """Access the DatasetManagerActor without exposing the actor interface directly."""
 
@@ -220,6 +295,22 @@ class DatasetManagerActor:
         )
         return dataset_val
 
+    def get_train_batch_dataset_view(self, keys, filter=None):
+        """Get training dataset view that yields dictionaries for Batch collation."""
+        dataset_train = BatchDatasetView(
+            keys,
+            filter=filter,
+            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
+        )
+        return dataset_train
+
+    def get_val_batch_dataset_view(self, keys, filter=None):
+        """Get validation dataset view that yields dictionaries for Batch collation."""
+        dataset_val = BatchDatasetView(
+            keys, filter=filter, sample_status=SampleStatus.VALIDATION
+        )
+        return dataset_val
+
     def initialize_samples(self, deployed_graph):
         num_initial_samples = self.num_initial_samples()
         if self.initial_samples_path is not None:
@@ -238,6 +329,12 @@ class DatasetManagerActor:
 
 
 class DatasetView(IterableDataset):
+    """Dataset view that yields samples as tuples (legacy format).
+
+    Yields:
+        Tuple of (index, value1, value2, ...) where values correspond to keylist order.
+    """
+
     def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
         self.dataset_manager = ray.get_actor("DatasetManager")
         self.keylist = keylist
@@ -270,6 +367,166 @@ class DatasetView(IterableDataset):
             yield (index, *sample)
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
+
+
+class BatchDatasetView(IterableDataset):
+    """Dataset view that yields samples as dictionaries for Batch collation.
+
+    Works with batch_collate_fn to produce Batch objects with dictionary access.
+
+    Yields:
+        Tuple of (index, {key: value, ...}) where keys are from keylist.
+    """
+
+    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
+        self.dataset_manager = ray.get_actor("DatasetManager")
+        self.keylist = keylist
+        self.filter = filter
+        self.sample_status = sample_status
+
+    def __iter__(self):
+        active_samples, active_ids = ray.get(
+            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
+        )
+
+        perm = np.random.permutation(len(active_samples))
+
+        if self.sample_status == SampleStatus.TRAINING:
+            log({"dataset:train_size": len(perm)})
+        elif self.sample_status == SampleStatus.VALIDATION:
+            log({"dataset:val_size": len(perm)})
+        else:
+            log({"dataset:active_size": len(perm)})
+
+        for i in perm:
+            try:
+                sample_dict = {
+                    key: ray.get(active_samples[i][key]) for key in self.keylist
+                }
+            except Exception as e:
+                print(f"Error retrieving sample {i}: {e}")
+                continue
+            if self.filter is not None:
+                sample_dict = self.filter(sample_dict)
+            index = active_ids[i]
+            yield (index, sample_dict)
+
+        ray.get(self.dataset_manager.release_samples.remote(active_ids))
+
+
+def batch_collate_fn(dataset_manager):
+    """Create a collate function that produces Batch objects.
+
+    Args:
+        dataset_manager: Ray actor for dataset management (for discard functionality)
+
+    Returns:
+        Collate function for use with PyTorch DataLoader
+
+    Example:
+        dataset = BatchDatasetView(keys, sample_status=SampleStatus.TRAINING)
+        dataloader = DataLoader(
+            dataset,
+            batch_size=128,
+            collate_fn=batch_collate_fn(dataset_manager)
+        )
+        for batch in dataloader:
+            theta = batch['z']
+            batch.discard(mask)
+    """
+
+    def collate(samples):
+        """Collate samples into a Batch object with numpy arrays.
+
+        Returns numpy arrays for framework-agnostic data transport.
+        Estimators convert to their framework (PyTorch, JAX, etc.) as needed.
+        """
+        # samples is list of (index, {key: value}) tuples
+        ids = np.array([s[0] for s in samples])
+
+        # Stack values for each key as numpy arrays
+        data = {}
+        keys = samples[0][1].keys()
+        for key in keys:
+            values = [s[1][key] for s in samples]
+            if isinstance(values[0], np.ndarray):
+                data[key] = np.stack(values)
+            elif hasattr(values[0], 'numpy'):
+                # torch tensor - convert to numpy
+                data[key] = np.stack([v.numpy() for v in values])
+            else:
+                # Scalar or other - convert to numpy array
+                data[key] = np.array(values)
+
+        return Batch(ids, data, dataset_manager)
+
+    return collate
+
+
+class BufferView:
+    """View into the sample buffer for estimator training.
+
+    Passed to estimator.train() - estimator requests dataloaders with specific keys.
+
+    Example:
+        async def train(self, buffer: BufferView):
+            keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+            train_loader = buffer.train_loader(keys, batch_size=self.batch_size)
+            val_loader = buffer.val_loader(keys, batch_size=self.batch_size)
+            for batch in train_loader:
+                theta = batch[self.theta_key]
+                ...
+    """
+
+    def __init__(self, dataset_manager):
+        """Initialize buffer view.
+
+        Args:
+            dataset_manager: Ray actor for dataset management
+        """
+        self._dataset_manager = dataset_manager
+
+    def train_loader(self, keys: list, batch_size: int = 128, **kwargs):
+        """Create training dataloader with specified keys.
+
+        Args:
+            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
+            batch_size: Batch size for dataloader
+            **kwargs: Additional arguments passed to DataLoader
+
+        Returns:
+            DataLoader yielding Batch objects with numpy arrays
+        """
+        from torch.utils.data import DataLoader
+
+        dataset = ray.get(
+            self._dataset_manager.get_train_batch_dataset_view.remote(keys, filter=None)
+        )
+        collate_fn = batch_collate_fn(self._dataset_manager)
+        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
+
+    def val_loader(self, keys: list, batch_size: int = 128, **kwargs):
+        """Create validation dataloader with specified keys.
+
+        Args:
+            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
+            batch_size: Batch size for dataloader
+            **kwargs: Additional arguments passed to DataLoader
+
+        Returns:
+            DataLoader yielding Batch objects with numpy arrays
+        """
+        from torch.utils.data import DataLoader
+
+        dataset = ray.get(
+            self._dataset_manager.get_val_batch_dataset_view.remote(keys, filter=None)
+        )
+        collate_fn = batch_collate_fn(self._dataset_manager)
+        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
+
+    def get_stats(self):
+        """Get buffer statistics (total samples, etc.)."""
+        return ray.get(self._dataset_manager.get_store_stats.remote())
 
 
 def get_ray_dataset_manager(
