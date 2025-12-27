@@ -244,7 +244,7 @@ def init_logging(cfg: DictConfig) -> None:
             enabled: true
             project: my_project
             group: my_group
-            dir: ${hydra:run.dir}
+            dir: ${run_dir}
           local:
             enabled: true
             dir: ${paths.graph}
@@ -253,10 +253,10 @@ def init_logging(cfg: DictConfig) -> None:
         logging:
           project: my_project
           group: my_group
-          dir: ${hydra:run.dir}
+          dir: ${run_dir}
 
     Args:
-        cfg: Hydra config with logging and paths sections.
+        cfg: OmegaConf config with logging and paths sections.
     """
     # Import here to avoid circular imports
     from .local_logger import create_local_factory
