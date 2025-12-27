@@ -1,8 +1,8 @@
 #!/usr/bin/env python3
 """
 Falcon Adaptive Training - Standalone CLI Tool
-Usage: falcon launch [--run-dir DIR] [--config-name NAME] [key=value ...]
-       falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name NAME] [key=value ...]
+Usage: falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]
+       falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]
 
 Run directory behavior:
   - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
@@ -31,11 +31,11 @@ from falcon.core.run_name import generate_run_dir
 OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
 
-def load_config(config_name: str = "config", run_dir: str = None, overrides: list = None) -> DictConfig:
+def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None) -> DictConfig:
     """Load config with run_dir injection and resume support.
 
     Args:
-        config_name: Config file name (without .yaml extension)
+        config_name: Config file name (e.g., config.yaml)
         run_dir: Run directory path. If None, auto-generates one.
         overrides: List of key=value CLI overrides
 
@@ -54,7 +54,7 @@ def load_config(config_name: str = "config", run_dir: str = None, overrides: lis
         print(f"Resuming from: {saved_config}")
         cfg = OmegaConf.load(saved_config)
     else:
-        config_path = Path.cwd() / f"{config_name}.yaml"
+        config_path = Path.cwd() / config_name
         if not config_path.exists():
             raise FileNotFoundError(f"Config not found: {config_path}")
         cfg = OmegaConf.load(config_path)
@@ -244,12 +244,12 @@ def parse_args():
     """Parse falcon CLI arguments."""
     if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
         print("Usage:")
-        print("  falcon launch [--run-dir DIR] [--config-name NAME] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name NAME] [key=value ...]")
+        print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print()
         print("Options:")
-        print("  --run-dir DIR       Run directory (default: auto-generated)")
-        print("  --config-name NAME  Config file name without .yaml (default: config)")
+        print("  --run-dir DIR        Run directory (default: auto-generated)")
+        print("  --config-name FILE   Config file (default: config.yaml)")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -264,7 +264,7 @@ def parse_args():
 
     # Extract --run-dir, --config-name and collect overrides
     run_dir = None
-    config_name = "config"
+    config_name = "config.yaml"
     overrides = []
     i = 0
     while i < len(args):
