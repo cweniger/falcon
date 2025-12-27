@@ -1,6 +1,3 @@
-# Output directory (override with run_dir=path/to/output on command line)
-run_dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
-
 # Logging configuration
 logging:
   wandb:

@@ -1,8 +1,13 @@
 #!/usr/bin/env python3
 """
 Falcon Adaptive Training - Standalone CLI Tool
-Usage: falcon launch [--config-name=config] [key=value ...]
-       falcon sample prior|posterior|proposal [--config-name=config] [key=value ...]
+Usage: falcon launch [--run-dir DIR] [--config-name NAME] [key=value ...]
+       falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name NAME] [key=value ...]
+
+Run directory behavior:
+  - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
+  - If --run-dir exists with config.yaml, resumes from saved config
+  - Otherwise, loads ./config.yaml and saves resolved config to run_dir
 """
 
 import sys
@@ -19,33 +24,57 @@ import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
 from falcon.core.logger import init_logging
+from falcon.core.run_name import generate_run_dir
 
 
 # Register custom OmegaConf resolvers
 OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
 
-def load_config(config_name: str = "config", overrides: list = None) -> DictConfig:
-    """Load config from current directory with CLI overrides."""
-    config_path = Path.cwd() / f"{config_name}.yaml"
+def load_config(config_name: str = "config", run_dir: str = None, overrides: list = None) -> DictConfig:
+    """Load config with run_dir injection and resume support.
 
-    if not config_path.exists():
-        raise FileNotFoundError(f"Config not found: {config_path}")
+    Args:
+        config_name: Config file name (without .yaml extension)
+        run_dir: Run directory path. If None, auto-generates one.
+        overrides: List of key=value CLI overrides
 
-    cfg = OmegaConf.load(config_path)
+    Returns:
+        Resolved config with run_dir injected
+    """
+    # 1. Default run_dir if not specified
+    if run_dir is None:
+        run_dir = generate_run_dir()
 
-    # Apply CLI overrides (key=value format)
+    run_dir_path = Path(run_dir)
+    saved_config = run_dir_path / "config.yaml"
+
+    # 2. Load config (from run_dir if resuming, else from cwd)
+    if saved_config.exists():
+        print(f"Resuming from: {saved_config}")
+        cfg = OmegaConf.load(saved_config)
+    else:
+        config_path = Path.cwd() / f"{config_name}.yaml"
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_path}")
+        cfg = OmegaConf.load(config_path)
+
+    # 3. Apply CLI overrides
     if overrides:
         override_cfg = OmegaConf.from_dotlist(overrides)
         cfg = OmegaConf.merge(cfg, override_cfg)
 
-    # Resolve all interpolations
+    # 4. Inject run_dir for ${run_dir} interpolations
+    cfg.run_dir = run_dir
+
+    # 5. Resolve all interpolations
     OmegaConf.resolve(cfg)
 
-    # Create run_dir if specified
-    run_dir = cfg.get("run_dir")
-    if run_dir:
-        Path(run_dir).mkdir(parents=True, exist_ok=True)
+    # 6. Create run_dir and save config if new run
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    if not saved_config.exists():
+        OmegaConf.save(cfg, saved_config)
+        print(f"Saved config to: {saved_config}")
 
     return cfg
 
@@ -215,8 +244,12 @@ def parse_args():
     """Parse falcon CLI arguments."""
     if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
         print("Usage:")
-        print("  falcon launch [--config-name=X] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--config-name=X] [key=value ...]")
+        print("  falcon launch [--run-dir DIR] [--config-name NAME] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name NAME] [key=value ...]")
+        print()
+        print("Options:")
+        print("  --run-dir DIR       Run directory (default: auto-generated)")
+        print("  --config-name NAME  Config file name without .yaml (default: config)")
         sys.exit(1)
 
     mode = sys.argv[1]
@@ -229,28 +262,34 @@ def parse_args():
             sys.exit(1)
         sample_type = args.pop(0)
 
-    # Extract --config-name and collect overrides
+    # Extract --run-dir, --config-name and collect overrides
+    run_dir = None
     config_name = "config"
     overrides = []
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg.startswith("--config-name="):
-            config_name = arg.split("=", 1)[1]
+        if arg == "--run-dir" and i + 1 < len(args):
+            run_dir = args[i + 1]
+            i += 1
+        elif arg.startswith("--run-dir="):
+            run_dir = arg.split("=", 1)[1]
         elif arg == "--config-name" and i + 1 < len(args):
             config_name = args[i + 1]
             i += 1
+        elif arg.startswith("--config-name="):
+            config_name = arg.split("=", 1)[1]
         elif "=" in arg and not arg.startswith("-"):
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, overrides
+    return mode, sample_type, config_name, run_dir, overrides
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, overrides = parse_args()
-    cfg = load_config(config_name, overrides)
+    mode, sample_type, config_name, run_dir, overrides = parse_args()
+    cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
         launch_mode(cfg)

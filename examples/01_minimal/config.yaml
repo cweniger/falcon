@@ -16,17 +16,16 @@
 #   sample   – Sampling parameters for posterior draws after training.
 #
 # Usage:
-#   falcon launch run_dir=outputs/01_minimal
-#   falcon sample posterior run_dir=outputs/01_minimal
+#   falcon launch --run-dir outputs/my_run
+#   falcon launch  # auto-generates: outputs/adj-noun-YYMMDD-HHMM
+#   falcon sample posterior --run-dir outputs/my_run
 #
 # Notes:
 #   • All outputs (simulations, trained models, logs) are written under
-#     ${run_dir}, which defaults to ./outputs/DATE_TIME unless overridden.
+#     ${run_dir}, which is set via --run-dir or auto-generated.
 #   • ${run_dir} is referenced by buffer, graph, and WandB logging paths.
+#   • Resuming: specify existing --run-dir to load saved config.yaml
 # =============================================================================
-
-# Output directory (override with run_dir=path/to/output on command line)
-run_dir: ./outputs/${now:%Y-%m-%d_%H-%M-%S}
 
 # -----------------------------------------------------------------------------
 # Logging configuration
