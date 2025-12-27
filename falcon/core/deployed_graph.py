@@ -59,6 +59,10 @@ class MultiplexNodeWrapper:
     def load(self, node_dir):
         pass  # Silently ignore, multiplexed nodes are never saved
 
+    def wait_ready(self):
+        """Wait for all child actors to initialize."""
+        ray.get([actor.__ray_ready__.remote() for actor in self.wrapped_node_list])
+
 
 @ray.remote
 class NodeWrapper:
@@ -222,6 +226,10 @@ class DeployedGraph:
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
         ray.init(ignore_reinit_error=True)  # Initialize Ray if not already done
+
+        print("Spinning up graph...")
+
+        # Create all actors (non-blocking)
         for node in self.graph.node_list:
             if node.num_actors > 1:
                 self.wrapped_nodes_dict[node.name] = MultiplexNodeWrapper.remote(
@@ -235,6 +243,20 @@ class DeployedGraph:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
                     **node.actor_config
                 ).remote(node, self.graph, self.model_path)
+
+        # Wait for all actors to initialize
+        for name, actor in self.wrapped_nodes_dict.items():
+            try:
+                # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
+                if hasattr(actor, 'wait_ready'):
+                    ray.get(actor.wait_ready.remote())
+                else:
+                    ray.get(actor.__ray_ready__.remote())
+                print(f"  ✓ {name}")
+            except ray.exceptions.RayActorError as e:
+                raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
+
+        print("Graph ready.")
 
     def sample(self, num_samples, conditions={}):
         """Run the graph using deployed nodes and return results."""
