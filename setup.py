@@ -10,7 +10,6 @@ setup(
         "numpy",
         "ray",
         "sbi",
-        "hydra-core",
         "omegaconf",
     ],
     entry_points={
