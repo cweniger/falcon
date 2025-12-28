@@ -1,50 +1,82 @@
 #!/usr/bin/env python3
 """
 Falcon Adaptive Training - Standalone CLI Tool
-Usage: python adaptive.py --config-path ./model-repo --config-name config
+Usage: falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]
+       falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]
+
+Run directory behavior:
+  - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
+  - If --run-dir exists with config.yaml, resumes from saved config
+  - Otherwise, loads ./config.yaml and saves resolved config to run_dir
 """
 
 import sys
 import os
 from pathlib import Path
-import numpy as np
-import matplotlib.pyplot as plt
+from datetime import datetime
 import joblib
 import torch
 import ray
 
-import hydra
-from omegaconf import DictConfig, OmegaConf
-import sbi.analysis
+from omegaconf import OmegaConf, DictConfig
 
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
 from falcon.core.logger import init_logging
+from falcon.core.run_name import generate_run_dir
 
 
-def parse_operational_flags():
-    """Extract all operational flags (--*) from sys.argv, leaving Hydra args."""
+# Register custom OmegaConf resolvers
+OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
-    # Extract all operational flags (anything starting with "--")
-    operational_flags = [arg for arg in sys.argv if arg.startswith("--")]
-    hydra_args = [arg for arg in sys.argv if not arg.startswith("--")]
 
-    # Update sys.argv to only contain hydra arguments
-    sys.argv[:] = hydra_args
+def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None) -> DictConfig:
+    """Load config with run_dir injection and resume support.
 
-    # Helper to parse flag values
-    def get_flag_value(flag_name):
-        for flag in operational_flags:
-            if flag.startswith(f"{flag_name}="):
-                return flag.split("=", 1)[1]
-        return None
+    Args:
+        config_name: Config file name (e.g., config.yaml)
+        run_dir: Run directory path. If None, auto-generates one.
+        overrides: List of key=value CLI overrides
 
-    # Helper to check if flag exists
-    def has_flag(flag_name):
-        return flag_name in operational_flags
+    Returns:
+        Resolved config with run_dir injected
+    """
+    # 1. Default run_dir if not specified
+    if run_dir is None:
+        run_dir = generate_run_dir()
 
-    return operational_flags, get_flag_value, has_flag
+    run_dir_path = Path(run_dir)
+    saved_config = run_dir_path / "config.yaml"
+
+    # 2. Load config (from run_dir if resuming, else from cwd)
+    if saved_config.exists():
+        print(f"Resuming from: {saved_config}")
+        cfg = OmegaConf.load(saved_config)
+    else:
+        config_path = Path.cwd() / config_name
+        if not config_path.exists():
+            raise FileNotFoundError(f"Config not found: {config_path}")
+        cfg = OmegaConf.load(config_path)
+
+    # 3. Apply CLI overrides
+    if overrides:
+        override_cfg = OmegaConf.from_dotlist(overrides)
+        cfg = OmegaConf.merge(cfg, override_cfg)
+
+    # 4. Inject run_dir for ${run_dir} interpolations
+    cfg.run_dir = run_dir
+
+    # 5. Resolve all interpolations
+    OmegaConf.resolve(cfg)
+
+    # 6. Create run_dir and save config if new run
+    run_dir_path.mkdir(parents=True, exist_ok=True)
+    if not saved_config.exists():
+        OmegaConf.save(cfg, saved_config)
+        print(f"Saved config to: {saved_config}")
+
+    return cfg
 
 
 def launch_mode(cfg: DictConfig) -> None:
@@ -208,46 +240,61 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     deployed_graph.shutdown()
 
 
-@hydra.main(version_base=None, config_path=os.getcwd(), config_name="config")
-def launch_main(cfg: DictConfig) -> None:
-    """Launch mode entry point."""
-    launch_mode(cfg)
+def parse_args():
+    """Parse falcon CLI arguments."""
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
+        print("Usage:")
+        print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
+        print()
+        print("Options:")
+        print("  --run-dir DIR        Run directory (default: auto-generated)")
+        print("  --config-name FILE   Config file (default: config.yaml)")
+        sys.exit(1)
+
+    mode = sys.argv[1]
+    args = sys.argv[2:]
+
+    sample_type = None
+    if mode == "sample":
+        if not args or args[0] not in ["prior", "posterior", "proposal"]:
+            print("Error: sample requires type: prior, posterior, or proposal")
+            sys.exit(1)
+        sample_type = args.pop(0)
+
+    # Extract --run-dir, --config-name and collect overrides
+    run_dir = None
+    config_name = "config.yaml"
+    overrides = []
+    i = 0
+    while i < len(args):
+        arg = args[i]
+        if arg == "--run-dir" and i + 1 < len(args):
+            run_dir = args[i + 1]
+            i += 1
+        elif arg.startswith("--run-dir="):
+            run_dir = arg.split("=", 1)[1]
+        elif arg == "--config-name" and i + 1 < len(args):
+            config_name = args[i + 1]
+            i += 1
+        elif arg.startswith("--config-name="):
+            config_name = arg.split("=", 1)[1]
+        elif "=" in arg and not arg.startswith("-"):
+            overrides.append(arg)
+        i += 1
+
+    return mode, sample_type, config_name, run_dir, overrides
 
 
 def main():
-    """Main CLI entry point with explicit mode dispatch."""
+    """Main CLI entry point."""
+    mode, sample_type, config_name, run_dir, overrides = parse_args()
+    cfg = load_config(config_name, run_dir, overrides)
 
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
-        print("Error: Must specify mode. Usage:")
-        print("  falcon launch [hydra_options...]")
-        print("  falcon sample prior [hydra_options...]")
-        print("  falcon sample proposal [hydra_options...]")
-        print("  falcon sample posterior [hydra_options...]")
-        sys.exit(1)
-
-    mode = sys.argv.pop(1)  # Remove mode from sys.argv
-
-    if mode == "sample":
-        sample_type = sys.argv.pop(1)
-        if sample_type not in ["prior", "proposal", "posterior"]:
-            print(f"Error: Unknown sample type: {sample_type}")
-            sys.exit(1)
-
-        # Create a modified main function that injects operational parameters
-        def make_sample_main(sample_type):
-            @hydra.main(
-                version_base=None, config_path=os.getcwd(), config_name="config"
-            )
-            def sample_main_with_params(cfg: DictConfig) -> None:
-                sample_mode(cfg, sample_type)
-
-            return sample_main_with_params
-
-        # Create and call the sample function
-        sample_main_func = make_sample_main(sample_type)
-        sample_main_func()
-    else:  # mode == 'launch'
-        launch_main()
+    if mode == "launch":
+        launch_mode(cfg)
+    else:
+        sample_mode(cfg, sample_type)
 
 
 if __name__ == "__main__":

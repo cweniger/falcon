@@ -16,13 +16,15 @@
 #   sample   – Sampling parameters for posterior draws after training.
 #
 # Usage:
-#   falcon launch hydra.run.dir=outputs/01_minimal
-#   falcon sample posterior hydra.run.dir=outputs/01_minimal
+#   falcon launch --run-dir outputs/my_run
+#   falcon launch  # auto-generates: outputs/adj-noun-YYMMDD-HHMM
+#   falcon sample posterior --run-dir outputs/my_run
 #
 # Notes:
 #   • All outputs (simulations, trained models, logs) are written under
-#     ${hydra:run.dir}, which defaults to ./outputs/DATE/TIME unless overridden.
-#   • ${hydra:run.dir} is referenced by buffer, graph, and WandB logging paths.
+#     ${run_dir}, which is set via --run-dir or auto-generated.
+#   • ${run_dir} is referenced by buffer, graph, and WandB logging paths.
+#   • Resuming: specify existing --run-dir to load saved config.yaml
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -33,7 +35,7 @@ logging:
     enabled: false                        # Set to false to disable wandb logging
     project: falcon_examples              # WandB project name
     group: 01_minimal                     # Experiment group (for organizing runs)
-    dir: ${hydra:run.dir}                 # Directory for wandb files
+    dir: ${run_dir}                       # Directory for wandb files
   local:
     enabled: true                         # Local file-based logging
     dir: ${paths.graph}                   # Reuses graph directory for metrics
@@ -43,8 +45,8 @@ logging:
 # -----------------------------------------------------------------------------
 paths:
   import: "./src"                       # Local folder(s) with user-defined code (e.g. model.py)
-  buffer: ${hydra:run.dir}/sim_dir      # Directory where Falcon stores simulated training data
-  graph: ${hydra:run.dir}/graph_dir     # Directory for serialized graph and trained networks
+  buffer: ${run_dir}/sim_dir            # Directory where Falcon stores simulated training data
+  graph: ${run_dir}/graph_dir           # Directory for serialized graph and trained networks
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
