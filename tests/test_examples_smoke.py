@@ -54,7 +54,7 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         "buffer.max_training_samples=128",
         "buffer.validation_window_size=16",
         "buffer.resample_batch_size=32",
-        f"hydra.run.dir={tmp_path}",
+        f"run_dir={tmp_path}",
     ] + epoch_overrides
 
     # Create a clean environment for the subprocess

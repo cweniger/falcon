@@ -1,6 +1,5 @@
 import time
 import ray
-from torch.utils.data import DataLoader
 import asyncio
 import torch
 import os
@@ -10,6 +9,7 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logging import initialize_logging_for
+from falcon.core.raystore import BufferView
 from .utils import LazyLoader, as_rvbatch
 
 
@@ -59,6 +59,10 @@ class MultiplexNodeWrapper:
     def load(self, node_dir):
         pass  # Silently ignore, multiplexed nodes are never saved
 
+    def wait_ready(self):
+        """Wait for all child actors to initialize."""
+        ray.get([actor.__ray_ready__.remote() for actor in self.wrapped_node_list])
+
 
 @ray.remote
 class NodeWrapper:
@@ -74,14 +78,18 @@ class NodeWrapper:
         simulator_cls = LazyLoader(node.simulator_cls)
         self.simulator_instance = simulator_cls(**node.simulator_config)
 
-        _embedding_keywords = self.node.evidence + self.node.scaffolds
-        print("Embedding keywords:", _embedding_keywords)
+        # Condition keys for embedding (evidence + scaffolds)
+        self.condition_keys = self.node.evidence + self.node.scaffolds
+        print("Condition keys:", self.condition_keys)
 
         if node.estimator_cls is not None:
             estimator_cls = LazyLoader(node.estimator_cls)
             self.estimator_instance = estimator_cls(
                 self.simulator_instance,
-                _embedding_keywords=_embedding_keywords,
+                theta_key=node.name,
+                condition_keys=self.condition_keys,
+                # Keep legacy parameter for backward compatibility
+                _embedding_keywords=self.condition_keys,
                 **node.estimator_config,
             )
         else:
@@ -98,45 +106,18 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         print("Training started for:", self.name)
-        keys_train = (
-            [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
-        )
-        keys_val = [self.name, self.name + ".logprob"] + self.evidence + self.scaffolds
+        print("Condition keys:", self.evidence + self.scaffolds)
 
-        batch_size = self.node.estimator_config.get("batch_size", 128)
+        # Create BufferView - estimator controls what keys it needs
+        buffer = BufferView(dataset_manager)
 
-        dataset_train = ray.get(
-            dataset_manager.get_train_dataset_view.remote(keys_train, filter=None)
-        )
-        dataset_val = ray.get(
-            dataset_manager.get_val_dataset_view.remote(keys_val, filter=None)
-        )
-        dataloader_train = DataLoader(dataset_train, batch_size=batch_size)
-        dataloader_val = DataLoader(dataset_val, batch_size=batch_size)
+        # Set theta_key and condition_keys on estimator if not already set
+        if hasattr(self.estimator_instance, 'theta_key') and self.estimator_instance.theta_key is None:
+            self.estimator_instance.theta_key = self.name
+        if hasattr(self.estimator_instance, 'condition_keys') and not self.estimator_instance.condition_keys:
+            self.estimator_instance.condition_keys = self.evidence + self.scaffolds
 
-        def hook_fn(module, batch):
-            ids, theta, theta_logprob, conditions = (
-                batch[0],
-                batch[1],
-                batch[2],
-                batch[3:],
-            )
-            for i, k in enumerate(self.evidence):
-                if k in observations.keys():
-                    conditions[i] = observations[k]
-            # Corresponding id
-            mask = module.get_discard_mask(theta, theta_logprob, conditions)
-            ids = ids[mask]
-            ids = list(ids.numpy())
-
-            # Deactivate samples
-            dataset_manager.deactivate.remote(ids)
-
-        #        hook_fn = None
-
-        await self.estimator_instance.train(
-            dataloader_train, dataloader_val, hook_fn=hook_fn, dataset_manager=dataset_manager
-        )
+        await self.estimator_instance.train(buffer)
         print("...training complete for:", self.name)
 
     def sample(self, n_samples, incoming=None):
@@ -222,6 +203,10 @@ class DeployedGraph:
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
         ray.init(ignore_reinit_error=True)  # Initialize Ray if not already done
+
+        print("Spinning up graph...")
+
+        # Create all actors (non-blocking)
         for node in self.graph.node_list:
             if node.num_actors > 1:
                 self.wrapped_nodes_dict[node.name] = MultiplexNodeWrapper.remote(
@@ -235,6 +220,20 @@ class DeployedGraph:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
                     **node.actor_config
                 ).remote(node, self.graph, self.model_path)
+
+        # Wait for all actors to initialize
+        for name, actor in self.wrapped_nodes_dict.items():
+            try:
+                # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
+                if hasattr(actor, 'wait_ready'):
+                    ray.get(actor.wait_ready.remote())
+                else:
+                    ray.get(actor.__ray_ready__.remote())
+                print(f"  ✓ {name}")
+            except ray.exceptions.RayActorError as e:
+                raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
+
+        print("Graph ready.")
 
     def sample(self, num_samples, conditions={}):
         """Run the graph using deployed nodes and return results."""
