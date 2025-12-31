@@ -33,6 +33,8 @@ def get_config():
                         help='Freeze proposal after this many steps (0 = never freeze)')
     parser.add_argument('--normalize', action='store_true',
                         help='Use normalized MLP with online input/output normalization (stable!)')
+    parser.add_argument('--model', type=str, default='identity', choices=['identity', 'exp', 'cubic'],
+                        help='Forward model: identity (x=z), exp (x=exp(z)), cubic (x=z^3)')
     return parser.parse_args()
 
 
@@ -183,8 +185,45 @@ class NormalizedMLP(nn.Module):
         return (mean + std * torch.randn_like(mean)).squeeze(-1)
 
 
-def simulate(z, sigma_obs):
-    return z + torch.randn_like(z) * sigma_obs
+def forward_model(z, model_type):
+    """Apply forward model f(z)."""
+    if model_type == 'identity':
+        return z
+    elif model_type == 'exp':
+        return torch.exp(z)
+    elif model_type == 'cubic':
+        return z ** 3
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+
+def inverse_model(x, model_type):
+    """Apply inverse model f^{-1}(x) to get true z from observed x."""
+    if model_type == 'identity':
+        return x
+    elif model_type == 'exp':
+        return np.log(x)
+    elif model_type == 'cubic':
+        return np.sign(x) * np.abs(x) ** (1/3)
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+
+def forward_derivative(z, model_type):
+    """Compute f'(z) for the forward model."""
+    if model_type == 'identity':
+        return 1.0
+    elif model_type == 'exp':
+        return np.exp(z)
+    elif model_type == 'cubic':
+        return 3 * z ** 2
+    else:
+        raise ValueError(f"Unknown model type: {model_type}")
+
+
+def simulate(z, sigma_obs, model_type='identity'):
+    """Simulate x = f(z) + noise."""
+    return forward_model(z, model_type) + torch.randn_like(z) * sigma_obs
 
 def sample_prior(n, device):
     return torch.randn(n, 1, device=device)
@@ -254,6 +293,7 @@ def main():
     device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
 
     print(f"Device: {device}")
+    print(f"Forward model: x = {cfg.model}(z) + noise")
     print(f"Problem: sigma_obs = {cfg.sigma_obs:.0e}, target log_var = {2*np.log(cfg.sigma_obs):.1f}")
     print(f"Training: {cfg.num_steps} steps × {cfg.batch_size} = {cfg.num_steps * cfg.batch_size} samples")
     if cfg.iw:
@@ -272,7 +312,12 @@ def main():
         model = GaussianMLP(hidden_dim=64).double().to(device)
     optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr)
     x_obs = torch.tensor([[cfg.x_obs]], device=device, dtype=torch.float64)
+    z_true = inverse_model(cfg.x_obs, cfg.model)  # True z that produces x_obs
+    f_prime = forward_derivative(z_true, cfg.model)  # f'(z_true)
+    expected_std = cfg.sigma_obs / abs(f_prime)  # Expected posterior std
 
+    print(f"x_obs = {cfg.x_obs}, z_true = {z_true:.6f}, f'(z_true) = {f_prime:.4f}")
+    print(f"Expected posterior std = sigma_obs / |f'| = {expected_std:.2e}")
     print(f"{'Step':>6} {'Samples':>10} {'MSE':>12} {'Mean':>10} {'log_var':>10} {'StdRatio':>10}")
     print("-" * 70)
 
@@ -283,7 +328,7 @@ def main():
     print(f"[Warmup: {cfg.num_warmup} steps with prior samples]")
     for step in range(cfg.num_warmup):
         z_batch = sample_prior(cfg.batch_size, device)
-        x_batch = simulate(z_batch, cfg.sigma_obs)
+        x_batch = simulate(z_batch, cfg.sigma_obs, cfg.model)
         model.update_stats(z_batch, x_batch)  # Update normalization stats
         optimizer.zero_grad()
         loss = model.loss(z_batch, x_batch)
@@ -314,7 +359,7 @@ def main():
             z_batch = torch.cat([z_prior, z_proposal], dim=0)
         else:
             z_batch = sample_proposal(model, x_obs, cfg.batch_size, cfg.gamma, device, step, frozen_params)
-        x_batch = simulate(z_batch, cfg.sigma_obs)
+        x_batch = simulate(z_batch, cfg.sigma_obs, cfg.model)
 
         # Compute importance weights if enabled (must be before update_stats)
         weights = None
@@ -337,7 +382,7 @@ def main():
             mean_pred = model(x_obs)[0].item()
             log_var = model.log_var.item()
             std_pred = np.exp(0.5 * log_var)
-            std_ratio = std_pred / cfg.sigma_obs
+            std_ratio = std_pred / expected_std
             samples = (step + 1) * cfg.batch_size
 
             print(f"{step:>6} {samples:>10} {loss.item():>12.2e} "
@@ -354,9 +399,9 @@ def main():
     if converged_step is not None:
         print(f"✓ Converged at step {converged_step} ({(converged_step+1)*cfg.batch_size} samples)")
 
-    print(f"\nFinal: mean={mean_pred:.6f} (true={cfg.x_obs:.6f}, error={abs(mean_pred-cfg.x_obs):.2e})")
-    print(f"       std={std_pred:.2e} (true={cfg.sigma_obs:.2e})")
-    print(f"       std_ratio={std_pred/cfg.sigma_obs:.3f}")
+    print(f"\nFinal: mean={mean_pred:.6f} (true={z_true:.6f}, error={abs(mean_pred-z_true):.2e})")
+    print(f"       std={std_pred:.2e} (expected={expected_std:.2e})")
+    print(f"       std_ratio={std_pred/expected_std:.3f}")
     print(f"\nTime: {elapsed:.2f}s")
 
 
