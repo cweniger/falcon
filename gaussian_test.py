@@ -54,7 +54,7 @@ class GaussianMLP(nn.Module):
         mean = self.net(x)
         return mean, self.log_var.expand(x.shape[0], 1)
 
-    def update_stats(self, z, x):
+    def update_stats(self, z, x, weights=None):
         """Update running statistics (for compatibility with NormalizedMLP)."""
         pass  # No-op for standard MLP
 
@@ -119,17 +119,25 @@ class NormalizedMLP(nn.Module):
         self.register_buffer('log_var', torch.tensor(0.0))
         self.var_momentum = momentum
 
-    def update_stats(self, z, x):
-        """Update running input/output statistics."""
+    def update_stats(self, z, x, weights=None):
+        """Update running input/output statistics (optionally weighted for IW)."""
         with torch.no_grad():
-            # Input stats
-            batch_mean_x = x.mean()
-            batch_std_x = x.std() + 1e-8
+            if weights is not None:
+                # Weighted statistics for importance weighting
+                w = weights.view(-1, 1)
+                batch_mean_x = (w * x).sum()
+                batch_mean_z = (w * z).sum()
+                # Weighted std: sqrt(sum(w * (x - mean)^2))
+                batch_std_x = torch.sqrt((w * (x - batch_mean_x)**2).sum()) + 1e-8
+                batch_std_z = torch.sqrt((w * (z - batch_mean_z)**2).sum()) + 1e-8
+            else:
+                batch_mean_x = x.mean()
+                batch_std_x = x.std() + 1e-8
+                batch_mean_z = z.mean()
+                batch_std_z = z.std() + 1e-8
+
             self.input_mean.copy_((1 - self.var_momentum) * self.input_mean + self.var_momentum * batch_mean_x)
             self.input_std.copy_((1 - self.var_momentum) * self.input_std + self.var_momentum * batch_std_x)
-            # Output stats
-            batch_mean_z = z.mean()
-            batch_std_z = z.std() + 1e-8
             self.output_mean.copy_((1 - self.var_momentum) * self.output_mean + self.var_momentum * batch_mean_z)
             self.output_std.copy_((1 - self.var_momentum) * self.output_std + self.var_momentum * batch_std_z)
 
@@ -308,13 +316,13 @@ def main():
             z_batch = sample_proposal(model, x_obs, cfg.batch_size, cfg.gamma, device, step, frozen_params)
         x_batch = simulate(z_batch, cfg.sigma_obs)
 
-        # Update normalization stats
-        model.update_stats(z_batch, x_batch)
-
-        # Compute importance weights if enabled (only for proposal samples)
+        # Compute importance weights if enabled (must be before update_stats)
         weights = None
         if cfg.iw and step > 0:
             weights = compute_importance_weights(z_batch, model, x_obs, cfg.gamma)
+
+        # Update normalization stats (with weights if IW enabled)
+        model.update_stats(z_batch, x_batch, weights)
 
         # Update mean with gradient descent
         optimizer.zero_grad()
