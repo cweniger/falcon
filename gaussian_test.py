@@ -20,11 +20,17 @@ def get_config():
     parser.add_argument('--x_obs', type=float, default=0.3)
     parser.add_argument('--num_steps', type=int, default=10000)
     parser.add_argument('--batch_size', type=int, default=128)
+    parser.add_argument('--num_warmup', type=int, default=1000)
     parser.add_argument('--lr', type=float, default=1e-2)
     parser.add_argument('--gamma', type=float, default=0.5)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--print_every', type=int, default=100)
+    parser.add_argument('--iw', action='store_true', help='Enable importance weighting (prior/proposal)')
+    parser.add_argument('--prior_fraction', type=float, default=0.0,
+                        help='Fraction of batch from prior (rest from proposal). Maintains global structure.')
+    parser.add_argument('--prop_freeze', type=int, default=0,
+                        help='Freeze proposal after this many steps (0 = never freeze)')
     return parser.parse_args()
 
 
@@ -58,10 +64,14 @@ class GaussianMLP(nn.Module):
                 self.var_momentum * torch.log(batch_var + 1e-20)
             )
 
-    def loss(self, z, x):
+    def loss(self, z, x, weights=None):
         """MSE loss for mean (variance is updated separately)."""
         mean = self.net(x)
-        return ((z - mean) ** 2).mean()
+        squared_errors = (z - mean) ** 2
+        if weights is not None:
+            #print(weights.min(), weights.max())
+            return (squared_errors.squeeze(-1) * weights).sum()
+        return squared_errors.mean()
 
     def log_prob(self, z, x):
         mean, log_var = self(x)
@@ -83,14 +93,62 @@ def simulate(z, sigma_obs):
 def sample_prior(n, device):
     return torch.randn(n, 1, device=device)
 
-def sample_proposal(model, x_obs, n, gamma, device, step):
+def sample_proposal(model, x_obs, n, gamma, device, step, frozen_params=None):
     with torch.no_grad():
         if step == 0:
             return sample_prior(n, device)
         temperature = 1.0 / gamma
+
+        if frozen_params is not None:
+            # Use frozen proposal parameters
+            mean, std = frozen_params
+            z = mean + std * torch.randn(n, device=device)
+            return z.unsqueeze(-1)
+
+        # Use current model predictions
         x_batch = x_obs.expand(n, -1)
         z = model.sample(x_batch, temperature=temperature)
         return z.unsqueeze(-1)
+
+
+def get_proposal_params(model, x_obs, gamma):
+    """Get current proposal parameters (mean, std) for freezing."""
+    with torch.no_grad():
+        mean_pred, log_var = model(x_obs)
+        temperature = 1.0 / gamma
+        std = torch.exp(0.5 * log_var) * np.sqrt(temperature)
+        return mean_pred.item(), std.item()
+
+def compute_importance_weights(z, model, x_obs, gamma):
+    """Compute normalized importance weights: prior(z) / proposal(z).
+
+    Prior: N(0, 1)
+    Proposal: N(mean_pred, var_learned * temperature)
+
+    Returns normalized weights that sum to 1.
+    """
+    with torch.no_grad():
+        z_flat = z.squeeze(-1)
+        temperature = 1.0 / gamma
+
+        # Prior log prob: N(0, 1)
+        log_prior = -0.5 * z_flat ** 2
+
+        # Proposal log prob: N(mean_pred, var * temperature)
+        mean_pred, log_var = model(x_obs)
+        mean_pred = mean_pred.squeeze()
+        var_proposal = torch.exp(log_var.squeeze()) * temperature
+        log_proposal = -0.5 * (z_flat - mean_pred) ** 2 / var_proposal - 0.5 * torch.log(var_proposal)
+
+        # Log importance weights
+        log_weights = log_prior - log_proposal
+
+        # Normalize weights (softmax for numerical stability)
+        log_weights = log_weights - log_weights.max()
+        weights = torch.exp(log_weights)
+        weights = weights / weights.sum()
+
+        return weights
 
 
 def main():
@@ -101,7 +159,14 @@ def main():
 
     print(f"Device: {device}")
     print(f"Problem: sigma_obs = {cfg.sigma_obs:.0e}, target log_var = {2*np.log(cfg.sigma_obs):.1f}")
-    print(f"Training: {cfg.num_steps} steps × {cfg.batch_size} = {cfg.num_steps * cfg.batch_size} samples\n")
+    print(f"Training: {cfg.num_steps} steps × {cfg.batch_size} = {cfg.num_steps * cfg.batch_size} samples")
+    if cfg.iw:
+        print(f"Importance weighting: ENABLED (reweighting proposal → prior)")
+    if cfg.prior_fraction > 0:
+        print(f"Mixed sampling: {cfg.prior_fraction*100:.0f}% prior + {(1-cfg.prior_fraction)*100:.0f}% proposal")
+    if cfg.prop_freeze > 0:
+        print(f"Proposal freeze: after step {cfg.prop_freeze}")
+    print()
 
     model = GaussianMLP(hidden_dim=64).double().to(device)
     optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr)
@@ -114,28 +179,49 @@ def main():
     converged_step = None
 
     # Warmup: learn mean=x with prior samples first
-    print("[Warmup: 200 steps with prior samples]")
-    for step in range(10):
+    print(f"[Warmup: {cfg.num_warmup} steps with prior samples]")
+    for step in range(cfg.num_warmup):
         z_batch = sample_prior(cfg.batch_size, device)
         x_batch = simulate(z_batch, cfg.sigma_obs)
         optimizer.zero_grad()
         loss = model.loss(z_batch, x_batch)
         loss.backward()
         optimizer.step()
-    print(f"[Warmup done, mean(x_obs)={model(x_obs)[0].item():.6f}]")
+        model.update_variance(z_batch, x_batch)
+    print(f"[Warmup done, mean(x_obs)={model(x_obs)[0].item():.6f}, log_var={model.log_var.item():.2f}]")
 
     # Lower learning rate for fine-tuning with proposal
     for pg in optimizer.param_groups:
         pg['lr'] = cfg.lr / 10
     print(f"[LR reduced to {cfg.lr/10} for proposal phase]\n")
 
+    frozen_params = None  # Will hold (mean, std) when proposal is frozen
+
     for step in range(cfg.num_steps):
-        z_batch = sample_proposal(model, x_obs, cfg.batch_size, cfg.gamma, device, step)
+        # Check if we should freeze the proposal
+        if cfg.prop_freeze > 0 and step == cfg.prop_freeze and frozen_params is None:
+            frozen_params = get_proposal_params(model, x_obs, cfg.gamma)
+            print(f"[Proposal frozen at step {step}: mean={frozen_params[0]:.6f}, std={frozen_params[1]:.2e}]")
+
+        # Mixed sampling: combine prior and proposal samples
+        if cfg.prior_fraction > 0 and step > 0:
+            n_prior = int(cfg.batch_size * cfg.prior_fraction)
+            n_proposal = cfg.batch_size - n_prior
+            z_prior = sample_prior(n_prior, device)
+            z_proposal = sample_proposal(model, x_obs, n_proposal, cfg.gamma, device, step, frozen_params)
+            z_batch = torch.cat([z_prior, z_proposal], dim=0)
+        else:
+            z_batch = sample_proposal(model, x_obs, cfg.batch_size, cfg.gamma, device, step, frozen_params)
         x_batch = simulate(z_batch, cfg.sigma_obs)
+
+        # Compute importance weights if enabled (only for proposal samples)
+        weights = None
+        if cfg.iw and step > 0:
+            weights = compute_importance_weights(z_batch, model, x_obs, cfg.gamma)
 
         # Update mean with gradient descent
         optimizer.zero_grad()
-        loss = model.loss(z_batch, x_batch)
+        loss = model.loss(z_batch, x_batch, weights=weights)
         loss.backward()
         optimizer.step()
 
