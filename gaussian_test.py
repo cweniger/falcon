@@ -21,7 +21,6 @@ def get_config():
     parser.add_argument('--num_steps', type=int, default=10000)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_warmup', type=int, default=1000)
-    parser.add_argument('--lr', type=float, default=1e-2)
     parser.add_argument('--gamma', type=float, default=0.5)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
@@ -35,22 +34,51 @@ def get_config():
                         help='Use normalized MLP with online input/output normalization (stable!)')
     parser.add_argument('--model', type=str, default='identity', choices=['identity', 'exp', 'cubic'],
                         help='Forward model: identity (x=z), exp (x=exp(z)), cubic (x=z^3)')
+    # Architecture options
+    parser.add_argument('--hidden_dim', type=int, default=64, help='Hidden layer dimension')
+    parser.add_argument('--num_layers', type=int, default=3, help='Number of hidden layers')
+    parser.add_argument('--activation', type=str, default='relu', choices=['relu', 'tanh', 'gelu'],
+                        help='Activation function')
+    parser.add_argument('--momentum', type=float, default=0.01, help='EMA momentum for normalization stats')
+    # Learning rate options
+    parser.add_argument('--lr1', type=float, default=0.01, help='Learning rate for warmup phase')
+    parser.add_argument('--lr2', type=float, default=0.001, help='Learning rate for sequential phase')
     return parser.parse_args()
+
+
+def get_activation(name):
+    """Get activation function by name."""
+    if name == 'relu':
+        return nn.ReLU()
+    elif name == 'tanh':
+        return nn.Tanh()
+    elif name == 'gelu':
+        return nn.GELU()
+    else:
+        raise ValueError(f"Unknown activation: {name}")
+
+
+def build_mlp(input_dim, hidden_dim, output_dim, num_layers, activation):
+    """Build MLP with configurable depth and activation."""
+    layers = []
+    layers.append(nn.Linear(input_dim, hidden_dim))
+    layers.append(get_activation(activation))
+    for _ in range(num_layers - 1):
+        layers.append(nn.Linear(hidden_dim, hidden_dim))
+        layers.append(get_activation(activation))
+    layers.append(nn.Linear(hidden_dim, output_dim))
+    return nn.Sequential(*layers)
 
 
 class GaussianMLP(nn.Module):
     """MLP learns mean, variance is computed from residuals (closed-form optimal)."""
 
-    def __init__(self, hidden_dim=64):
+    def __init__(self, hidden_dim=64, num_layers=3, activation='relu', momentum=0.01):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(1, hidden_dim), nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
-        )
+        self.net = build_mlp(1, hidden_dim, 1, num_layers, activation)
         # Running estimate of variance (EMA)
         self.register_buffer('log_var', torch.tensor(0.0))
-        self.var_momentum = 0.01
+        self.var_momentum = momentum
 
     def forward(self, x):
         mean = self.net(x)
@@ -104,13 +132,9 @@ class NormalizedMLP(nn.Module):
     when training on extremely narrow distributions.
     """
 
-    def __init__(self, hidden_dim=64, momentum=0.01):
+    def __init__(self, hidden_dim=64, num_layers=3, activation='relu', momentum=0.01):
         super().__init__()
-        self.net = nn.Sequential(
-            nn.Linear(1, hidden_dim), nn.Tanh(),
-            nn.Linear(hidden_dim, hidden_dim), nn.Tanh(),
-            nn.Linear(hidden_dim, 1)
-        )
+        self.net = build_mlp(1, hidden_dim, 1, num_layers, activation)
         # Input normalization (running stats)
         self.register_buffer('input_mean', torch.tensor(0.0))
         self.register_buffer('input_std', torch.tensor(1.0))
@@ -307,10 +331,16 @@ def main():
     print()
 
     if cfg.normalize:
-        model = NormalizedMLP(hidden_dim=64).double().to(device)
+        model = NormalizedMLP(
+            hidden_dim=cfg.hidden_dim, num_layers=cfg.num_layers,
+            activation=cfg.activation, momentum=cfg.momentum
+        ).double().to(device)
     else:
-        model = GaussianMLP(hidden_dim=64).double().to(device)
-    optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr)
+        model = GaussianMLP(
+            hidden_dim=cfg.hidden_dim, num_layers=cfg.num_layers,
+            activation=cfg.activation, momentum=cfg.momentum
+        ).double().to(device)
+    optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr1)
     x_obs = torch.tensor([[cfg.x_obs]], device=device, dtype=torch.float64)
     z_true = inverse_model(cfg.x_obs, cfg.model)  # True z that produces x_obs
     f_prime = forward_derivative(z_true, cfg.model)  # f'(z_true)
@@ -339,8 +369,8 @@ def main():
 
     # Lower learning rate for fine-tuning with proposal
     for pg in optimizer.param_groups:
-        pg['lr'] = cfg.lr / 10
-    print(f"[LR reduced to {cfg.lr/10} for proposal phase]\n")
+        pg['lr'] = cfg.lr2
+    print(f"[LR changed to {cfg.lr2} for sequential phase]\n")
 
     frozen_params = None  # Will hold (mean, std) when proposal is frozen
 
