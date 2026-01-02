@@ -43,6 +43,12 @@ def get_config():
     # Learning rate options
     parser.add_argument('--lr1', type=float, default=0.01, help='Learning rate for warmup phase')
     parser.add_argument('--lr2', type=float, default=0.001, help='Learning rate for sequential phase')
+    # Plotting options
+    parser.add_argument('--residual_plot', type=str, default=None,
+                        help='Save residual plot to this file (e.g., residuals.png)')
+    # Loss options
+    parser.add_argument('--rescale_mse', action='store_true',
+                        help='Divide MSE by variance (detached) for stable gradients with narrow posteriors')
     return parser.parse_args()
 
 
@@ -100,10 +106,13 @@ class GaussianMLP(nn.Module):
                 self.var_momentum * torch.log(batch_var + 1e-20)
             )
 
-    def loss(self, z, x, weights=None):
+    def loss(self, z, x, weights=None, rescale=False):
         """MSE loss for mean (variance is updated separately)."""
         mean = self.net(x)
         squared_errors = (z - mean) ** 2
+        if rescale:
+            var = torch.exp(self.log_var).detach() + 1e-20
+            squared_errors = squared_errors / var
         if weights is not None:
             return (squared_errors.squeeze(-1) * weights).sum()
         return squared_errors.mean()
@@ -187,10 +196,13 @@ class NormalizedMLP(nn.Module):
                 self.var_momentum * torch.log(batch_var + 1e-20)
             )
 
-    def loss(self, z, x, weights=None):
+    def loss(self, z, x, weights=None, rescale=False):
         """MSE loss for mean."""
-        mean, _ = self(x)
+        mean, log_var = self(x)
         squared_errors = (z - mean) ** 2
+        if rescale:
+            var = torch.exp(log_var).detach() + 1e-8
+            squared_errors = squared_errors / var
         if weights is not None:
             return (squared_errors.squeeze(-1) * weights).sum()
         return squared_errors.mean()
@@ -361,7 +373,7 @@ def main():
         x_batch = simulate(z_batch, cfg.sigma_obs, cfg.model)
         model.update_stats(z_batch, x_batch)  # Update normalization stats
         optimizer.zero_grad()
-        loss = model.loss(z_batch, x_batch)
+        loss = model.loss(z_batch, x_batch, rescale=cfg.rescale_mse)
         loss.backward()
         optimizer.step()
         model.update_variance(z_batch, x_batch)
@@ -401,7 +413,7 @@ def main():
 
         # Update mean with gradient descent
         optimizer.zero_grad()
-        loss = model.loss(z_batch, x_batch, weights=weights)
+        loss = model.loss(z_batch, x_batch, weights=weights, rescale=cfg.rescale_mse)
         loss.backward()
         optimizer.step()
 
@@ -433,6 +445,54 @@ def main():
     print(f"       std={std_pred:.2e} (expected={expected_std:.2e})")
     print(f"       std_ratio={std_pred/expected_std:.3f}")
     print(f"\nTime: {elapsed:.2f}s")
+
+    # Save residual plot if requested
+    if cfg.residual_plot:
+        save_residual_plot(model, cfg, x_obs, device, cfg.residual_plot)
+
+
+def save_residual_plot(model, cfg, x_obs, device, filename):
+    """Generate scatter plot of true vs predicted posterior modes."""
+    import matplotlib.pyplot as plt
+
+    with torch.no_grad():
+        # Sample 128 z from proposal (using current model)
+        z_samples = model.sample(x_obs.expand(128, -1), temperature=1.0/cfg.gamma)
+        z_samples = z_samples.unsqueeze(-1)
+
+        # Simulate x for each z
+        x_samples = simulate(z_samples, cfg.sigma_obs, cfg.model)
+
+        # True posterior mode: z_true = f^{-1}(x) for each x
+        z_true = torch.tensor([inverse_model(x.item(), cfg.model) for x in x_samples],
+                              device=device, dtype=torch.float64)
+
+        # Predicted posterior mode: model(x)[0]
+        z_pred = model(x_samples)[0].squeeze()
+
+    # Convert to numpy for plotting
+    z_true_np = z_true.cpu().numpy()
+    z_pred_np = z_pred.cpu().numpy()
+
+    # Create scatter plot
+    fig, ax = plt.subplots(figsize=(6, 6))
+    ax.scatter(z_true_np, z_pred_np, alpha=0.5, s=20)
+
+    # Add diagonal line
+    lims = [min(z_true_np.min(), z_pred_np.min()),
+            max(z_true_np.max(), z_pred_np.max())]
+    ax.plot(lims, lims, 'k--', alpha=0.5, label='y=x')
+
+    ax.set_xlabel('True posterior mode (inverse model)')
+    ax.set_ylabel('Predicted posterior mode (MLP)')
+    ax.set_title(f'Residual plot: {cfg.model} model, σ={cfg.sigma_obs:.0e}')
+    ax.legend()
+    ax.set_aspect('equal')
+
+    plt.tight_layout()
+    plt.savefig(filename, dpi=150)
+    plt.close()
+    print(f"[Residual plot saved to {filename}]")
 
 
 if __name__ == "__main__":
