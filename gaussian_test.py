@@ -13,6 +13,7 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
+from adam import TrackingAdam
 
 def get_config():
     parser = argparse.ArgumentParser()
@@ -49,6 +50,15 @@ def get_config():
     # Loss options
     parser.add_argument('--rescale_mse', action='store_true',
                         help='Divide MSE by variance (detached) for stable gradients with narrow posteriors')
+    # Optimizer options
+    parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'tracking_adam'],
+                        help='Optimizer: adam or tracking_adam (adds diffusion for plasticity)')
+    parser.add_argument('--diffusion_scale', type=float, default=0.0001,
+                        help='TrackingAdam: diffusion noise scale (typical 0.0001-0.001)')
+    parser.add_argument('--momentum_gating', action='store_true', default=True,
+                        help='TrackingAdam: suppress noise when momentum is large')
+    parser.add_argument('--no_momentum_gating', action='store_false', dest='momentum_gating',
+                        help='TrackingAdam: disable momentum gating')
     return parser.parse_args()
 
 
@@ -325,6 +335,7 @@ def compute_importance_weights(z, model, x_obs, gamma):
 def main():
     cfg = get_config()
     torch.manual_seed(cfg.seed)
+    np.random.seed(cfg.seed)
     torch.set_default_dtype(torch.float64)
     device = torch.device(cfg.device if torch.cuda.is_available() else 'cpu')
 
@@ -352,7 +363,17 @@ def main():
             hidden_dim=cfg.hidden_dim, num_layers=cfg.num_layers,
             activation=cfg.activation, momentum=cfg.momentum
         ).double().to(device)
-    optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr1)
+
+    # Create optimizer
+    if cfg.optimizer == 'tracking_adam':
+        optimizer = TrackingAdam(
+            model.net.parameters(), lr=cfg.lr1,
+            diffusion_scale=cfg.diffusion_scale,
+            momentum_gating=cfg.momentum_gating
+        )
+        print(f"Using TrackingAdam (diffusion={cfg.diffusion_scale}, gating={cfg.momentum_gating})")
+    else:
+        optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr1)
     x_obs = torch.tensor([[cfg.x_obs]], device=device, dtype=torch.float64)
     z_true = inverse_model(cfg.x_obs, cfg.model)  # True z that produces x_obs
     f_prime = forward_derivative(z_true, cfg.model)  # f'(z_true)
