@@ -24,8 +24,8 @@ class TrackingAdam(Adam):
         self,
         params,
         lr=1e-3,
-        betas=(0.9, 0.999),
-        eps=1e-8,
+        betas=(0.5, 0.5),
+        eps=1e-20,
         weight_decay=0.0,
         diffusion_scale=0.05,
         momentum_gating=True,
@@ -47,9 +47,9 @@ class TrackingAdam(Adam):
         super().__init__(
             params,
             lr=lr,
-            #betas=betas,
-            #eps=eps,
-            #weight_decay=weight_decay,
+            betas=betas,
+            eps=eps,
+            weight_decay=weight_decay,
         )
 
         self.diffusion_scale = diffusion_scale

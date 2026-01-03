@@ -51,8 +51,12 @@ def get_config():
     parser.add_argument('--rescale_mse', action='store_true',
                         help='Divide MSE by variance (detached) for stable gradients with narrow posteriors')
     # Optimizer options
-    parser.add_argument('--optimizer', type=str, default='adam', choices=['adam', 'tracking_adam'],
-                        help='Optimizer: adam or tracking_adam (adds diffusion for plasticity)')
+    parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'tracking_adam'],
+                        help='Optimizer: adam, adamw (default), or tracking_adam')
+    parser.add_argument('--beta1', type=float, default=0.9, help='Adam/AdamW beta1 (momentum)')
+    parser.add_argument('--beta2', type=float, default=0.999, help='Adam/AdamW beta2 (second moment)')
+    parser.add_argument('--eps', type=float, default=1e-8, help='Adam/AdamW epsilon')
+    parser.add_argument('--weight_decay', type=float, default=0.0, help='AdamW weight decay (L2 penalty)')
     parser.add_argument('--diffusion_scale', type=float, default=0.0001,
                         help='TrackingAdam: diffusion noise scale (typical 0.0001-0.001)')
     parser.add_argument('--momentum_gating', action='store_true', default=True,
@@ -365,15 +369,24 @@ def main():
         ).double().to(device)
 
     # Create optimizer
+    betas = (cfg.beta1, cfg.beta2)
     if cfg.optimizer == 'tracking_adam':
         optimizer = TrackingAdam(
-            model.net.parameters(), lr=cfg.lr1,
-            diffusion_scale=cfg.diffusion_scale,
+            model.net.parameters(), lr=cfg.lr1, betas=betas, eps=cfg.eps,
+            weight_decay=cfg.weight_decay, diffusion_scale=cfg.diffusion_scale,
             momentum_gating=cfg.momentum_gating
         )
         print(f"Using TrackingAdam (diffusion={cfg.diffusion_scale}, gating={cfg.momentum_gating})")
-    else:
-        optimizer = torch.optim.Adam(model.net.parameters(), lr=cfg.lr1)
+    elif cfg.optimizer == 'adamw':
+        optimizer = torch.optim.AdamW(
+            model.net.parameters(), lr=cfg.lr1, betas=betas, eps=cfg.eps,
+            weight_decay=cfg.weight_decay
+        )
+    else:  # adam
+        optimizer = torch.optim.Adam(
+            model.net.parameters(), lr=cfg.lr1, betas=betas, eps=cfg.eps,
+            weight_decay=cfg.weight_decay
+        )
     x_obs = torch.tensor([[cfg.x_obs]], device=device, dtype=torch.float64)
     z_true = inverse_model(cfg.x_obs, cfg.model)  # True z that produces x_obs
     f_prime = forward_derivative(z_true, cfg.model)  # f'(z_true)
