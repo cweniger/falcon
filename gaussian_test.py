@@ -31,8 +31,10 @@ def get_config():
                         help='Fraction of batch from prior (rest from proposal). Maintains global structure.')
     parser.add_argument('--prop_freeze', type=int, default=0,
                         help='Freeze proposal after this many steps (0 = never freeze)')
-    parser.add_argument('--normalize', action='store_true',
-                        help='Use normalized MLP with online input/output normalization (stable!)')
+    parser.add_argument('--normalize', action='store_true', default=True,
+                        help='Use normalized MLP with online input/output normalization (default: on)')
+    parser.add_argument('--no_normalize', action='store_false', dest='normalize',
+                        help='Disable normalized MLP')
     parser.add_argument('--model', type=str, default='identity', choices=['identity', 'exp', 'cubic'],
                         help='Forward model: identity (x=z), exp (x=exp(z)), cubic (x=z^3)')
     # Architecture options
@@ -48,13 +50,15 @@ def get_config():
     parser.add_argument('--residual_plot', type=str, default=None,
                         help='Save residual plot to this file (e.g., residuals.png)')
     # Loss options
-    parser.add_argument('--rescale_mse', action='store_true',
-                        help='Divide MSE by variance (detached) for stable gradients with narrow posteriors')
+    parser.add_argument('--rescale_mse', action='store_true', default=True,
+                        help='Divide MSE by variance (detached) for stable gradients (default: on)')
+    parser.add_argument('--no_rescale_mse', action='store_false', dest='rescale_mse',
+                        help='Disable MSE rescaling')
     # Optimizer options
     parser.add_argument('--optimizer', type=str, default='adamw', choices=['adam', 'adamw', 'tracking_adam'],
                         help='Optimizer: adam, adamw (default), or tracking_adam')
     parser.add_argument('--beta1', type=float, default=0.9, help='Adam/AdamW beta1 (momentum)')
-    parser.add_argument('--beta2', type=float, default=0.999, help='Adam/AdamW beta2 (second moment)')
+    parser.add_argument('--beta2', type=float, default=0.9, help='Adam/AdamW beta2 (second moment)')
     parser.add_argument('--eps', type=float, default=1e-8, help='Adam/AdamW epsilon')
     parser.add_argument('--weight_decay', type=float, default=0.0, help='AdamW weight decay (L2 penalty)')
     parser.add_argument('--diffusion_scale', type=float, default=0.0001,
