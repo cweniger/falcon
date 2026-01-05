@@ -51,15 +51,15 @@ def get_config():
     # Problem setup
     parser.add_argument('--models', type=str, default='identity,exp,cubic',
                         help='Comma-separated list of forward models per dimension')
-    parser.add_argument('--x_obs', type=str, default=None,
-                        help='Comma-separated observation values (default: 1.0 each)')
-    parser.add_argument('--sigma_obs', type=float, default=1e-3,
+    parser.add_argument('--x_obs', type=str, default='1,10,100',
+                        help='Comma-separated observation values')
+    parser.add_argument('--sigma_obs', type=float, default=1e-6,
                         help='Observation noise (same for all components)')
     # Training
     parser.add_argument('--num_steps', type=int, default=10000)
     parser.add_argument('--batch_size', type=int, default=128)
     parser.add_argument('--num_warmup', type=int, default=1000)
-    parser.add_argument('--gamma', type=float, default=0.5)
+    parser.add_argument('--gamma', type=float, default=0.2)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--print_every', type=int, default=100)
@@ -79,6 +79,11 @@ def get_config():
     parser.add_argument('--rescale_mse', action='store_true', default=True,
                         help='Divide MSE by variance (default: on)')
     parser.add_argument('--no_rescale_mse', action='store_false', dest='rescale_mse')
+    # Covariance
+    parser.add_argument('--full_cov', action='store_true', default=False,
+                        help='Use full covariance matrix instead of diagonal')
+    parser.add_argument('--min_var', type=float, default=1e-20,
+                        help='Minimum variance regularization for covariance matrices')
 
     cfg = parser.parse_args()
 
@@ -86,13 +91,10 @@ def get_config():
     cfg.model_names = [m.strip() for m in cfg.models.split(',')]
     cfg.ndim = len(cfg.model_names)
 
-    # Parse x_obs (default: 1.0 for each dimension)
-    if cfg.x_obs is None:
-        cfg.x_obs_list = [1.0] * cfg.ndim
-    else:
-        cfg.x_obs_list = [float(x.strip()) for x in cfg.x_obs.split(',')]
-        if len(cfg.x_obs_list) != cfg.ndim:
-            raise ValueError(f"x_obs has {len(cfg.x_obs_list)} values but {cfg.ndim} models specified")
+    # Parse x_obs
+    cfg.x_obs_list = [float(x.strip()) for x in cfg.x_obs.split(',')]
+    if len(cfg.x_obs_list) != cfg.ndim:
+        raise ValueError(f"x_obs has {len(cfg.x_obs_list)} values but {cfg.ndim} models specified")
 
     return cfg
 
@@ -116,73 +118,178 @@ def build_mlp(input_dim, hidden_dim, output_dim, num_layers, activation):
 class NormalizedMLP(nn.Module):
     """MLP with online input/output normalization for N-dimensional problems.
 
-    Prediction: mu(x) = output_mean + output_std * mlp((x - input_mean) / input_std)
+    Prediction: mu(x) = output_mean + L_out @ mlp(L_in^{-1} @ (x - input_mean))
+
+    When full_cov=False: L is diagonal (standard deviations)
+    When full_cov=True: L is lower-triangular Cholesky factor of covariance
     """
 
-    def __init__(self, ndim, hidden_dim=128, num_layers=3, activation='relu', momentum=0.01):
+    def __init__(self, ndim, hidden_dim=128, num_layers=3, activation='relu',
+                 momentum=0.01, full_cov=False, min_var=1e-10):
         super().__init__()
         self.ndim = ndim
         self.net = build_mlp(ndim, hidden_dim, ndim, num_layers, activation)
         self.momentum = momentum
+        self.full_cov = full_cov
+        self.min_var = min_var
 
-        # Per-dimension normalization stats
+        # Mean vectors
         self.register_buffer('input_mean', torch.zeros(ndim))
-        self.register_buffer('input_std', torch.ones(ndim))
         self.register_buffer('output_mean', torch.zeros(ndim))
-        self.register_buffer('output_std', torch.ones(ndim))
-        # Per-dimension log variance
-        self.register_buffer('log_var', torch.zeros(ndim))
+
+        if full_cov:
+            # Full covariance: store Cholesky factors (lower triangular)
+            self.register_buffer('input_cov_chol', torch.eye(ndim))
+            self.register_buffer('output_cov_chol', torch.eye(ndim))
+            self.register_buffer('residual_cov_chol', torch.eye(ndim))
+            # Also store the covariance matrices for EMA update
+            self.register_buffer('input_cov', torch.eye(ndim))
+            self.register_buffer('output_cov', torch.eye(ndim))
+            self.register_buffer('residual_cov', torch.eye(ndim))
+        else:
+            # Diagonal: store standard deviations
+            self.register_buffer('input_std', torch.ones(ndim))
+            self.register_buffer('output_std', torch.ones(ndim))
+            self.register_buffer('log_var', torch.zeros(ndim))
+
+    def _compute_cov(self, data, mean):
+        """Compute covariance matrix from data."""
+        centered = data - mean
+        n = data.shape[0]
+        cov = (centered.T @ centered) / max(n - 1, 1)
+        # Add small regularization for numerical stability
+        cov = cov + self.min_var * torch.eye(self.ndim, device=data.device, dtype=data.dtype)
+        return cov
+
+    def _safe_cholesky(self, cov):
+        """Compute Cholesky decomposition with fallback."""
+        try:
+            return torch.linalg.cholesky(cov)
+        except RuntimeError:
+            # If Cholesky fails, add more regularization
+            cov = cov + 1e-4 * torch.eye(self.ndim, device=cov.device, dtype=cov.dtype)
+            return torch.linalg.cholesky(cov)
 
     def update_stats(self, z, x):
         """Update running input/output statistics."""
         with torch.no_grad():
-            # Input stats (from x)
+            # Update means
             self.input_mean.lerp_(x.mean(dim=0), self.momentum)
-            self.input_std.lerp_(x.std(dim=0).clamp(min=1e-8), self.momentum)
-            # Output stats (from z)
             self.output_mean.lerp_(z.mean(dim=0), self.momentum)
-            self.output_std.lerp_(z.std(dim=0).clamp(min=1e-8), self.momentum)
+
+            if self.full_cov:
+                # Full covariance mode: EMA update on covariance matrices
+                batch_input_cov = self._compute_cov(x, self.input_mean)
+                batch_output_cov = self._compute_cov(z, self.output_mean)
+                self.input_cov.lerp_(batch_input_cov, self.momentum)
+                self.output_cov.lerp_(batch_output_cov, self.momentum)
+                # Recompute Cholesky factors
+                self.input_cov_chol.copy_(self._safe_cholesky(self.input_cov))
+                self.output_cov_chol.copy_(self._safe_cholesky(self.output_cov))
+            else:
+                # Diagonal mode: update standard deviations
+                self.input_std.lerp_(x.std(dim=0).clamp(min=1e-8), self.momentum)
+                self.output_std.lerp_(z.std(dim=0).clamp(min=1e-8), self.momentum)
 
     def update_variance(self, z, x):
-        """Update per-dimension variance estimate from residuals."""
+        """Update residual variance/covariance estimate."""
         with torch.no_grad():
             mean = self.forward_mean(x)
-            residuals_sq = (z - mean) ** 2
-            batch_log_var = torch.log(residuals_sq.mean(dim=0).clamp(min=1e-20))
-            self.log_var.lerp_(batch_log_var, self.momentum)
+            residuals = z - mean
+
+            if self.full_cov:
+                # Full covariance of residuals
+                batch_cov = self._compute_cov(residuals, torch.zeros_like(self.output_mean))
+                self.residual_cov.lerp_(batch_cov, self.momentum)
+                self.residual_cov_chol.copy_(self._safe_cholesky(self.residual_cov))
+            else:
+                # Diagonal variance
+                batch_log_var = torch.log((residuals ** 2).mean(dim=0).clamp(min=1e-20))
+                self.log_var.lerp_(batch_log_var, self.momentum)
 
     def forward_mean(self, x):
         """Predict mean."""
-        x_norm = (x - self.input_mean) / self.input_std.clamp(min=1e-8)
-        r = self.net(x_norm)
-        return self.output_mean + self.output_std * r
+        if self.full_cov:
+            # Whiten input: L^{-1} @ (x - mean)
+            centered = (x - self.input_mean).T  # (ndim, batch)
+            x_white = torch.linalg.solve_triangular(
+                self.input_cov_chol, centered, upper=False
+            ).T  # (batch, ndim)
+            r = self.net(x_white)
+            # Unwhiten output: mean + L @ r
+            return self.output_mean + (self.output_cov_chol @ r.T).T
+        else:
+            # Diagonal normalization
+            x_norm = (x - self.input_mean) / self.input_std.clamp(min=1e-8)
+            r = self.net(x_norm)
+            return self.output_mean + self.output_std * r
 
     def forward(self, x):
-        """Return (mean, log_var) for batch."""
+        """Return (mean, cov_info) for batch.
+
+        cov_info is log_var (diagonal) or residual_cov_chol (full_cov).
+        """
         mean = self.forward_mean(x)
-        log_var = self.log_var.expand(x.shape[0], -1)
-        return mean, log_var
+        if self.full_cov:
+            # Return Cholesky factor expanded for batch
+            chol = self.residual_cov_chol.unsqueeze(0).expand(x.shape[0], -1, -1)
+            return mean, chol
+        else:
+            log_var = self.log_var.expand(x.shape[0], -1)
+            return mean, log_var
 
     def loss(self, z, x, rescale=True):
-        """MSE loss, optionally rescaled by per-dim variance."""
+        """MSE loss, optionally rescaled by (inverse) covariance."""
         mean = self.forward_mean(x)
-        sq_errors = (z - mean) ** 2
+        residuals = z - mean
+
         if rescale:
-            var = torch.exp(self.log_var).detach().clamp(min=1e-20)
-            sq_errors = sq_errors / var
-        return sq_errors.mean()
+            if self.full_cov:
+                # Mahalanobis distance: r^T @ Cov^{-1} @ r = ||L^{-1} @ r||^2
+                L = self.residual_cov_chol.detach()
+                r_white = torch.linalg.solve_triangular(
+                    L, residuals.T, upper=False
+                ).T  # (batch, ndim)
+                return (r_white ** 2).mean()
+            else:
+                # Diagonal rescaling
+                var = torch.exp(self.log_var).detach().clamp(min=1e-20)
+                return ((residuals ** 2) / var).mean()
+        else:
+            return (residuals ** 2).mean()
 
     def log_prob(self, z, x):
-        """Gaussian log probability (factorized over dimensions)."""
-        mean, log_var = self(x)
-        var = torch.exp(log_var)
-        return -0.5 * (np.log(2 * np.pi) + log_var + (z - mean) ** 2 / var).sum(dim=-1)
+        """Gaussian log probability."""
+        mean = self.forward_mean(x)
+        residuals = z - mean
+
+        if self.full_cov:
+            # Multivariate Gaussian: -0.5 * (k*log(2pi) + log|Cov| + r^T Cov^{-1} r)
+            L = self.residual_cov_chol
+            # log|Cov| = 2 * sum(log(diag(L)))
+            log_det = 2 * torch.log(torch.diag(L)).sum()
+            # Mahalanobis: ||L^{-1} @ r||^2
+            r_white = torch.linalg.solve_triangular(L, residuals.T, upper=False).T
+            mahal = (r_white ** 2).sum(dim=-1)
+            return -0.5 * (self.ndim * np.log(2 * np.pi) + log_det + mahal)
+        else:
+            # Factorized Gaussian
+            var = torch.exp(self.log_var)
+            return -0.5 * (np.log(2 * np.pi) + self.log_var + (residuals ** 2) / var).sum(dim=-1)
 
     def sample(self, x, temperature=1.0):
         """Sample from predicted Gaussian."""
-        mean, log_var = self(x)
-        std = torch.exp(0.5 * log_var) * np.sqrt(temperature)
-        return mean + std * torch.randn_like(mean)
+        mean = self.forward_mean(x)
+        eps = torch.randn_like(mean)
+
+        if self.full_cov:
+            # Sample: mean + sqrt(temp) * L @ eps
+            L = self.residual_cov_chol * np.sqrt(temperature)
+            return mean + (L @ eps.T).T
+        else:
+            # Diagonal sampling
+            std = torch.exp(0.5 * self.log_var) * np.sqrt(temperature)
+            return mean + std * eps
 
 
 # =============================================================================
@@ -295,7 +402,12 @@ def main():
         num_layers=cfg.num_layers,
         activation=cfg.activation,
         momentum=cfg.momentum,
+        full_cov=cfg.full_cov,
+        min_var=cfg.min_var,
     ).double().to(device)
+
+    if cfg.full_cov:
+        print("Using full covariance estimation")
 
     # Create optimizer (good defaults: AdamW with betas=(0.5, 0.5))
     optimizer = torch.optim.AdamW(
@@ -347,8 +459,14 @@ def main():
         model.update_variance(z_batch, x_batch)
 
         if step % cfg.print_every == 0 or step == cfg.num_steps - 1:
-            mean_pred, log_var = model(x_obs)
-            std_pred = torch.exp(0.5 * log_var).squeeze()
+            mean_pred, cov_info = model(x_obs)
+            if cfg.full_cov:
+                # Extract diagonal std from Cholesky: diag(L @ L.T) = sum(L**2, dim=1)
+                L = cov_info.squeeze()
+                var_diag = (L ** 2).sum(dim=1)
+                std_pred = torch.sqrt(var_diag)
+            else:
+                std_pred = torch.exp(0.5 * cov_info).squeeze()
             std_ratios = [std_pred[i].item() / expected_std[i] for i in range(cfg.ndim)]
             samples = (step + 1) * cfg.batch_size
 
@@ -358,9 +476,14 @@ def main():
     elapsed = time.perf_counter() - t0
 
     # Final results
-    mean_pred, log_var = model(x_obs)
+    mean_pred, cov_info = model(x_obs)
     mean_pred = mean_pred.squeeze()
-    std_pred = torch.exp(0.5 * log_var).squeeze()
+    if cfg.full_cov:
+        L = cov_info.squeeze()
+        var_diag = (L ** 2).sum(dim=1)
+        std_pred = torch.sqrt(var_diag)
+    else:
+        std_pred = torch.exp(0.5 * cov_info).squeeze()
 
     print()
     print("Final results:")
