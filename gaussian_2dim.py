@@ -51,6 +51,8 @@ def get_config():
                         help='Use full covariance matrix instead of diagonal')
     parser.add_argument('--min_var', type=float, default=1e-20,
                         help='Minimum variance regularization')
+    parser.add_argument('--clamp_prior', action='store_true', default=False,
+                        help='Clamp eigenvalues of covariance to not exceed prior (1.0)')
 
     cfg = parser.parse_args()
 
@@ -139,13 +141,14 @@ class NormalizedMLP(nn.Module):
     """MLP with online normalization and full covariance tracking."""
 
     def __init__(self, hidden_dim=128, num_layers=3, activation='relu',
-                 momentum=0.01, full_cov=False, min_var=1e-20):
+                 momentum=0.01, full_cov=False, min_var=1e-20, clamp_prior=False):
         super().__init__()
         self.ndim = 2
         self.net = build_mlp(2, hidden_dim, 2, num_layers, activation)
         self.momentum = momentum
         self.full_cov = full_cov
         self.min_var = min_var
+        self.clamp_prior = clamp_prior
 
         # Mean vectors
         self.register_buffer('input_mean', torch.zeros(2))
@@ -181,6 +184,12 @@ class NormalizedMLP(nn.Module):
             cov = cov + 1e-4 * torch.eye(2, device=cov.device, dtype=cov.dtype)
             return torch.linalg.cholesky(cov)
 
+    def _clamp_eigenvalues(self, cov, max_val=1.0):
+        """Clamp eigenvalues of covariance matrix to not exceed max_val."""
+        eigenvalues, eigenvectors = torch.linalg.eigh(cov)
+        eigenvalues = eigenvalues.clamp(min=self.min_var, max=max_val)
+        return eigenvectors @ torch.diag(eigenvalues) @ eigenvectors.T
+
     def update_stats(self, z, x):
         """Update running statistics."""
         with torch.no_grad():
@@ -207,10 +216,16 @@ class NormalizedMLP(nn.Module):
             if self.full_cov:
                 batch_cov = self._compute_cov(residuals, torch.zeros(2, device=z.device, dtype=z.dtype))
                 self.residual_cov.lerp_(batch_cov, self.momentum)
+                # Clamp eigenvalues to prior variance if requested
+                if self.clamp_prior:
+                    self.residual_cov.copy_(self._clamp_eigenvalues(self.residual_cov, max_val=1.0))
                 self.residual_cov_chol.copy_(self._safe_cholesky(self.residual_cov))
             else:
                 batch_log_var = torch.log((residuals ** 2).mean(dim=0).clamp(min=1e-20))
                 self.log_var.lerp_(batch_log_var, self.momentum)
+                # Clamp variance to prior if requested
+                if self.clamp_prior:
+                    self.log_var.clamp_(max=0.0)  # log(1) = 0
 
     def forward_mean(self, x):
         """Predict mean."""
@@ -323,12 +338,12 @@ def main():
         momentum=cfg.momentum,
         full_cov=cfg.full_cov,
         min_var=cfg.min_var,
+        clamp_prior=cfg.clamp_prior,
     ).double().to(device)
 
-    if cfg.full_cov:
-        print("Using full covariance estimation")
-    else:
-        print("Using diagonal covariance (correlations not tracked)")
+    cov_mode = "full" if cfg.full_cov else "diagonal"
+    clamp_str = " (eigenvalues clamped to prior)" if cfg.clamp_prior else ""
+    print(f"Using {cov_mode} covariance{clamp_str}")
     print()
 
     optimizer = torch.optim.AdamW(
