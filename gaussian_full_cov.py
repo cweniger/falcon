@@ -293,7 +293,7 @@ def sample_posterior(model, x_obs, n, gamma, device):
     with torch.no_grad():
         x_batch = x_obs.expand(n, -1)
         gamma_eff = 1/gamma  # turn proposal sampler into posterior sampler mathematically
-        return model.sample(x_batch, gamma=gamma)
+        return model.sample(x_batch, gamma=gamma_eff)
 
 
 
@@ -414,6 +414,32 @@ def main():
     print(f"  Ratios: var1={cov_pred[0,0]/cov_expected[0,0]:.3f}, "
           f"var2={cov_pred[1,1]/cov_expected[1,1]:.3f}, "
           f"cov12={cov_pred[0,1]/cov_expected[0,1]:.3f}")
+
+    # Sample from posterior and compute statistics
+    print("\nPosterior sampling:")
+    n_posterior = 10000
+    z_posterior = sample_posterior(model, x_obs, n_posterior, cfg.gamma, device)
+    z_posterior_np = z_posterior.cpu().numpy()
+
+    # Compute sample statistics
+    sample_mean = z_posterior_np.mean(axis=0)
+    sample_cov = np.cov(z_posterior_np.T)
+
+    print(f"  Sample mean: [{sample_mean[0]:.6f}, {sample_mean[1]:.6f}]")
+    print(f"  True mean:   [{z_true[0]:.6f}, {z_true[1]:.6f}]")
+    print(f"  Mean error:  [{abs(sample_mean[0]-z_true[0]):.2e}, {abs(sample_mean[1]-z_true[1]):.2e}]")
+    print()
+    print(f"  Sample covariance:")
+    print(f"    [[{sample_cov[0,0]:.2e}, {sample_cov[0,1]:.2e}],")
+    print(f"     [{sample_cov[1,0]:.2e}, {sample_cov[1,1]:.2e}]]")
+    print(f"  Expected covariance:")
+    print(f"    [[{cov_expected[0,0]:.2e}, {cov_expected[0,1]:.2e}],")
+    print(f"     [{cov_expected[1,0]:.2e}, {cov_expected[1,1]:.2e}]]")
+    print()
+    print(f"  Sample ratios: var1={sample_cov[0,0]/cov_expected[0,0]:.3f}, "
+          f"var2={sample_cov[1,1]/cov_expected[1,1]:.3f}, "
+          f"cov12={sample_cov[0,1]/cov_expected[0,1]:.3f}")
+
     print(f"\nTime: {elapsed:.2f}s")
 
 
