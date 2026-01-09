@@ -9,14 +9,14 @@ class Node:
         name,
         simulator_cls,
         estimator_cls=None,
-        parents=[],
-        evidence=[],
-        scaffolds=[],
+        parents=None,
+        evidence=None,
+        scaffolds=None,
         observed=False,
         resample=False,
-        simulator_config={},
-        estimator_config={},
-        actor_config={},
+        simulator_config=None,
+        estimator_config=None,
+        actor_config=None,
         num_actors=1,
     ):
         """Node definition for a graphical model.
@@ -36,16 +36,16 @@ class Node:
         self.simulator_cls = simulator_cls
         self.estimator_cls = estimator_cls
 
-        self.parents = parents
-        self.evidence = evidence
-        self.scaffolds = scaffolds
+        self.parents = parents or []
+        self.evidence = evidence or []
+        self.scaffolds = scaffolds or []
         self.observed = observed
         self.resample = resample
         self.train = self.estimator_cls is not None
 
-        self.simulator_config = simulator_config
-        self.estimator_config = estimator_config
-        self.actor_config = actor_config
+        self.simulator_config = simulator_config or {}
+        self.estimator_config = estimator_config or {}
+        self.actor_config = actor_config or {}
         self.num_actors = num_actors
 
 

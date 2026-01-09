@@ -350,9 +350,10 @@ class SNPE_A(StepwiseEstimator):
 
     # ==================== Sampling Methods ====================
 
-    def sample_prior(self, num_samples: int, parent_conditions: List = []) -> RVBatch:
+    def sample_prior(self, num_samples: int, parent_conditions: Optional[List] = None) -> RVBatch:
         """Sample from the prior distribution."""
-        assert parent_conditions == [], "Conditions are not supported."
+        if parent_conditions:
+            raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
         logprob = np.ones(num_samples) * (-np.log(4) ** self.param_dim)
         return RVBatch(samples, logprob=logprob)
@@ -360,26 +361,28 @@ class SNPE_A(StepwiseEstimator):
     def sample_posterior(
         self,
         num_samples: int,
-        parent_conditions: List = [],
-        evidence_conditions: List = [],
+        parent_conditions: Optional[List] = None,
+        evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
         """Sample from the posterior distribution q(theta|x)."""
         samples, logprob = self._importance_sample(
             num_samples,
             mode="posterior",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
+            parent_conditions=parent_conditions or [],
+            evidence_conditions=evidence_conditions or [],
         )
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
     def sample_proposal(
         self,
         num_samples: int,
-        parent_conditions: List = [],
-        evidence_conditions: List = [],
+        parent_conditions: Optional[List] = None,
+        evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
         """Sample from the widened proposal distribution for adaptive resampling."""
         cfg_inf = self.config.inference
+        parent_conditions = parent_conditions or []
+        evidence_conditions = evidence_conditions or []
 
         if cfg_inf.sample_reference_posterior:
             post_samples, _ = self._importance_sample(

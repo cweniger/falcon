@@ -220,7 +220,7 @@ class DiagonalWhitener(torch.nn.Module):
         batch_dim = len(x)
 
         batch_mean = x.mean(dim=0).detach()  # (x_dim,)
-        batch_var = x.var(dim=0, unbiased=False).detach() + self.epsilon**2  # (x_dim,)
+        batch_var = x.var(dim=0, unbiased=False).detach() + self.eps**2  # (x_dim,)
 
         mean = batch_mean.unsqueeze(0).repeat(batch_dim, 1)  # (batch_dim, x_dim)
         var = batch_var.unsqueeze(0).repeat(batch_dim, 1)  # (batch_dim, x_dim)
@@ -229,7 +229,7 @@ class DiagonalWhitener(torch.nn.Module):
         mean = mean + torch.randn_like(x) * var**0.5
         var = var * torch.exp(torch.randn_like(x) * 0.5 - 0.5)
 
-        x_scaled = (x - mean) / (var.sqrt() + self.epsilon)
+        x_scaled = (x - mean) / (var.sqrt() + self.eps)
 
         log(
             {

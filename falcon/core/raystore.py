@@ -358,7 +358,7 @@ class DatasetView(IterableDataset):
             try:
                 sample = [ray.get(active_samples[i][key]) for key in self.keylist]
             except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
+                log({"dataset:retrieval_error": str(e)})
                 continue
             if self.filter is not None:  # Online evaluation
                 sample = self.filter(sample)
@@ -403,7 +403,7 @@ class BatchDatasetView(IterableDataset):
                     key: ray.get(active_samples[i][key]) for key in self.keylist
                 }
             except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
+                log({"dataset:retrieval_error": str(e)})
                 continue
             if self.filter is not None:
                 sample_dict = self.filter(sample_dict)
