@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from omegaconf import ListConfig
 
-from falcon.core.logging import initialize_logging_for
+from falcon.core.logging import initialize_logging_for, info, DEBUG
 from falcon.core.raystore import BufferView
 from .utils import LazyLoader, as_rvbatch
 
@@ -80,7 +80,7 @@ class NodeWrapper:
 
         # Condition keys for embedding (evidence + scaffolds)
         self.condition_keys = self.node.evidence + self.node.scaffolds
-        print("Condition keys:", self.condition_keys)
+        info(f"Condition keys: {self.condition_keys}", DEBUG)
 
         if node.estimator_cls is not None:
             estimator_cls = LazyLoader(node.estimator_cls)
@@ -103,14 +103,14 @@ class NodeWrapper:
         initialize_logging_for(self.name)  # Set logger for global scope of this actor
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
-        print("Training started for:", self.name)
-        print("Condition keys:", self.evidence + self.scaffolds)
+        info(f"Training started for: {self.name}")
+        info(f"Condition keys: {self.evidence + self.scaffolds}", DEBUG)
 
         # Create BufferView - estimator controls what keys it needs
         buffer = BufferView(dataset_manager)
 
         await self.estimator_instance.train(buffer)
-        print("...training complete for:", self.name)
+        info(f"Training complete for: {self.name}")
 
     def sample(self, n_samples, incoming=None):
         if self.estimator_instance is not None:
@@ -197,7 +197,7 @@ class DeployedGraph:
         """Deploy all nodes in the graph as Ray actors."""
         ray.init(ignore_reinit_error=True)  # Initialize Ray if not already done
 
-        print("Spinning up graph...")
+        info("Spinning up graph...")
 
         # Create all actors (non-blocking)
         for node in self.graph.node_list:
@@ -222,11 +222,11 @@ class DeployedGraph:
                     ray.get(actor.wait_ready.remote())
                 else:
                     ray.get(actor.__ray_ready__.remote())
-                print(f"  ✓ {name}")
+                info(f"  ✓ {name}")
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
-        print("Graph ready.")
+        info("Graph ready.")
 
     def _execute_graph(self, num_samples, sorted_node_names, conditions, sample_method):
         """Execute graph traversal with specified sampling method.
@@ -366,7 +366,7 @@ class DeployedGraph:
 
     def save(self, graph_dir):
         """Save the deployed graph node status."""
-        print("💾 Saving deployed graph to:", str(graph_dir))
+        info(f"Saving deployed graph to: {graph_dir}")
         graph_dir = graph_dir.expanduser().resolve()
         graph_dir.mkdir(parents=True, exist_ok=True)
         save_futures = []
@@ -378,7 +378,7 @@ class DeployedGraph:
 
     def load(self, graph_dir):
         """Load the deployed graph nodes status."""
-        print("💾 Loading deployed graph from:", str(graph_dir))
+        info(f"Loading deployed graph from: {graph_dir}")
         load_futures = []
         for name, node in self.wrapped_nodes_dict.items():
             node_dir = Path(graph_dir) / name

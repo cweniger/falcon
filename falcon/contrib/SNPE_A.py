@@ -12,7 +12,7 @@ from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logging import log
+from falcon.core.logging import log, info, DEBUG
 from falcon.core.utils import RVBatch
 from falcon.contrib.flow import Flow
 from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
@@ -142,7 +142,7 @@ class SNPE_A(StepwiseEstimator):
         if device:
             return torch.device(device)
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        print(f"Auto-detected device: {dev}")
+        info(f"Auto-detected device: {dev}", DEBUG)
         return dev
 
     # ==================== Network Initialization ====================
@@ -150,8 +150,8 @@ class SNPE_A(StepwiseEstimator):
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
         """Initialize flow networks and optimizer."""
         self._init_parameters = [theta, conditions]
-        print("Initializing networks...")
-        print("GPU available:", torch.cuda.is_available())
+        info("Initializing networks...", DEBUG)
+        info(f"GPU available: {torch.cuda.is_available()}", DEBUG)
 
         cfg_net = self.config.network
         cfg_opt = self.config.optimizer
@@ -194,7 +194,7 @@ class SNPE_A(StepwiseEstimator):
         )
 
         self.networks_initialized = True
-        print("...done initializing networks.")
+        info("Networks initialized.", DEBUG)
 
     def _create_flow(self, theta, s, is_conditional=True):
         """Create a Flow network with current config."""
@@ -478,7 +478,7 @@ class SNPE_A(StepwiseEstimator):
 
     def save(self, node_dir: Path) -> None:
         """Save SNPE-A state."""
-        print("Saving:", str(node_dir))
+        info(f"Saving: {node_dir}", DEBUG)
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
@@ -502,7 +502,7 @@ class SNPE_A(StepwiseEstimator):
 
     def load(self, node_dir: Path) -> None:
         """Load SNPE-A state."""
-        print("Loading:", str(node_dir))
+        info(f"Loading: {node_dir}", DEBUG)
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 

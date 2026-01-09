@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from falcon.core.base_estimator import BaseEstimator
-from falcon.core.logging import log
+from falcon.core.logging import log, info
 
 
 @dataclass
@@ -152,7 +152,7 @@ class StepwiseEstimator(BaseEstimator):
         t0 = time.perf_counter()
 
         for epoch in range(cfg.num_epochs):
-            print(f"Epoch {epoch+1}/{cfg.num_epochs}")
+            info(f"Epoch {epoch+1}/{cfg.num_epochs}")
             log({"epoch": epoch + 1})
 
             # === Training phase ===
@@ -228,7 +228,7 @@ class StepwiseEstimator(BaseEstimator):
             )
 
             if epochs_no_improve >= cfg.early_stop_patience:
-                print("Early stopping triggered.")
+                info("Early stopping triggered.")
                 break
 
             await self._pause_event.wait()

@@ -226,6 +226,24 @@ class LoggerManager:
             for backend in self.actor_backends[actor_id].values():
                 backend.log.remote(metrics, step=step, walltime=walltime)
 
+    def info(
+        self,
+        message: str,
+        level: int = 20,
+        actor_id: str = None,
+    ) -> None:
+        """Log text message to all backends for an actor.
+
+        Args:
+            message: Text message to log
+            level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
+            actor_id: Actor identifier
+        """
+        walltime = time.time()
+        if actor_id in self.actor_backends:
+            for backend in self.actor_backends[actor_id].values():
+                backend.info.remote(message, level=level, walltime=walltime)
+
     def shutdown(self) -> None:
         """Shutdown all backends for all actors."""
         for backends in self.actor_backends.values():
