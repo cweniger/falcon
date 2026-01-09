@@ -30,6 +30,7 @@ _logger_ref = None
 _actor_id = None
 _original_stdout = None
 _original_stderr = None
+_echo_to_stdout = False  # If True, info() also prints to terminal (for driver)
 
 
 class _OutputCapture:
@@ -78,8 +79,9 @@ def initialize_logging_for(actor_id, capture_output=True, keep_original=False):
         capture_output: If True, redirect stdout/stderr to output.log
         keep_original: If True, also write to original stdout/stderr (for driver)
     """
-    global _logger_ref, _actor_id, _original_stdout, _original_stderr
+    global _logger_ref, _actor_id, _original_stdout, _original_stderr, _echo_to_stdout
     _actor_id = actor_id
+    _echo_to_stdout = keep_original  # Echo info() to terminal on driver
     try:
         _logger_ref = ray.get_actor(name="falcon:global_logger")
     except ValueError:
@@ -110,5 +112,10 @@ def info(message: str, level: int = INFO):
         message: Text message to log
         level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
     """
+    # Echo to terminal on driver (for user visibility)
+    if _echo_to_stdout and _original_stdout:
+        _original_stdout.write(f"{message}\n")
+        _original_stdout.flush()
+
     if _logger_ref:
         _logger_ref.info.remote(message, level=level, actor_id=_actor_id)
