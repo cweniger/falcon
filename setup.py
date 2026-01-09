@@ -11,6 +11,7 @@ setup(
         "ray",
         "sbi",
         "omegaconf",
+        "coolname",
     ],
     entry_points={
         "console_scripts": [
