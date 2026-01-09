@@ -633,28 +633,6 @@ class SNPE_A:
         })
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
-    def get_discard_mask(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
-        """Return boolean mask of low-likelihood samples to discard."""
-        if not self.discard_samples:
-            return torch.zeros(len(theta), dtype=torch.bool)
-
-        conditions_list = parent_conditions + evidence_conditions
-        u = self.simulator_instance.inverse(theta)
-        # Convert list to dict using condition_keys
-        conditions = {
-            k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
-        }
-        s = self._embed(conditions, train=False, use_best_fit=True)
-
-        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
-        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
-
-        u = u.to(self.device)
-        self._conditional_flow.eval()
-        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
-        log_ratio = log_prob - theta_logprob
-        return log_ratio < self.log_ratio_threshold
-
     def save(self, node_dir: Path):
         print("Saving:", str(node_dir))
         if not self.networks_initialized:
