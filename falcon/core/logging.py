@@ -35,14 +35,16 @@ _original_stderr = None
 class _OutputCapture:
     """Captures stdout/stderr and forwards to info() logging."""
 
-    def __init__(self, original, level):
+    def __init__(self, original, level, keep_original=False):
         self._original = original
         self._level = level
+        self._keep_original = keep_original
         self._buffer = ""
 
     def write(self, text):
-        # Also write to original for debugging if needed
-        # self._original.write(text)
+        # Optionally write to original (for driver to keep terminal output)
+        if self._keep_original:
+            self._original.write(text)
 
         # Buffer text and flush on newlines
         self._buffer += text
@@ -59,14 +61,14 @@ class _OutputCapture:
         self._original.flush()
 
     def isatty(self):
-        return False
+        return self._original.isatty() if self._keep_original else False
 
     # Forward other attributes to original
     def __getattr__(self, name):
         return getattr(self._original, name)
 
 
-def initialize_logging_for(actor_id, capture_output=True):
+def initialize_logging_for(actor_id, capture_output=True, keep_original=False):
     """
     Called by the orchestrating code (Ray worker), once per process or actor.
     Registers a remote LoggingActor handle and the actor_id.
@@ -74,6 +76,7 @@ def initialize_logging_for(actor_id, capture_output=True):
     Args:
         actor_id: Identifier for this actor/process
         capture_output: If True, redirect stdout/stderr to output.log
+        keep_original: If True, also write to original stdout/stderr (for driver)
     """
     global _logger_ref, _actor_id, _original_stdout, _original_stderr
     _actor_id = actor_id
@@ -88,8 +91,8 @@ def initialize_logging_for(actor_id, capture_output=True):
         if capture_output:
             _original_stdout = sys.stdout
             _original_stderr = sys.stderr
-            sys.stdout = _OutputCapture(_original_stdout, INFO)
-            sys.stderr = _OutputCapture(_original_stderr, WARNING)
+            sys.stdout = _OutputCapture(_original_stdout, INFO, keep_original)
+            sys.stderr = _OutputCapture(_original_stderr, WARNING, keep_original)
 
 
 def log(metrics: dict, log_prefix=None):
