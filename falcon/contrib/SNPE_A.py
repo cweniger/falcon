@@ -211,18 +211,16 @@ class SNPE_A(StepwiseEstimator):
 
     # ==================== Train/Val Steps ====================
 
-    def train_step(self, batch) -> Dict[str, float]:
-        """
-        SNPE-A training step.
+    def _unpack_batch(self, batch, phase: str):
+        """Unpack batch data and convert to tensors.
 
-        1. Unpack batch (numpy arrays)
-        2. Convert to torch, move to device
-        3. Transform theta to u (hypercube space)
-        4. Compute conditional and marginal flow losses
-        5. Backprop and update
-        6. Discard low-likelihood samples
+        Args:
+            batch: Batch object with theta, logprob, and conditions
+            phase: "train" or "val" for logging and history
+
+        Returns:
+            Tuple of (ids, theta, theta_logprob, conditions, u, u_device, conditions_device)
         """
-        # Unpack batch
         ids = batch._ids
         theta = torch.from_numpy(batch[self.theta_key])
         theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
@@ -232,21 +230,53 @@ class SNPE_A(StepwiseEstimator):
 
         # Record IDs for history
         ts = time.time()
-        self.history["train_ids"].extend((ts, id) for id in ids.tolist())
+        self.history[f"{phase}_ids"].extend((ts, id) for id in ids.tolist())
 
-        log({"train:theta_logprob_min": theta_logprob.min().item()})
-        log({"train:theta_logprob_max": theta_logprob.max().item()})
+        log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
+        log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
 
         # Transform to hypercube space
         u = self.simulator_instance.inverse(theta)
 
-        # Initialize networks on first batch
-        if not self.networks_initialized:
-            self._initialize_networks(u, conditions)
-
         # Move to device
         conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
         u_device = u.to(self.device)
+
+        return ids, theta, theta_logprob, conditions, u, u_device, conditions_device
+
+    def _compute_flow_losses(self, u_device, s, train: bool):
+        """Compute conditional and marginal flow losses.
+
+        Args:
+            u_device: Transformed parameters on device
+            s: Embedded conditions
+            train: Whether in training mode
+
+        Returns:
+            Tuple of (loss_cond, loss_marg) tensors
+        """
+        if train:
+            self._conditional_flow.train()
+            self._marginal_flow.train()
+        else:
+            self._conditional_flow.eval()
+            self._marginal_flow.eval()
+
+        loss_cond = self._conditional_flow.loss(u_device, s).mean()
+        # Zero out conditions for marginal flow (detach in train mode to avoid backprop)
+        s_marginal = s.detach() * 0 if train else s * 0
+        loss_marg = self._marginal_flow.loss(u_device, s_marginal).mean()
+
+        return loss_cond, loss_marg
+
+    def train_step(self, batch) -> Dict[str, float]:
+        """SNPE-A training step with gradient update and optional sample discarding."""
+        ids, theta, theta_logprob, conditions, u, u_device, conditions_device = \
+            self._unpack_batch(batch, "train")
+
+        # Initialize networks on first batch
+        if not self.networks_initialized:
+            self._initialize_networks(u, conditions)
 
         # Embed conditions
         s = self._embed(conditions_device, train=True)
@@ -256,76 +286,32 @@ class SNPE_A(StepwiseEstimator):
             self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
             self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
-        # Forward pass
+        # Forward and backward pass
         self._optimizer.zero_grad()
-
-        self._conditional_flow.train()
-        loss_cond = self._conditional_flow.loss(u_device, s).mean()
-
-        self._marginal_flow.train()
-        loss_marg = self._marginal_flow.loss(u_device, s.detach() * 0).mean()
-
-        # Backward pass
+        loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=True)
         (loss_cond + loss_marg).backward()
         self._optimizer.step()
 
         # Discard samples based on log-likelihood ratio
-        cfg_inf = self.config.inference
-        if cfg_inf.discard_samples:
+        if self.config.inference.discard_samples:
             discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
             batch.discard(discard_mask)
 
-        return {
-            "loss": loss_cond.item(),
-            "loss_aux": loss_marg.item(),
-        }
+        return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
     def val_step(self, batch) -> Dict[str, float]:
-        """
-        SNPE-A validation step.
-
-        Similar to train_step but:
-        - No gradient computation
-        - No optimizer update
-        - No sample discarding
-        """
-        # Unpack batch
-        ids = batch._ids
-        theta = torch.from_numpy(batch[self.theta_key])
-        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
-        conditions = {
-            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
-        }
-
-        # Record IDs
-        ts = time.time()
-        self.history["val_ids"].extend((ts, id) for id in ids.tolist())
-
-        log({"val:theta_logprob_min": theta_logprob.min().item()})
-        log({"val:theta_logprob_max": theta_logprob.max().item()})
-
-        # Transform to hypercube space
-        u = self.simulator_instance.inverse(theta)
-
-        # Move to device
-        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-        u_device = u.to(self.device)
+        """SNPE-A validation step without gradient computation."""
+        _, theta, theta_logprob, conditions, u, u_device, conditions_device = \
+            self._unpack_batch(batch, "val")
 
         # Embed conditions (eval mode)
         s = self._embed(conditions_device, train=False)
 
-        # Compute losses (no grad)
+        # Compute losses without gradients
         with torch.no_grad():
-            self._conditional_flow.eval()
-            loss_cond = self._conditional_flow.loss(u_device, s).mean().item()
+            loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False)
 
-            self._marginal_flow.eval()
-            loss_marg = self._marginal_flow.loss(u_device, s * 0).mean().item()
-
-        return {
-            "loss": loss_cond,
-            "loss_aux": loss_marg,
-        }
+        return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
     def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
         """Update best weights and scheduler."""
@@ -365,6 +351,10 @@ class SNPE_A(StepwiseEstimator):
         evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
         """Sample from the posterior distribution q(theta|x)."""
+        # Fall back to prior if networks not yet initialized (training hasn't started)
+        if not self.networks_initialized:
+            return self.sample_prior(num_samples, parent_conditions)
+
         samples, logprob = self._importance_sample(
             num_samples,
             mode="posterior",
@@ -380,6 +370,10 @@ class SNPE_A(StepwiseEstimator):
         evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
         """Sample from the widened proposal distribution for adaptive resampling."""
+        # Fall back to prior if networks not yet initialized (training hasn't started)
+        if not self.networks_initialized:
+            return self.sample_prior(num_samples, parent_conditions)
+
         cfg_inf = self.config.inference
         parent_conditions = parent_conditions or []
         evidence_conditions = evidence_conditions or []
@@ -425,7 +419,9 @@ class SNPE_A(StepwiseEstimator):
             k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
         }
 
-        if cfg_inf.use_best_models_during_inference:
+        # Use best models if available and configured, otherwise fall back to current
+        use_best = cfg_inf.use_best_models_during_inference and self._best_conditional_flow is not None
+        if use_best:
             conditional_net = self._best_conditional_flow
             marginal_net = self._best_marginal_flow
             s = self._embed(conditions, train=False, use_best_fit=True)

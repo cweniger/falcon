@@ -228,82 +228,75 @@ class DeployedGraph:
 
         print("Graph ready.")
 
-    def sample(self, num_samples, conditions={}):
-        """Run the graph using deployed nodes and return results."""
-        sorted_node_names = self.graph.sorted_node_names
+    def _execute_graph(self, num_samples, sorted_node_names, conditions, sample_method):
+        """Execute graph traversal with specified sampling method.
+
+        Args:
+            num_samples: Number of samples to generate
+            sorted_node_names: Node names in execution order
+            conditions: Initial trace conditions
+            sample_method: One of "sample", "sample_posterior", "sample_proposal"
+
+        Returns:
+            Trace dictionary with sampled values and logprobs
+        """
         trace = conditions.copy()
 
-        # Process nodes in topological order
         for name in sorted_node_names:
-            if name in trace.keys():
+            if name in trace:
                 continue
-            incoming = [trace[parent] for parent in self.graph.get_parents(name)]
-            rvbatch = ray.get(
-                self.wrapped_nodes_dict[name].sample.remote(
-                    num_samples, incoming=incoming
+
+            # Get conditions based on sampling method
+            if sample_method == "sample":
+                incoming = [trace[parent] for parent in self.graph.get_parents(name)]
+                rvbatch = ray.get(
+                    self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming)
                 )
-            )
+            else:
+                parent_conditions = [trace[parent] for parent in self.graph.get_parents(name)]
+                evidence_conditions = [trace[parent] for parent in self.graph.get_evidence(name)]
+                remote_method = getattr(self.wrapped_nodes_dict[name], sample_method)
+                rvbatch = ray.get(
+                    remote_method.remote(
+                        num_samples,
+                        parent_conditions=parent_conditions,
+                        evidence_conditions=evidence_conditions,
+                    )
+                )
+
             rvbatch = as_rvbatch(rvbatch)
             trace[name] = rvbatch.value
             if rvbatch.logprob is not None:
                 trace[f"{name}.logprob"] = rvbatch.logprob
-        return trace
-
-    def sample_posterior(self, num_samples, conditions={}):
-        """Run the graph using deployed nodes and return results."""
-        sorted_node_names = self.graph.sorted_inference_node_names
-        trace = conditions.copy()
-
-        # Process nodes in topological order
-        for name in sorted_node_names:
-            if name in trace.keys():
-                continue
-            evidence_conditions = [
-                trace[parent] for parent in self.graph.get_evidence(name)
-            ]
-            parent_conditions = [
-                trace[parent] for parent in self.graph.get_parents(name)
-            ]
-            rvbatch = ray.get(
-                self.wrapped_nodes_dict[name].sample_posterior.remote(
-                    num_samples,
-                    parent_conditions=parent_conditions,
-                    evidence_conditions=evidence_conditions,
-                )
-            )
-            trace[name] = rvbatch.value
-            if rvbatch.logprob is not None:
-                trace[f"{name}.logprob"] = rvbatch.logprob
 
         return trace
 
-    def sample_proposal(self, num_samples, conditions={}):
-        """Run the graph using deployed nodes and return results."""
-        sorted_node_names = self.graph.sorted_inference_node_names
-        trace = conditions.copy()
+    def sample(self, num_samples, conditions=None):
+        """Run forward sampling through the graph."""
+        return self._execute_graph(
+            num_samples,
+            self.graph.sorted_node_names,
+            conditions or {},
+            "sample",
+        )
 
-        # Process nodes in topological order
-        for name in sorted_node_names:
-            if name in trace.keys():
-                continue
-            parent_conditions = [
-                trace[parent] for parent in self.graph.get_parents(name)
-            ]
-            evidence_conditions = [
-                trace[parent] for parent in self.graph.get_evidence(name)
-            ]
-            rvbatch = ray.get(
-                self.wrapped_nodes_dict[name].sample_proposal.remote(
-                    num_samples,
-                    parent_conditions=parent_conditions,
-                    evidence_conditions=evidence_conditions,
-                )
-            )
-            trace[name] = rvbatch.value
-            if rvbatch.logprob is not None:
-                trace[f"{name}.logprob"] = rvbatch.logprob
+    def sample_posterior(self, num_samples, conditions=None):
+        """Run posterior sampling through the inference graph."""
+        return self._execute_graph(
+            num_samples,
+            self.graph.sorted_inference_node_names,
+            conditions or {},
+            "sample_posterior",
+        )
 
-        return trace
+    def sample_proposal(self, num_samples, conditions=None):
+        """Run proposal sampling through the inference graph."""
+        return self._execute_graph(
+            num_samples,
+            self.graph.sorted_inference_node_names,
+            conditions or {},
+            "sample_proposal",
+        )
 
     def shutdown(self):
         """Shut down the deployed graph and release resources."""

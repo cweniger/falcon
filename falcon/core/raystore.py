@@ -328,17 +328,43 @@ class DatasetManagerActor:
 
 
 class DatasetView(IterableDataset):
-    """Dataset view that yields samples as tuples (legacy format).
+    """Dataset view that yields samples from the Ray store.
 
-    Yields:
-        Tuple of (index, value1, value2, ...) where values correspond to keylist order.
+    Supports two output formats:
+    - "dict": yields (index, {key: value, ...}) - for Batch collation
+    - "tuple": yields (index, value1, value2, ...) - legacy format
+
+    Args:
+        keylist: List of keys to retrieve from each sample
+        filter: Optional function to transform samples
+        sample_status: Status of samples to retrieve (TRAINING, VALIDATION, etc.)
+        output_format: "dict" (default) or "tuple"
     """
 
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
+    def __init__(
+        self,
+        keylist,
+        filter=None,
+        sample_status=SampleStatus.TRAINING,
+        output_format="dict",
+    ):
         self.dataset_manager = ray.get_actor("DatasetManager")
         self.keylist = keylist
         self.filter = filter
         self.sample_status = sample_status
+        self.output_format = output_format
+
+    def _log_dataset_size(self, size):
+        """Log dataset size based on sample status."""
+        # Handle both single status and list of statuses
+        if isinstance(self.sample_status, list):
+            log({"dataset:active_size": size})
+        elif self.sample_status == SampleStatus.TRAINING:
+            log({"dataset:train_size": size})
+        elif self.sample_status == SampleStatus.VALIDATION:
+            log({"dataset:val_size": size})
+        else:
+            log({"dataset:active_size": size})
 
     def __iter__(self):
         active_samples, active_ids = ray.get(
@@ -346,56 +372,7 @@ class DatasetView(IterableDataset):
         )
 
         perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
-
-        for i in perm:
-            try:
-                sample = [ray.get(active_samples[i][key]) for key in self.keylist]
-            except Exception as e:
-                log({"dataset:retrieval_error": str(e)})
-                continue
-            if self.filter is not None:  # Online evaluation
-                sample = self.filter(sample)
-            index = active_ids[i]
-            yield (index, *sample)
-
-        ray.get(self.dataset_manager.release_samples.remote(active_ids))
-
-
-class BatchDatasetView(IterableDataset):
-    """Dataset view that yields samples as dictionaries for Batch collation.
-
-    Works with batch_collate_fn to produce Batch objects with dictionary access.
-
-    Yields:
-        Tuple of (index, {key: value, ...}) where keys are from keylist.
-    """
-
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
-        self.dataset_manager = ray.get_actor("DatasetManager")
-        self.keylist = keylist
-        self.filter = filter
-        self.sample_status = sample_status
-
-    def __iter__(self):
-        active_samples, active_ids = ray.get(
-            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
-        )
-
-        perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
+        self._log_dataset_size(len(perm))
 
         for i in perm:
             try:
@@ -405,12 +382,21 @@ class BatchDatasetView(IterableDataset):
             except Exception as e:
                 log({"dataset:retrieval_error": str(e)})
                 continue
+
             if self.filter is not None:
                 sample_dict = self.filter(sample_dict)
+
             index = active_ids[i]
-            yield (index, sample_dict)
+            if self.output_format == "tuple":
+                yield (index, *[sample_dict[k] for k in self.keylist])
+            else:
+                yield (index, sample_dict)
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
+
+
+# Backwards compatibility alias
+BatchDatasetView = DatasetView
 
 
 def batch_collate_fn(dataset_manager):
