@@ -195,8 +195,6 @@ class DeployedGraph:
 
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
-        ray.init(ignore_reinit_error=True)  # Initialize Ray if not already done
-
         info("Spinning up graph...")
 
         # Create all actors (non-blocking)
