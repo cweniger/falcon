@@ -3,6 +3,7 @@
 Falcon Adaptive Training - Standalone CLI Tool
 Usage: falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]
        falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]
+       falcon graph [--config-name FILE]
 
 Run directory behavior:
   - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
@@ -29,6 +30,154 @@ from falcon.core.run_name import generate_run_dir
 
 # Register custom OmegaConf resolvers
 OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
+
+
+def render_git_graph_simple(graph):
+    """Render a simplified git-log style ASCII graph visualization.
+
+    Shows DAG structure with cleaner visualization.
+    """
+    sorted_names = graph.sorted_node_names
+    parents_dict = graph.parents_dict
+
+    # Build children dict to know which nodes have children
+    children_dict = {name: [] for name in sorted_names}
+    for name in sorted_names:
+        for parent in parents_dict[name]:
+            if parent in children_dict:
+                children_dict[parent].append(name)
+
+    # Track active vertical lines by column
+    # Each entry is the node name that "owns" that column
+    columns = []  # List of node names, index = column
+
+    lines = []
+
+    for idx, name in enumerate(sorted_names):
+        node = graph.node_dict[name]
+        is_last = (idx == len(sorted_names) - 1)
+
+        # Find parent columns
+        parent_cols = []
+        for p in parents_dict[name]:
+            if p in columns:
+                parent_cols.append(columns.index(p))
+        parent_cols.sort()
+
+        # Determine this node's column
+        if parent_cols:
+            my_col = parent_cols[0]
+            # Remove other parent columns (they merge here)
+            for pc in reversed(parent_cols[1:]):
+                columns[pc] = None
+        else:
+            # New root - use first empty column or append
+            if None in columns:
+                my_col = columns.index(None)
+            else:
+                my_col = len(columns)
+                columns.append(None)
+
+        # Ensure columns list is long enough
+        while len(columns) <= my_col:
+            columns.append(None)
+
+        # Draw merge lines if multiple parents
+        if len(parent_cols) > 1:
+            merge_line = []
+            max_parent_col = max(parent_cols)
+            for c in range(max_parent_col + 1):
+                if c == my_col:
+                    merge_line.append('|')
+                elif c in parent_cols:
+                    merge_line.append('/')
+                elif columns[c] is not None:
+                    merge_line.append('|')
+                else:
+                    merge_line.append(' ')
+                # Add space after, except for the merge slash
+                if c < max_parent_col:
+                    if c + 1 in parent_cols and c + 1 != my_col:
+                        merge_line.append('')  # No space before /
+                    else:
+                        merge_line.append(' ')
+            lines.append(''.join(merge_line))
+
+        # Draw the node line
+        line = []
+        for c in range(len(columns)):
+            if c == my_col:
+                line.append('*')
+            elif columns[c] is not None:
+                line.append('|')
+            else:
+                line.append(' ')
+            if c < len(columns) - 1 or columns[c] is not None:
+                line.append(' ')
+
+        # Get node info
+        simulator_cls = graph.get_simulator_cls(name)
+        if hasattr(simulator_cls, "display_name"):
+            class_name = simulator_cls.display_name
+        else:
+            class_name = str(simulator_cls)
+            if '.' in class_name:
+                class_name = class_name.split('.')[-1]
+
+        # Add evidence info (inference direction)
+        evidence = graph.evidence_dict.get(name, [])
+        evidence_str = f"  ← {', '.join(evidence)}" if evidence else ""
+
+        observed = " (observed)" if graph.observed_dict.get(name) else ""
+
+        node_line = ''.join(line).rstrip() + f" {name}{evidence_str}{observed}"
+        lines.append(node_line)
+
+        # Update column ownership
+        columns[my_col] = name
+
+        # Remove parent columns (connection completed)
+        for p in parents_dict[name]:
+            if p in columns:
+                col_idx = columns.index(p)
+                if col_idx != my_col:
+                    columns[col_idx] = None
+
+        # Draw continuation line only if there are more nodes and active columns
+        if not is_last:
+            # Check if this node has children (needs continuation)
+            has_children = len(children_dict[name]) > 0
+            # Check if there are other active columns
+            other_active = any(c is not None and c != name for c in columns)
+
+            if has_children or other_active:
+                cont = []
+                for c in range(len(columns)):
+                    if columns[c] is not None:
+                        cont.append('|')
+                    else:
+                        cont.append(' ')
+                    cont.append(' ')  # Space between columns
+                cont_str = ''.join(cont).rstrip()
+                if cont_str:
+                    lines.append(cont_str)
+
+    return '\n'.join(l for l in lines if l.strip())
+
+
+def graph_mode(cfg: DictConfig) -> None:
+    """Graph mode: Display the graph structure."""
+    # Create graph from config (no Ray needed)
+    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
+
+    # Collect info
+    observed = [k for k, v in graph.observed_dict.items() if v]
+    with_estimator = [n.name for n in graph.node_list if n.estimator_cls]
+
+    print()
+    print(render_git_graph_simple(graph))
+    print()
+    print(f"Nodes: {len(graph.node_list)} | Observed: {', '.join(observed)} | Estimators: {', '.join(with_estimator)}")
 
 
 def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None) -> DictConfig:
@@ -242,10 +391,11 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
 
 def parse_args():
     """Parse falcon CLI arguments."""
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch"]:
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph"]:
         print("Usage:")
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
+        print("  falcon graph [--config-name FILE]")
         print()
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
@@ -293,6 +443,8 @@ def main():
 
     if mode == "launch":
         launch_mode(cfg)
+    elif mode == "graph":
+        graph_mode(cfg)
     else:
         sample_mode(cfg, sample_type)
 
