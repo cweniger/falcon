@@ -14,6 +14,8 @@
 #
 # If no global logger is registered in the Ray cluster, logging is silently disabled.
 
+import sys
+
 import ray
 
 # Log level constants (matching Python's logging module)
@@ -26,14 +28,54 @@ _LEVEL_NAMES = {DEBUG: "DEBUG", INFO: "INFO", WARNING: "WARNING", ERROR: "ERROR"
 
 _logger_ref = None
 _actor_id = None
+_original_stdout = None
+_original_stderr = None
 
 
-def initialize_logging_for(actor_id):
+class _OutputCapture:
+    """Captures stdout/stderr and forwards to info() logging."""
+
+    def __init__(self, original, level):
+        self._original = original
+        self._level = level
+        self._buffer = ""
+
+    def write(self, text):
+        # Also write to original for debugging if needed
+        # self._original.write(text)
+
+        # Buffer text and flush on newlines
+        self._buffer += text
+        while "\n" in self._buffer:
+            line, self._buffer = self._buffer.split("\n", 1)
+            if line.strip():  # Skip empty lines
+                info(line, self._level)
+
+    def flush(self):
+        # Flush any remaining buffered content
+        if self._buffer.strip():
+            info(self._buffer.strip(), self._level)
+            self._buffer = ""
+        self._original.flush()
+
+    def isatty(self):
+        return False
+
+    # Forward other attributes to original
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+def initialize_logging_for(actor_id, capture_output=True):
     """
     Called by the orchestrating code (Ray worker), once per process or actor.
     Registers a remote LoggingActor handle and the actor_id.
+
+    Args:
+        actor_id: Identifier for this actor/process
+        capture_output: If True, redirect stdout/stderr to output.log
     """
-    global _logger_ref, _actor_id
+    global _logger_ref, _actor_id, _original_stdout, _original_stderr
     _actor_id = actor_id
     try:
         _logger_ref = ray.get_actor(name="falcon:global_logger")
@@ -41,6 +83,13 @@ def initialize_logging_for(actor_id):
         print("Global logger actor not found. Logging information will be not saved.")
     if _logger_ref:
         _logger_ref.init.remote(actor_id=actor_id)
+
+        # Capture stdout/stderr and redirect to output.log
+        if capture_output:
+            _original_stdout = sys.stdout
+            _original_stderr = sys.stderr
+            sys.stdout = _OutputCapture(_original_stdout, INFO)
+            sys.stderr = _OutputCapture(_original_stderr, WARNING)
 
 
 def log(metrics: dict, log_prefix=None):
