@@ -48,37 +48,39 @@ graph:
         - ['uniform', -1.0, 1.0]
     estimator:
       _target_: falcon.contrib.SNPE_A
-      embedding:
-         _target_: model.Concatenate
-         _input_:
-            - _target_: timm.create_model
-              model_name: resnet18 #convnext_tiny
-              in_chans: 1
-              num_classes: 512
-              pretrained: true
-              _input_:
-                _target_: model.Unsqueeze
+      config:
+        loop:
+          num_epochs: 300
+          batch_size: 128
+          early_stop_patience: 32
+          reset_network_after_pause: false
+        network:
+          net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+          theta_norm: true
+          embedding:
+            _target_: model.Concatenate
+            _input_:
+              - _target_: timm.create_model
+                model_name: resnet18 #convnext_tiny
+                in_chans: 1
+                num_classes: 512
+                pretrained: true
+                _input_:
+                  _target_: model.Unsqueeze
+                  _input_: [x]
+              - _target_: model.Linear
+                out_features: 512
                 _input_: [x]
-            - _target_: model.Linear
-              out_features: 512
-              _input_: [x]
-      net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: true
-
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.001
-      scheduler_patience: 16
-      lr_decay_factor: 0.5
-      early_stop_patience: 32
-
-      gamma: 0.5
-      discard_samples: false
-      log_ratio_threshold: -20
-
-      sample_reference_posterior: false
-      use_best_models_during_inference: true
-      reset_network_after_pause: false
+        optimizer:
+          lr: 0.001
+          lr_decay_factor: 0.5
+          scheduler_patience: 16
+        inference:
+          gamma: 0.5
+          discard_samples: false
+          log_ratio_threshold: -20
+          sample_reference_posterior: false
+          use_best_models_during_inference: true
     ray:
       num_gpus: 0.5
 
@@ -94,32 +96,34 @@ graph:
         - ['uniform', -1.2, 1.2]
     estimator:
       _target_: falcon.contrib.SNPE_A
-      embedding:
-         _target_: timm.create_model
-         model_name: resnet18 #convnext_tiny
-         in_chans: 1
-         num_classes: 4096
-         pretrained: true
-         _input_:
-           _target_: model.Unsqueeze
-           _input_: [x]
-      net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: true
-
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.001
-      scheduler_patience: 16
-      lr_decay_factor: 0.5
-      early_stop_patience: 32
-
-      gamma: 0.5
-      discard_samples: false
-      log_ratio_threshold: -20
-
-      sample_reference_posterior: false
-      use_best_models_during_inference: true
-      reset_network_after_pause: false
+      config:
+        loop:
+          num_epochs: 300
+          batch_size: 128
+          early_stop_patience: 32
+          reset_network_after_pause: false
+        network:
+          net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
+          theta_norm: true
+          embedding:
+            _target_: timm.create_model
+            model_name: resnet18 #convnext_tiny
+            in_chans: 1
+            num_classes: 4096
+            pretrained: true
+            _input_:
+              _target_: model.Unsqueeze
+              _input_: [x]
+        optimizer:
+          lr: 0.001
+          lr_decay_factor: 0.5
+          scheduler_patience: 16
+        inference:
+          gamma: 0.5
+          discard_samples: false
+          log_ratio_threshold: -20
+          sample_reference_posterior: false
+          use_best_models_during_inference: true
     ray:
       num_gpus: 0.5
 

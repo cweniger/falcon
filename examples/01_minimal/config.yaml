@@ -75,27 +75,26 @@ graph:
 
     estimator:                          # Posterior estimator network
       _target_: falcon.contrib.SNPE_A   # Sequential Neural Posterior Estimation (SNPE-A)
-
-      net_type: nsf                     # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
-      theta_norm: true                  # Normalize parameter space
-      norm_momentum: 0.003              # Momentum for online normalization updates
-
-      embedding:                        # Neural embedding for observation x
-         _target_: model.E
-         _input_: [x]
-
-      # --- Training parameters ---
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.01
-      scheduler_patience: 16            # LR decay after N stagnant epochs
-      lr_decay_factor: 0.5              # LR decay multiplier
-      early_stop_patience: 32           # Early stopping patience
-
-      # --- SNPE-specific parameters ---
-      gamma: 0.5                        # Mixing coefficient for amortization weighting
-      discard_samples: false
-      log_ratio_threshold: -20          # Stability cutoff for log ratios
+      config:
+        loop:                           # Training loop parameters
+          num_epochs: 300
+          batch_size: 128
+          early_stop_patience: 32       # Early stopping patience
+        network:                        # Neural network architecture
+          net_type: nsf                 # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
+          theta_norm: true              # Normalize parameter space
+          norm_momentum: 0.003          # Momentum for online normalization updates
+          embedding:                    # Neural embedding for observation x
+            _target_: model.E
+            _input_: [x]
+        optimizer:                      # Optimizer parameters
+          lr: 0.01
+          lr_decay_factor: 0.5          # LR decay multiplier
+          scheduler_patience: 16        # LR decay after N stagnant epochs
+        inference:                      # Inference and sampling parameters
+          gamma: 0.5                    # Mixing coefficient for amortization weighting
+          discard_samples: false
+          log_ratio_threshold: -20      # Stability cutoff for log ratios
 
     ray:
       num_gpus: 0                       # GPU count per Ray worker (0 = CPU)

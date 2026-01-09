@@ -15,16 +15,16 @@ EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 # Each tuple: (example_dir_name, config_name, epoch_overrides)
 EXAMPLE_CONFIGS = [
     # 01_minimal: single estimator 'z'
-    ("01_minimal", "config.yaml", ["graph.z.estimator.num_epochs=2"]),
+    ("01_minimal", "config.yaml", ["graph.z.estimator.config.loop.num_epochs=2"]),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
-    ("02_bimodal", "config_regular.yaml", ["graph.z.estimator.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("02_bimodal", "config_regular.yaml", ["graph.z.estimator.config.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 03_composite: two estimators 'z1' and 'z2' (needs GPU override)
     (
         "03_composite",
         "config.yaml",
         [
-            "graph.z1.estimator.num_epochs=2",
-            "graph.z2.estimator.num_epochs=2",
+            "graph.z1.estimator.config.loop.num_epochs=2",
+            "graph.z2.estimator.config.loop.num_epochs=2",
             "graph.z1.ray.num_gpus=0",
             "graph.z2.ray.num_gpus=0",
         ],
