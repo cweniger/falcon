@@ -33,12 +33,12 @@ NOUNS = [
 
 
 def generate_run_name() -> str:
-    """Generate a memorable run name: adj-noun-YYMMDD-HHMM."""
+    """Generate a memorable run name: YYMMDD-HHMM-adj-noun."""
     date = datetime.now().strftime("%y%m%d")
     time = datetime.now().strftime("%H%M")
     adj = random.choice(ADJECTIVES)
     noun = random.choice(NOUNS)
-    return f"{adj}-{noun}-{date}-{time}"
+    return f"{date}-{time}-{adj}-{noun}"
 
 
 def generate_run_dir(base_dir: str = "outputs") -> str:

@@ -8,6 +8,7 @@ from typing import Any, Dict, List, Optional
 
 import numpy as np
 import torch
+from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
@@ -80,24 +81,22 @@ class SNPE_A(StepwiseEstimator):
     def __init__(
         self,
         simulator_instance,
-        config: SNPEConfig = None,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
+        config: Optional[dict] = None,
     ):
         """
         Initialize SNPE_A estimator.
 
         Args:
             simulator_instance: Prior/simulator instance
-            config: SNPE configuration (uses defaults if None), can be dict or SNPEConfig
             theta_key: Key for theta in batch data
             condition_keys: Keys for condition data in batch
+            config: Configuration dict with loop, network, optimizer, inference sections
         """
-        if config is None:
-            config = SNPEConfig()
-        elif isinstance(config, dict):
-            # Convert dict from Hydra/OmegaConf to dataclass
-            config = self._dict_to_config(config)
+        # Merge user config with defaults using OmegaConf structured config
+        schema = OmegaConf.structured(SNPEConfig)
+        config = OmegaConf.merge(schema, config or {})
 
         super().__init__(
             simulator_instance=simulator_instance,
@@ -112,7 +111,9 @@ class SNPE_A(StepwiseEstimator):
         self.device = self._setup_device(config.device)
 
         # Embedding network
-        self._embedding = instantiate_embedding(config.network.embedding).to(self.device)
+        # Convert to plain dict for instantiate_embedding which uses isinstance(x, dict)
+        embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
+        self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
         # Flow networks (initialized lazily)
         self._conditional_flow = None
@@ -135,18 +136,6 @@ class SNPE_A(StepwiseEstimator):
             "theta_mins": [],
             "theta_maxs": [],
         })
-
-    @staticmethod
-    def _dict_to_config(d: dict) -> "SNPEConfig":
-        """Convert dict (from Hydra/OmegaConf) to SNPEConfig dataclass."""
-        loop = TrainingLoopConfig(**d.get("loop", {}))
-        network = NetworkConfig(**d.get("network", {}))
-        optimizer = OptimizerConfig(**d.get("optimizer", {}))
-        inference = InferenceConfig(**d.get("inference", {}))
-        device = d.get("device", None)
-        return SNPEConfig(
-            loop=loop, network=network, optimizer=optimizer, inference=inference, device=device
-        )
 
     def _setup_device(self, device: Optional[str]) -> torch.device:
         """Setup compute device."""

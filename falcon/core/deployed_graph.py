@@ -88,7 +88,7 @@ class NodeWrapper:
                 self.simulator_instance,
                 theta_key=node.name,
                 condition_keys=self.condition_keys,
-                **node.estimator_config,
+                config=node.estimator_config,
             )
         else:
             self.estimator_instance = None
