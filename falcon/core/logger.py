@@ -298,9 +298,9 @@ def init_logging(cfg: DictConfig) -> None:
 
     # Start the logger manager
     if factories:
-        LoggerManager.options(
-            name="falcon:global_logger", lifetime="detached"
-        ).remote(backend_factories=factories)
+        LoggerManager.options(name="falcon:global_logger").remote(
+            backend_factories=factories
+        )
 
 
 def finish_logging() -> None:
