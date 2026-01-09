@@ -1,6 +1,8 @@
-from omegaconf import OmegaConf
-import numpy as np
 import os
+import warnings
+
+import numpy as np
+from omegaconf import OmegaConf
 
 
 class Node:
@@ -176,6 +178,64 @@ def CompositeNode(names, module, **kwargs):
     return node_comp, *nodes
 
 
+# Valid keys for node configuration
+_VALID_NODE_KEYS = frozenset({
+    "parents", "evidence", "scaffolds", "observed", "resample",
+    "simulator", "estimator", "ray", "num_actors",
+})
+
+
+def _validate_node_config(node_name: str, node_config: dict) -> None:
+    """Validate a node configuration, raising errors or warnings as appropriate.
+
+    Args:
+        node_name: Name of the node being validated
+        node_config: Configuration dictionary for the node
+
+    Raises:
+        ValueError: If required fields are missing
+    """
+    # Check for unknown keys (likely typos)
+    unknown_keys = set(node_config.keys()) - _VALID_NODE_KEYS
+    if unknown_keys:
+        warnings.warn(
+            f"Node '{node_name}' has unknown config keys: {unknown_keys}. "
+            f"Valid keys are: {sorted(_VALID_NODE_KEYS)}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    # Require simulator
+    if "simulator" not in node_config:
+        raise ValueError(
+            f"Node '{node_name}' is missing required 'simulator' field."
+        )
+
+
+def _validate_node_references(nodes: list, node_names: set) -> None:
+    """Validate that all node references (parents, evidence, scaffolds) exist.
+
+    Args:
+        nodes: List of Node objects
+        node_names: Set of all node names in the graph
+
+    Raises:
+        ValueError: If a referenced node does not exist
+    """
+    for node in nodes:
+        for ref_type, refs in [
+            ("parents", node.parents),
+            ("evidence", node.evidence),
+            ("scaffolds", node.scaffolds),
+        ]:
+            for ref in refs:
+                if ref not in node_names:
+                    raise ValueError(
+                        f"Node '{node.name}' references unknown {ref_type[:-1]} '{ref}'. "
+                        f"Available nodes: {sorted(node_names)}"
+                    )
+
+
 def create_graph_from_config(graph_config, _cfg=None):
     """Create a computational graph from YAML configuration.
 
@@ -185,11 +245,17 @@ def create_graph_from_config(graph_config, _cfg=None):
 
     Returns:
         Graph: The computational graph
+
+    Raises:
+        ValueError: If configuration is invalid (missing required fields, unknown references)
     """
     nodes = []
     observations = {}
 
     for node_name, node_config in graph_config.items():
+        # Validate configuration
+        _validate_node_config(node_name, node_config)
+
         # Extract node parameters
         parents = node_config.get("parents", [])
         evidence = node_config.get("evidence", [])
@@ -258,6 +324,10 @@ def create_graph_from_config(graph_config, _cfg=None):
         )
 
         nodes.append(node)
+
+    # Validate node references
+    node_names = {node.name for node in nodes}
+    _validate_node_references(nodes, node_names)
 
     # Create and return the graph
     return Graph(nodes), observations

@@ -52,6 +52,12 @@ class InferenceConfig:
     log_ratio_threshold: float = -20.0
     sample_reference_posterior: bool = False
     use_best_models_during_inference: bool = True
+    # Importance sampling parameters
+    num_proposals: int = 256
+    reference_samples: int = 128
+    hypercube_bound: float = 2.0
+    out_of_bounds_penalty: float = 100.0
+    nan_replacement: float = -100.0
 
 
 @dataclass
@@ -341,7 +347,9 @@ class SNPE_A(StepwiseEstimator):
         if parent_conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
-        logprob = np.ones(num_samples) * (-np.log(4) ** self.param_dim)
+        # Log probability for uniform prior over hypercube [-bound, bound]^d
+        bound = self.config.inference.hypercube_bound
+        logprob = np.ones(num_samples) * (-np.log(2 * bound) ** self.param_dim)
         return RVBatch(samples, logprob=logprob)
 
     def sample_posterior(
@@ -380,7 +388,7 @@ class SNPE_A(StepwiseEstimator):
 
         if cfg_inf.sample_reference_posterior:
             post_samples, _ = self._importance_sample(
-                128,
+                cfg_inf.reference_samples,
                 mode="posterior",
                 parent_conditions=parent_conditions,
                 evidence_conditions=evidence_conditions,
@@ -433,9 +441,8 @@ class SNPE_A(StepwiseEstimator):
         s = s.expand(num_samples, *s.shape[1:])
 
         # Generate proposals from conditional flow
-        num_proposals = 256
         conditional_net.eval()
-        samples_proposals = conditional_net.sample(num_proposals, s).detach()
+        samples_proposals = conditional_net.sample(cfg_inf.num_proposals, s).detach()
 
         log({
             "importance_sample:proposal_mean": samples_proposals.mean().item(),
@@ -447,9 +454,10 @@ class SNPE_A(StepwiseEstimator):
         marginal_net.eval()
         log_prob_marg = marginal_net.log_prob(samples_proposals, s * 0)
 
-        # Mask samples outside [-2, 2] box
-        mask = (samples_proposals < -2) | (samples_proposals > 2)
-        mask = mask.any(dim=-1).float() * 100
+        # Mask samples outside hypercube bounds
+        bound = cfg_inf.hypercube_bound
+        mask = (samples_proposals < -bound) | (samples_proposals > bound)
+        mask = mask.any(dim=-1).float() * cfg_inf.out_of_bounds_penalty
 
         # Compute importance weights
         if mode == "proposal":
@@ -457,7 +465,8 @@ class SNPE_A(StepwiseEstimator):
         else:  # "posterior" - reweight by marginal
             log_weights = -log_prob_marg - mask
 
-        log_weights = torch.nan_to_num(log_weights, nan=-100.0, neginf=-100.0)
+        nan_val = cfg_inf.nan_replacement
+        log_weights = torch.nan_to_num(log_weights, nan=nan_val, neginf=nan_val)
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
         weights = torch.exp(log_weights)
 
