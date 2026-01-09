@@ -23,6 +23,7 @@ class RV:
             f"RV(name={self.name}, " f"value={self.value}, " f"logprob={self.logprob})"
         )
 
+    # TODO: Currently not used anywhere, add tests?
     def to_dict(self):
         """Serialize to dict form for storage or logging."""
         return {
@@ -33,6 +34,7 @@ class RV:
         }
 
 
+# TODO: Currently not used anywhere, add tests?
 def as_rv(value, logprob=None, name=None, meta=None):
     """
     Ensure output is an RV. If already RV, return unchanged; otherwise wrap it.
@@ -80,6 +82,7 @@ class RVBatch:
             f"meta_keys={list(self.meta)})"
         )
 
+    # TODO: Currently not used anywhere, add tests?
     def to_dict(self):
         """Serialize to dict form for storage or logging."""
         return {
@@ -117,6 +120,7 @@ class LazyLoader:
         return model_instance
 
 
+# TODO: Currently not used anywhere, add tests?
 def load_observations(config):
     """Load observations from NPZ file with optional batch indexing.
 

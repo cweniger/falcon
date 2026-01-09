@@ -83,7 +83,6 @@ class SNPE_A(StepwiseEstimator):
         config: SNPEConfig = None,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
-        **kwargs,  # Accept legacy parameters like _embedding_keywords
     ):
         """
         Initialize SNPE_A estimator.

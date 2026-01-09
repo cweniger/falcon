@@ -88,8 +88,6 @@ class NodeWrapper:
                 self.simulator_instance,
                 theta_key=node.name,
                 condition_keys=self.condition_keys,
-                # Keep legacy parameter for backward compatibility
-                _embedding_keywords=self.condition_keys,
                 **node.estimator_config,
             )
         else:
@@ -110,12 +108,6 @@ class NodeWrapper:
 
         # Create BufferView - estimator controls what keys it needs
         buffer = BufferView(dataset_manager)
-
-        # Set theta_key and condition_keys on estimator if not already set
-        if hasattr(self.estimator_instance, 'theta_key') and self.estimator_instance.theta_key is None:
-            self.estimator_instance.theta_key = self.name
-        if hasattr(self.estimator_instance, 'condition_keys') and not self.estimator_instance.condition_keys:
-            self.estimator_instance.condition_keys = self.evidence + self.scaffolds
 
         await self.estimator_instance.train(buffer)
         print("...training complete for:", self.name)
@@ -156,39 +148,40 @@ class NodeWrapper:
         samples = as_rvbatch(samples)
         return samples
 
+    # TODO: Currently not used anywhere, add tests?
     def call_simulator_method(self, method_name, *args, **kwargs):
         method = getattr(self.simulator_instance, method_name)
         return method(*args, **kwargs)
 
+    # TODO: Currently not used anywhere, add tests?
     def call_estimator_method(self, method_name, *args, **kwargs):
         method = getattr(self.estimator_instance, method_name)
         return method(*args, **kwargs)
 
+    # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
         pass
 
     def save(self, node_dir):
-        # Silently ignore if the module does not have a save method
-        if hasattr(self.estimator_instance, "save"):
+        if self.estimator_instance is not None:
             node_dir.mkdir(parents=True, exist_ok=True)
             return self.estimator_instance.save(node_dir)
 
     def load(self, node_dir):
-        # Silently ignore if the module does not have a load method
-        if hasattr(self.estimator_instance, "load"):
+        if self.estimator_instance is not None:
             node_dir.mkdir(parents=True, exist_ok=True)
             return self.estimator_instance.load(node_dir)
 
     def pause(self):
-        if hasattr(self.estimator_instance, "pause"):
+        if self.estimator_instance is not None:
             return self.estimator_instance.pause()
 
     def resume(self):
-        if hasattr(self.estimator_instance, "resume"):
+        if self.estimator_instance is not None:
             return self.estimator_instance.resume()
 
     def interrupt(self):
-        if hasattr(self.estimator_instance, "interrupt"):
+        if self.estimator_instance is not None:
             return self.estimator_instance.interrupt()
 
 
@@ -356,7 +349,11 @@ class DeployedGraph:
                 new_samples = self.sample_proposal(this_n, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]
-                new_samples = self.sample(this_n, conditions=new_samples)
+                new_samples_batched = self.sample(this_n, conditions=new_samples)
+                # Convert dict-of-arrays to list-of-dicts for append
+                new_samples = [
+                    {k: v[i] for k, v in new_samples_batched.items()} for i in range(this_n)
+                ]
                 ray.get(dataset_manager.append.remote(new_samples))
                 num_new_samples -= this_n
             self.resume()

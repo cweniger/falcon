@@ -236,9 +236,7 @@ class LoggerManager:
 def init_logging(cfg: DictConfig) -> None:
     """Initialize logging backends based on config.
 
-    Supports both new nested config structure and legacy flat structure:
-
-    New structure:
+    Config structure:
         logging:
           wandb:
             enabled: true
@@ -249,12 +247,6 @@ def init_logging(cfg: DictConfig) -> None:
             enabled: true
             dir: ${paths.graph}
 
-    Legacy structure (backwards compatible):
-        logging:
-          project: my_project
-          group: my_group
-          dir: ${run_dir}
-
     Args:
         cfg: OmegaConf config with logging and paths sections.
     """
@@ -264,39 +256,25 @@ def init_logging(cfg: DictConfig) -> None:
 
     factories = {}
 
-    # Check for new nested structure vs legacy flat structure
-    if "wandb" in cfg.logging:
-        # New structure
-        wandb_cfg = cfg.logging.wandb
-        local_cfg = cfg.logging.get("local", {})
+    wandb_cfg = cfg.logging.wandb
+    local_cfg = cfg.logging.get("local", {})
 
-        # WandB backend
-        wandb_enabled = wandb_cfg.get("enabled", True)
-        if wandb_enabled:
-            if not WANDB_AVAILABLE:
-                print("Warning: wandb logging enabled but wandb not installed, skipping")
-            else:
-                factories["wandb"] = create_wandb_factory(
-                    project=wandb_cfg.get("project"),
-                    group=wandb_cfg.get("group"),
-                    dir=wandb_cfg.get("dir"),
-                )
-
-        # Local backend
-        local_enabled = local_cfg.get("enabled", True)
-        if local_enabled:
-            local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
-            if local_dir:
-                factories["local"] = create_local_factory(local_dir)
-    else:
-        # Legacy flat structure
-        if WANDB_AVAILABLE:
+    # WandB backend
+    wandb_enabled = wandb_cfg.get("enabled", True)
+    if wandb_enabled:
+        if not WANDB_AVAILABLE:
+            print("Warning: wandb logging enabled but wandb not installed, skipping")
+        else:
             factories["wandb"] = create_wandb_factory(
-                project=cfg.logging.get("project"),
-                group=cfg.logging.get("group"),
-                dir=cfg.logging.get("dir"),
+                project=wandb_cfg.get("project"),
+                group=wandb_cfg.get("group"),
+                dir=wandb_cfg.get("dir"),
             )
-        local_dir = cfg.paths.get("graph")
+
+    # Local backend
+    local_enabled = local_cfg.get("enabled", True)
+    if local_enabled:
+        local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
         if local_dir:
             factories["local"] = create_local_factory(local_dir)
 

@@ -75,22 +75,6 @@ class Graph:
             self.inference_name_list, self.evidence_dict
         )
 
-    def get_resample_parents_and_graph(self, evidence):
-        evidence = evidence[:]  # Shallow copy
-        evidence_offline = []
-        resample_subgraph = []
-        while len(evidence) > 0:
-            k = evidence.pop()
-            if self.node_dict[k].resample:
-                resample_subgraph.append(k)
-                for parent in self.parents_dict[k]:
-                    evidence.append(parent)
-            else:
-                evidence_offline.append(k)
-        resample_subgraph = resample_subgraph[::-1]  # Reverse the order
-        evidence_offline = list(set(evidence_offline))  # Remove duplicates
-        return evidence_offline, resample_subgraph
-
     def get_parents(self, node_name):
         return self.parents_dict[node_name]
 

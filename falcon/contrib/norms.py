@@ -204,15 +204,18 @@ class DiagonalWhitener(torch.nn.Module):
     def _mean_var_to_scaling(self, mean, var):
         return torch.cat([0.5 * torch.log(var) + 1, mean], dim=-1)  # (..., scaling_dim)
 
+    # TODO: Currently not used anywhere, add tests?
     def get_scaling(self):
         return self._mean_var_to_scaling(
             self.running_mean, self.running_var
         )  # (scaling_dim,)
         # return torch.cat([0.1*torch.log(self.running_var)+1, self.running_mean], dim = -1)  # (scaling_dim,)
 
+    # TODO: Currently not used anywhere, add tests?
     def get_logdet_jac(self):
         return torch.log(self.running_var.sqrt()).sum(dim=-1)  # (,)
 
+    # TODO: Currently not used anywhere, add tests?
     def batch_forward(self, x):
         batch_dim = len(x)
 

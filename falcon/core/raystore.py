@@ -205,9 +205,6 @@ class DatasetManagerActor:
             ids_to_tombstone = ids_training[: -self.max_training_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-    def get_num_resims(self):
-        return self.num_resims
-
     def get_samples_by_status(self, status):
         if isinstance(status, list):
             status_ids = np.where(np.isin(self.status, status))[0]
@@ -227,19 +224,16 @@ class DatasetManagerActor:
             ids_training = ids[self.status[ids] == SampleStatus.TRAINING]
             self.status[ids_training] = SampleStatus.DISFAVOURED
 
-    def append(self, data, batched=True):
-        if batched:  # TODO: Legacy structure
-            num_new_samples = data[list(data.keys())[0]].shape[0]
-            for i in range(num_new_samples):
-                sample = {key: ray.put(value[i]) for key, value in data.items()}
-                self.ray_store.append(sample)
-        else:  # TODO: Should become default
-            num_new_samples = len(data)
-            for sample in data:
-                sample_ray_objects = {
-                    key: ray.put(value) for key, value in sample.items()
-                }
-                self.ray_store.append(sample_ray_objects)
+    def append(self, data):
+        """Append samples to the buffer.
+
+        Args:
+            data: List of dicts, each dict has {key: array} without batch dimension
+        """
+        num_new_samples = len(data)
+        for sample in data:
+            sample_ray_objects = {key: ray.put(value) for key, value in sample.items()}
+            self.ray_store.append(sample_ray_objects)
         self.status = np.append(
             self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
         )
@@ -314,16 +308,21 @@ class DatasetManagerActor:
     def initialize_samples(self, deployed_graph):
         num_initial_samples = self.num_initial_samples()
         if self.initial_samples_path is not None:
-            # Load initial samples from the specified path
+            # Load initial samples from the specified path (already list of dicts)
             initial_samples = joblib.load(self.initial_samples_path)
             num_loaded_samples = len(initial_samples)
-            self.append(initial_samples, batched=False)
+            if num_loaded_samples > 0:
+                self.append(initial_samples)
         else:
             num_loaded_samples = 0
         if num_initial_samples > num_loaded_samples:
-            samples = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            # deployed_graph.sample() returns dict-of-arrays, convert to list-of-dicts
+            samples_batched = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            n = samples_batched[list(samples_batched.keys())[0]].shape[0]
+            samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
             self.append(samples)
 
+    # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
         pass
 

@@ -233,12 +233,6 @@ def launch_mode(cfg: DictConfig) -> None:
     ray_init_args = cfg.get("ray", {}).get("init", {})
     ray.init(**ray_init_args)
 
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
-
     # Initialise logger (should be done before any other falcon code)
     init_logging(cfg)
 
@@ -292,12 +286,6 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies."""
     ray_init_args = cfg.get("ray", {}).get("init", {})
     ray.init(**ray_init_args)
-
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
 
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
