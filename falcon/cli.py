@@ -231,6 +231,8 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
 def launch_mode(cfg: DictConfig) -> None:
     """Launch mode: Full training and inference pipeline."""
     ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
     ray.init(**ray_init_args)
 
     # Initialise logger (should be done before any other falcon code)
@@ -285,6 +287,8 @@ def launch_mode(cfg: DictConfig) -> None:
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies."""
     ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
     ray.init(**ray_init_args)
 
     # Instantiate model components directly from graph
