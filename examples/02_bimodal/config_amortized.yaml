@@ -43,30 +43,30 @@ graph:
         - ['uniform', -10000.0, 10000.0]
     estimator:
       _target_: falcon.contrib.SNPE_A
-      embedding:
-         _target_: model.E
-         _input_: [x]
-      net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
-      theta_norm: true
-      use_log_update: true
-      adaptive_momentum: false
-      norm_momentum: 0.003
-
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.01
-      scheduler_patience: 16
-      lr_decay_factor: 0.5
-      early_stop_patience: 32
-
-      gamma: 0.5
-      discard_samples: false
-      log_ratio_threshold: -20
-
-      sample_reference_posterior: false
-      use_best_models_during_inference: true
-      reset_network_after_pause: false
-
+      loop:
+        num_epochs: 300
+        batch_size: 128
+        early_stop_patience: 32
+        reset_network_after_pause: false
+      network:
+        net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
+        theta_norm: true
+        norm_momentum: 0.003
+        use_log_update: true
+        adaptive_momentum: false
+        embedding:
+          _target_: model.E
+          _input_: [x]
+      optimizer:
+        lr: 0.01
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 0.5
+        discard_samples: false
+        log_ratio_threshold: -20
+        sample_reference_posterior: false
+        use_best_models_during_inference: true
     ray:
       num_gpus: 1
   

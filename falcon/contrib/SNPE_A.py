@@ -1,545 +1,425 @@
-import asyncio
-from pathlib import Path
+"""Sequential Neural Posterior Estimation (SNPE-A) implementation."""
+
 import copy
 import time
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Dict, List, Optional
 
-import torch
 import numpy as np
+import torch
+from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-import ray
-import sbi.utils  # Don't remove - needed for sbi.neural_nets.net_builders
-from sbi.neural_nets import net_builders
-
-from falcon.core.logging import log
-from falcon.core.utils import LazyLoader, RVBatch
-from falcon.core.raystore import Batch
+from falcon.core.logging import log, info, DEBUG
+from falcon.core.utils import RVBatch
+from falcon.contrib.flow import Flow
+from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
 from falcon.contrib.torch_embedding import instantiate_embedding
-from .hypercubemappingprior import HypercubeMappingPrior
-from .norms import LazyOnlineNorm
 
 
-# Network builder registry
-NET_BUILDERS = {
-    "nsf": net_builders.build_nsf,
-    "made": net_builders.build_made,
-    "maf": net_builders.build_maf,
-    "maf_rqs": net_builders.build_maf_rqs,
-    "zuko_nice": net_builders.build_zuko_nice,
-    "zuko_maf": net_builders.build_zuko_maf,
-    "zuko_nsf": net_builders.build_zuko_nsf,
-    "zuko_ncsf": net_builders.build_zuko_ncsf,
-    "zuko_sospf": net_builders.build_zuko_sospf,
-    "zuko_naf": net_builders.build_zuko_naf,
-    "zuko_unaf": net_builders.build_zuko_unaf,
-    "zuko_gf": net_builders.build_zuko_gf,
-    "zuko_bpf": net_builders.build_zuko_bpf,
-}
+# ==================== Configuration Dataclasses ====================
 
 
-class Flow(torch.nn.Module):
-    def __init__(
-        self,
-        theta,
-        s,
-        theta_norm=False,
-        norm_momentum=3e-3,
-        net_type="nsf",
-        use_log_update=False,
-        adaptive_momentum=False,
-    ):
-        super().__init__()
-        self.theta_norm = (
-            LazyOnlineNorm(
-                momentum=norm_momentum,
-                use_log_update=use_log_update,
-                adaptive_momentum=adaptive_momentum,
-            )
-            if theta_norm
-            else None
-        )
+@dataclass
+class NetworkConfig:
+    """Neural network architecture parameters."""
 
-        builder = NET_BUILDERS.get(net_type)
-        if builder is None:
-            raise ValueError(f"Unknown net_type: {net_type}. Available: {list(NET_BUILDERS.keys())}")
-        self.net = builder(theta.float(), s.float(), z_score_x=None, z_score_y=None)
-
-        if self.theta_norm is not None:
-            self.theta_norm(theta)  # Initialize normalization stats
-        self.scale = 0.2
-
-    def loss(self, theta, s):
-        if self.theta_norm is not None:
-            theta = self.theta_norm(theta)
-        theta = theta.float() * self.scale
-        loss = self.net.loss(theta, condition=s.float())
-        loss = loss - np.log(self.scale) * theta.shape[-1]
-        if self.theta_norm is not None:
-            loss = loss + torch.log(self.theta_norm.volume())
-        return loss
-
-    def sample(self, num_samples, s):
-        samples = self.net.sample((num_samples,), condition=s).detach()
-        samples = samples / self.scale
-        if self.theta_norm is not None:
-            samples = self.theta_norm.inverse(samples).detach()
-        return samples
-
-    def log_prob(self, theta, s):
-        if self.theta_norm is not None:
-            theta = self.theta_norm(theta).detach()
-        theta = theta * self.scale
-        log_prob = self.net.log_prob(theta.float(), condition=s.float())
-        log_prob = log_prob + np.log(self.scale) * theta.shape[-1]
-        if self.theta_norm is not None:
-            log_prob = log_prob - torch.log(self.theta_norm.volume().detach())
-        return log_prob
+    net_type: str = "zuko_nice"
+    theta_norm: bool = True
+    norm_momentum: float = 1e-2
+    adaptive_momentum: bool = False
+    use_log_update: bool = False
+    embedding: Optional[Any] = None
 
 
-class SNPE_A:
+@dataclass
+class OptimizerConfig:
+    """Optimizer parameters (training-time)."""
+
+    lr: float = 1e-2
+    lr_decay_factor: float = 0.1
+    scheduler_patience: int = 8
+
+
+@dataclass
+class InferenceConfig:
+    """Inference and sampling parameters."""
+
+    gamma: float = 0.5
+    discard_samples: bool = True
+    log_ratio_threshold: float = -20.0
+    sample_reference_posterior: bool = False
+    use_best_models_during_inference: bool = True
+    # Importance sampling parameters
+    num_proposals: int = 256
+    reference_samples: int = 128
+    hypercube_bound: float = 2.0
+    out_of_bounds_penalty: float = 100.0
+    nan_replacement: float = -100.0
+
+
+@dataclass
+class SNPEConfig:
+    """Top-level SNPE_A configuration."""
+
+    loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
+    inference: InferenceConfig = field(default_factory=InferenceConfig)
+    device: Optional[str] = None
+
+
+# ==================== SNPE_A Implementation ====================
+
+
+class SNPE_A(StepwiseEstimator):
+    """
+    Sequential Neural Posterior Estimation (SNPE-A).
+
+    Implementation-specific features:
+    - Dual flow architecture (conditional + marginal)
+    - Parameter space normalization via hypercube mapping
+    - Importance sampling for posterior/proposal
+    """
+
     def __init__(
         self,
         simulator_instance,
-        device=None,
-        num_epochs=100,
-        lr_decay_factor=0.1,
-        scheduler_patience=8,
-        early_stop_patience=16,
-        gamma=0.5,
-        lr=1e-2,
-        discard_samples=True,
-        theta_norm=True,
-        norm_momentum=1e-2,
-        net_type="zuko_nice",
-        sample_reference_posterior=False,
-        batch_size=128,
-        embedding=None,
-        _embedding_keywords=[],
-        theta_key=None,
-        condition_keys=None,
-        use_best_models_during_inference=True,
-        use_log_update=False,
-        adaptive_momentum=False,
-        log_ratio_threshold=-20.0,
-        reset_network_after_pause=False,
+        theta_key: Optional[str] = None,
+        condition_keys: Optional[List[str]] = None,
+        config: Optional[dict] = None,
     ):
-        self.param_dim = simulator_instance.param_dim
-        self.device = (
-            torch.device(device) if device else
-            torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        """
+        Initialize SNPE_A estimator.
+
+        Args:
+            simulator_instance: Prior/simulator instance
+            theta_key: Key for theta in batch data
+            condition_keys: Keys for condition data in batch
+            config: Configuration dict with loop, network, optimizer, inference sections
+        """
+        # Merge user config with defaults using OmegaConf structured config
+        schema = OmegaConf.structured(SNPEConfig)
+        config = OmegaConf.merge(schema, config or {})
+
+        super().__init__(
+            simulator_instance=simulator_instance,
+            loop_config=config.loop,
+            theta_key=theta_key,
+            condition_keys=condition_keys,
         )
-        if device is None:
-            print(f"Auto-detected device: {self.device}")
 
-        # Store config
-        self.num_epochs = num_epochs
-        self.batch_size = batch_size
-        self.lr_decay_factor = lr_decay_factor
-        self.scheduler_patience = scheduler_patience
-        self.early_stop_patience = early_stop_patience
-        self.discard_samples = discard_samples
-        self.gamma = gamma
-        self.lr = lr
-        self.theta_norm = theta_norm
-        self.norm_momentum = norm_momentum
-        self.adaptive_momentum = adaptive_momentum
-        self.net_type = net_type
-        self.sample_reference_posterior = sample_reference_posterior
-        self._use_best_models_during_inference = use_best_models_during_inference
-        self._use_log_update = use_log_update
-        self.log_ratio_threshold = log_ratio_threshold
-        self.reset_network_after_pause = reset_network_after_pause
+        self.config = config
 
-        # Key configuration for Batch access
-        self.theta_key = theta_key
-        # Support both new condition_keys and legacy _embedding_keywords
-        self.condition_keys = condition_keys if condition_keys is not None else _embedding_keywords
+        # Device setup
+        self.device = self._setup_device(config.device)
 
-        # Embedding
-        self._embedding = instantiate_embedding(embedding).to(self.device)
+        # Embedding network
+        # Convert to plain dict for instantiate_embedding which uses isinstance(x, dict)
+        embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
+        self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
-        # Prior/simulator
-        self.simulator_instance = simulator_instance
-
-        # Networks (initialized lazily)
-        self.networks_initialized = False
+        # Flow networks (initialized lazily)
         self._conditional_flow = None
         self._marginal_flow = None
         self._best_conditional_flow = None
         self._best_marginal_flow = None
         self._best_embedding = None
+        self._init_parameters = None
+
+        # Best loss tracking
         self.best_conditional_flow_val_loss = float("inf")
         self.best_marginal_flow_val_loss = float("inf")
 
-        # Consolidated history tracking
-        self.history = {
-            "train_ids": [],
-            "val_ids": [],
+        # Optimizer/scheduler (initialized lazily)
+        self._optimizer = None
+        self._scheduler = None
+
+        # Extended history for SNPE-specific tracking
+        self.history.update({
             "theta_mins": [],
             "theta_maxs": [],
-            "epochs": [],
-            "train_loss": [],
-            "val_loss": [],
-            "n_samples": [],
-            "elapsed_min": [],
-        }
+        })
 
-        # Async control
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()
-        self._terminated = False
-        self._break_flag = False
+    def _setup_device(self, device: Optional[str]) -> torch.device:
+        """Setup compute device."""
+        if device:
+            return torch.device(device)
+        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        info(f"Auto-detected device: {dev}", DEBUG)
+        return dev
 
-    def _create_flow(self, theta, s, is_conditional=True):
-        """Create a Flow network with standard settings."""
-        return Flow(
-            theta,
-            s if is_conditional else s * 0,
-            theta_norm=self.theta_norm,
-            norm_momentum=self.norm_momentum,
-            net_type=self.net_type,
-            use_log_update=self._use_log_update,
-            adaptive_momentum=self.adaptive_momentum,
-        )
+    # ==================== Network Initialization ====================
 
-    def _initialize_networks(self, theta, conditions: dict):
+    def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
+        """Initialize flow networks and optimizer."""
         self._init_parameters = [theta, conditions]
-        print("Initializing networks...")
-        print("GPU available:", torch.cuda.is_available())
+        info("Initializing networks...", DEBUG)
+        info(f"GPU available: {torch.cuda.is_available()}", DEBUG)
 
-        conditions = {k: v.to(self.device) for k, v in conditions.items()}
-        s = self._embed(conditions, train=False).detach()
-        theta = theta.to(self.device)
+        cfg_net = self.config.network
+        cfg_opt = self.config.optimizer
 
-        # Training networks
-        self._conditional_flow = self._create_flow(theta, s, is_conditional=True)
+        # Embed conditions to get embedding dimension
+        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+        s = self._embed(conditions_device, train=False).detach()
+        theta_device = theta.to(self.device)
+
+        # Create flow networks
+        self._conditional_flow = self._create_flow(theta_device, s, is_conditional=True)
         self._conditional_flow.to(self.device)
 
-        self._marginal_flow = self._create_flow(theta, s, is_conditional=False)
+        self._marginal_flow = self._create_flow(theta_device, s, is_conditional=False)
         self._marginal_flow.to(self.device)
 
-        # Best-fit networks (copies of training networks)
-        self._best_conditional_flow = self._create_flow(theta, s, is_conditional=True)
+        # Best-fit copies
+        self._best_conditional_flow = self._create_flow(theta_device, s, is_conditional=True)
         self._best_conditional_flow.to(self.device)
         self._best_conditional_flow.load_state_dict(self._conditional_flow.state_dict())
 
-        self._best_marginal_flow = self._create_flow(theta, s, is_conditional=False)
+        self._best_marginal_flow = self._create_flow(theta_device, s, is_conditional=False)
         self._best_marginal_flow.to(self.device)
         self._best_marginal_flow.load_state_dict(self._marginal_flow.state_dict())
 
         self._best_embedding = copy.deepcopy(self._embedding)
 
-        # Optimizer
+        # Optimizer and scheduler
         parameters = (
-            list(self._conditional_flow.parameters()) +
-            list(self._marginal_flow.parameters()) +
-            list(self._embedding.parameters())
+            list(self._conditional_flow.parameters())
+            + list(self._marginal_flow.parameters())
+            + list(self._embedding.parameters())
         )
-        self._optimizer = AdamW(parameters, lr=self.lr)
+        self._optimizer = AdamW(parameters, lr=cfg_opt.lr)
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
-            factor=self.lr_decay_factor,
-            patience=self.scheduler_patience,
+            factor=cfg_opt.lr_decay_factor,
+            patience=cfg_opt.scheduler_patience,
         )
 
         self.networks_initialized = True
-        print("...done initializing networks.")
+        info("Networks initialized.", DEBUG)
 
-    def _update_best_weights(self, network_type="conditional"):
-        """Copy current network weights to best-fit checkpoint."""
-        if network_type == "conditional":
-            self._best_conditional_flow.load_state_dict(
-                {k: v.clone() for k, v in self._conditional_flow.state_dict().items()}
-            )
-            self._best_embedding.load_state_dict(
-                {k: v.clone() for k, v in self._embedding.state_dict().items()}
-            )
-        else:
-            self._best_marginal_flow.load_state_dict(
-                {k: v.clone() for k, v in self._marginal_flow.state_dict().items()}
-            )
-
-    def _embed(self, conditions: dict, train=True, use_best_fit=False):
-        """Run conditions through embedding network.
-
-        Args:
-            conditions: Dict mapping condition keys to tensors {key: tensor}
-            train: Whether to set embedding to train mode
-            use_best_fit: Whether to use best-fit embedding weights
-        """
-        embedding = (
-            self._best_embedding
-            if use_best_fit and self._best_embedding is not None
-            else self._embedding
+    def _create_flow(self, theta, s, is_conditional=True):
+        """Create a Flow network with current config."""
+        cfg = self.config.network
+        return Flow(
+            theta,
+            s if is_conditional else s * 0,
+            theta_norm=cfg.theta_norm,
+            norm_momentum=cfg.norm_momentum,
+            net_type=cfg.net_type,
+            use_log_update=cfg.use_log_update,
+            adaptive_momentum=cfg.adaptive_momentum,
         )
-        embedding.train() if train else embedding.eval()
-        return embedding(conditions)
 
-    def _to_torch(self, x):
-        """Convert numpy array to torch tensor.
+    # ==================== Train/Val Steps ====================
 
-        Args:
-            x: numpy array or torch tensor
-
-        Returns:
-            torch tensor
-        """
-        if isinstance(x, np.ndarray):
-            return torch.from_numpy(x)
-        return x
-
-    def _unpack_batch(self, batch):
-        """Unpack batch into (ids, theta, theta_logprob, conditions).
-
-        Supports both new Batch objects with dictionary access and
-        legacy tuple format for backward compatibility.
+    def _unpack_batch(self, batch, phase: str):
+        """Unpack batch data and convert to tensors.
 
         Args:
-            batch: Either a Batch object or tuple (ids, theta, logprob, *conditions)
+            batch: Batch object with theta, logprob, and conditions
+            phase: "train" or "val" for logging and history
 
         Returns:
-            Tuple of (ids, theta, theta_logprob, conditions_dict)
+            Tuple of (ids, theta, theta_logprob, conditions, u, u_device, conditions_device)
         """
-        if isinstance(batch, Batch):
-            # New Batch format - dictionary access with numpy arrays
-            theta_key = self.theta_key
-            ids = batch._ids  # Access internal IDs for logging (numpy array)
-            # Convert numpy arrays to torch tensors
-            theta = self._to_torch(batch[theta_key])
-            theta_logprob = self._to_torch(batch[f"{theta_key}.logprob"])
-            # Build conditions dict from condition_keys, converting to torch
-            conditions = {
-                k: self._to_torch(batch[k]) for k in self.condition_keys if k in batch
-            }
-            return ids, theta, theta_logprob, conditions, batch
-        else:
-            # Legacy tuple format
-            ids, theta, theta_logprob = batch[0], batch[1], batch[2]
-            inf_conditions = batch[3:]
-            # Convert to dict for embedding
-            conditions = {k: inf_conditions[i] for i, k in enumerate(self.condition_keys)}
-            return ids, theta, theta_logprob, conditions, None
+        ids = batch._ids
+        theta = torch.from_numpy(batch[self.theta_key])
+        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        conditions = {
+            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+        }
 
-    def _compute_discard_mask(self, theta, theta_logprob, conditions):
-        """Compute boolean mask of samples to discard based on log-likelihood ratio.
+        # Record IDs for history
+        ts = time.time()
+        self.history[f"{phase}_ids"].extend((ts, id) for id in ids.tolist())
 
-        Internal method used with new Batch format. Works with conditions as dict.
+        log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
+        log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
 
-        Args:
-            theta: Parameter tensor
-            theta_logprob: Log probability tensor from proposal
-            conditions: Dict of condition tensors (already on device)
-
-        Returns:
-            Boolean mask where True = discard sample
-        """
-        if not self.discard_samples:
-            return None
-
+        # Transform to hypercube space
         u = self.simulator_instance.inverse(theta)
-        s = self._embed(conditions, train=False, use_best_fit=True)
 
-        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
-        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
+        # Move to device
+        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+        u_device = u.to(self.device)
 
-        u = u.to(self.device)
-        self._conditional_flow.eval()
-        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
-        log_ratio = log_prob - theta_logprob.cpu()
-        return log_ratio < self.log_ratio_threshold
+        return ids, theta, theta_logprob, conditions, u, u_device, conditions_device
 
-    def sample_prior(self, num_samples, parent_conditions=[]):
+    def _compute_flow_losses(self, u_device, s, train: bool):
+        """Compute conditional and marginal flow losses.
+
+        Args:
+            u_device: Transformed parameters on device
+            s: Embedded conditions
+            train: Whether in training mode
+
+        Returns:
+            Tuple of (loss_cond, loss_marg) tensors
+        """
+        if train:
+            self._conditional_flow.train()
+            self._marginal_flow.train()
+        else:
+            self._conditional_flow.eval()
+            self._marginal_flow.eval()
+
+        loss_cond = self._conditional_flow.loss(u_device, s).mean()
+        # Zero out conditions for marginal flow (detach in train mode to avoid backprop)
+        s_marginal = s.detach() * 0 if train else s * 0
+        loss_marg = self._marginal_flow.loss(u_device, s_marginal).mean()
+
+        return loss_cond, loss_marg
+
+    def train_step(self, batch) -> Dict[str, float]:
+        """SNPE-A training step with gradient update and optional sample discarding."""
+        ids, theta, theta_logprob, conditions, u, u_device, conditions_device = \
+            self._unpack_batch(batch, "train")
+
+        # Initialize networks on first batch
+        if not self.networks_initialized:
+            self._initialize_networks(u, conditions)
+
+        # Embed conditions
+        s = self._embed(conditions_device, train=True)
+
+        # Track theta ranges
+        with torch.no_grad():
+            self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
+            self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
+
+        # Forward and backward pass
+        self._optimizer.zero_grad()
+        loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=True)
+        (loss_cond + loss_marg).backward()
+        self._optimizer.step()
+
+        # Discard samples based on log-likelihood ratio
+        if self.config.inference.discard_samples:
+            discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
+            batch.discard(discard_mask)
+
+        return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
+
+    def val_step(self, batch) -> Dict[str, float]:
+        """SNPE-A validation step without gradient computation."""
+        _, theta, theta_logprob, conditions, u, u_device, conditions_device = \
+            self._unpack_batch(batch, "val")
+
+        # Embed conditions (eval mode)
+        s = self._embed(conditions_device, train=False)
+
+        # Compute losses without gradients
+        with torch.no_grad():
+            loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False)
+
+        return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
+
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+        """Update best weights and scheduler."""
+        val_loss = val_metrics.get("loss", float("inf"))
+        val_aux_loss = val_metrics.get("loss_aux", float("inf"))
+
+        # Update best conditional flow
+        if val_loss < self.best_conditional_flow_val_loss:
+            self.best_conditional_flow_val_loss = val_loss
+            self._update_best_weights("conditional")
+            log({"checkpoint:conditional": epoch})
+
+        # Update best marginal flow
+        if val_aux_loss < self.best_marginal_flow_val_loss:
+            self.best_marginal_flow_val_loss = val_aux_loss
+            self._update_best_weights("marginal")
+            log({"checkpoint:marginal": epoch})
+
+        # LR scheduler step
+        self._scheduler.step(val_loss)
+        log({"lr": self._optimizer.param_groups[0]["lr"]})
+
+    # ==================== Sampling Methods ====================
+
+    def sample_prior(self, num_samples: int, parent_conditions: Optional[List] = None) -> RVBatch:
         """Sample from the prior distribution."""
-        assert parent_conditions == [], "Conditions are not supported."
+        if parent_conditions:
+            raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
-        logprob = np.ones(num_samples) * (-np.log(4) ** self.param_dim)
+        # Log probability for uniform prior over hypercube [-bound, bound]^d
+        bound = self.config.inference.hypercube_bound
+        logprob = np.ones(num_samples) * (-np.log(2 * bound) ** self.param_dim)
         return RVBatch(samples, logprob=logprob)
 
-    async def train(self, buffer):
-        """Train the neural spline flow.
+    def sample_posterior(
+        self,
+        num_samples: int,
+        parent_conditions: Optional[List] = None,
+        evidence_conditions: Optional[List] = None,
+    ) -> RVBatch:
+        """Sample from the posterior distribution q(theta|x)."""
+        # Fall back to prior if networks not yet initialized (training hasn't started)
+        if not self.networks_initialized:
+            return self.sample_prior(num_samples, parent_conditions)
 
-        Args:
-            buffer: BufferView providing access to training/validation data
-        """
-        # Request dataloaders with the keys we need
-        keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
-        dataloader_train = buffer.train_loader(keys, batch_size=self.batch_size)
-        dataloader_val = buffer.val_loader(keys, batch_size=self.batch_size)
+        samples, logprob = self._importance_sample(
+            num_samples,
+            mode="posterior",
+            parent_conditions=parent_conditions or [],
+            evidence_conditions=evidence_conditions or [],
+        )
+        return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
-        best_val_loss = float("inf")
-        n_train_batch = 0
-        n_val_batch = 0
-        counter_post = 0
-        counter_aux = 0
-        t0 = time.perf_counter()
+    def sample_proposal(
+        self,
+        num_samples: int,
+        parent_conditions: Optional[List] = None,
+        evidence_conditions: Optional[List] = None,
+    ) -> RVBatch:
+        """Sample from the widened proposal distribution for adaptive resampling."""
+        # Fall back to prior if networks not yet initialized (training hasn't started)
+        if not self.networks_initialized:
+            return self.sample_prior(num_samples, parent_conditions)
 
-        for epoch in range(self.num_epochs):
-            print(f"Epoch {epoch+1}/{self.num_epochs}")
-            log({"epoch": epoch + 1})
+        cfg_inf = self.config.inference
+        parent_conditions = parent_conditions or []
+        evidence_conditions = evidence_conditions or []
 
-            # Training loop
-            loss_train_avg = 0
-            loss_aux_avg = 0
-            num_batches = 0
+        if cfg_inf.sample_reference_posterior:
+            post_samples, _ = self._importance_sample(
+                cfg_inf.reference_samples,
+                mode="posterior",
+                parent_conditions=parent_conditions,
+                evidence_conditions=evidence_conditions,
+            )
+            mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
+            log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
+            log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
 
-            for batch in dataloader_train:
-                log({"train:step": n_train_batch})
-                n_train_batch += 1
+        samples, logprob = self._importance_sample(
+            num_samples,
+            mode="proposal",
+            parent_conditions=parent_conditions,
+            evidence_conditions=evidence_conditions,
+        )
+        log({
+            "sample_proposal:mean": samples.mean().item(),
+            "sample_proposal:std": samples.std().item(),
+            "sample_proposal:logprob": logprob.mean().item(),
+        })
+        return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
-                # Unpack batch (supports both Batch objects and legacy tuples)
-                ids, theta, theta_logprob, conditions, batch_obj = self._unpack_batch(batch)
-
-                ts = time.time()
-                if hasattr(ids, 'numpy'):
-                    self.history["train_ids"].extend((ts, id) for id in ids.numpy().tolist())
-                else:
-                    self.history["train_ids"].extend((ts, id) for id in ids.tolist())
-
-                log({"train:theta_logprob_min": theta_logprob.min().item()})
-                log({"train:theta_logprob_max": theta_logprob.max().item()})
-
-                u = self.simulator_instance.inverse(theta)
-                if not self.networks_initialized:
-                    self._initialize_networks(u, conditions)
-
-                self._optimizer.zero_grad()
-                # Move conditions to device
-                conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-                s = self._embed(conditions_device, train=True)
-                uc = u.to(self.device)
-                sc = s.to(self.device)
-
-                # Track theta ranges
-                with torch.no_grad():
-                    self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
-                    self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
-
-                # Compute losses
-                self._conditional_flow.train()
-                loss_train = self._conditional_flow.loss(uc, sc).mean()
-                log({"train:loss": loss_train.item()})
-
-                self._marginal_flow.train()
-                loss_aux = self._marginal_flow.loss(uc, sc.detach() * 0).mean()
-                log({"train:loss_aux": loss_aux.item()})
-
-                (loss_train + loss_aux).backward()
-                self._optimizer.step()
-
-                num_batches += 1
-                loss_train_avg += loss_train.item()
-                loss_aux_avg += loss_aux.item()
-
-                # Handle sample discarding via batch.discard()
-                if batch_obj is not None:
-                    discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
-                    batch_obj.discard(discard_mask)
-
-                await asyncio.sleep(0)
-                await self._pause_event.wait()
-                if self._break_flag:
-                    self._break_flag = False
-                    break
-
-            loss_train_avg /= num_batches
-            loss_aux_avg /= num_batches
-
-            # Validation loop
-            val_post_loss = 0
-            val_aux_loss = 0
-            num_val = 0
-
-            for batch in dataloader_val:
-                log({"val:step": n_val_batch})
-                n_val_batch += 1
-
-                # Unpack batch (supports both Batch objects and legacy tuples)
-                ids, theta, theta_logprob, conditions, _ = self._unpack_batch(batch)
-
-                ts = time.time()
-                if hasattr(ids, 'numpy'):
-                    self.history["val_ids"].extend((ts, id) for id in ids.numpy().tolist())
-                else:
-                    self.history["val_ids"].extend((ts, id) for id in ids.tolist())
-
-                log({"val:theta_logprob_min": theta_logprob.min().item()})
-                log({"val:theta_logprob_max": theta_logprob.max().item()})
-
-                u = self.simulator_instance.inverse(theta)
-                conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-                s = self._embed(conditions_device, train=False)
-                uc = u.to(self.device)
-                sc = s.to(self.device)
-
-                self._conditional_flow.eval()
-                val_post_loss += self._conditional_flow.loss(uc, sc).sum().item()
-
-                self._marginal_flow.eval()
-                val_aux_loss += self._marginal_flow.loss(uc, sc * 0).sum().item()
-
-                num_val += uc.shape[0]
-                await asyncio.sleep(0)
-                await self._pause_event.wait()
-                if self._break_flag:
-                    self._break_flag = False
-                    break
-
-            val_post_loss /= num_val
-            val_aux_loss /= num_val
-
-            log({"val:loss": val_post_loss})
-            log({"val:loss_aux": val_aux_loss})
-
-            # Checkpointing
-            if val_post_loss < self.best_conditional_flow_val_loss:
-                self.best_conditional_flow_val_loss = val_post_loss
-                self._update_best_weights("conditional")
-                log({"checkpoint:count": counter_post})
-                counter_post += 1
-
-            if val_aux_loss < self.best_marginal_flow_val_loss:
-                self.best_marginal_flow_val_loss = val_aux_loss
-                self._update_best_weights("marginal")
-                log({"checkpoint:count_aux": counter_aux})
-                counter_aux += 1
-
-            self._scheduler.step(val_post_loss)
-            log({"lr": self._optimizer.param_groups[0]["lr"]})
-
-            # Early stopping
-            if val_post_loss < best_val_loss:
-                best_val_loss = val_post_loss
-                epochs_no_improve = 0
-            else:
-                epochs_no_improve += 1
-
-            # Record history
-            self.history["epochs"].append(epoch + 1)
-            self.history["train_loss"].append(loss_train_avg)
-            self.history["val_loss"].append(val_post_loss)
-
-            try:
-                stats = buffer.get_stats()
-                self.history["n_samples"].append(stats["total_length"])
-            except Exception:
-                pass
-
-            elapsed = (time.perf_counter() - t0) / 60.0
-            self.history["elapsed_min"].append(elapsed)
-            log({"elapsed_minutes": elapsed})
-
-            if epochs_no_improve >= self.early_stop_patience:
-                print("Early stopping triggered.")
-                break
-
-            await self._pause_event.wait()
-            if self._terminated:
-                break
-
-    def _importance_sample(self, num_samples, mode="posterior", parent_conditions=[], evidence_conditions=[]):
+    def _importance_sample(
+        self,
+        num_samples: int,
+        mode: str = "posterior",
+        parent_conditions: List = [],
+        evidence_conditions: List = [],
+    ):
         """Sample using importance sampling."""
+        cfg_inf = self.config.inference
+
         conditions_list = parent_conditions + evidence_conditions
         assert conditions_list, "Conditions must be provided."
         # Convert list to dict using condition_keys
@@ -547,7 +427,9 @@ class SNPE_A:
             k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
         }
 
-        if self._use_best_models_during_inference:
+        # Use best models if available and configured, otherwise fall back to current
+        use_best = cfg_inf.use_best_models_during_inference and self._best_conditional_flow is not None
+        if use_best:
             conditional_net = self._best_conditional_flow
             marginal_net = self._best_marginal_flow
             s = self._embed(conditions, train=False, use_best_fit=True)
@@ -559,9 +441,8 @@ class SNPE_A:
         s = s.expand(num_samples, *s.shape[1:])
 
         # Generate proposals from conditional flow
-        num_proposals = 256
         conditional_net.eval()
-        samples_proposals = conditional_net.sample(num_proposals, s).detach()
+        samples_proposals = conditional_net.sample(cfg_inf.num_proposals, s).detach()
 
         log({
             "importance_sample:proposal_mean": samples_proposals.mean().item(),
@@ -573,17 +454,19 @@ class SNPE_A:
         marginal_net.eval()
         log_prob_marg = marginal_net.log_prob(samples_proposals, s * 0)
 
-        # Mask samples outside [-2, 2] box
-        mask = (samples_proposals < -2) | (samples_proposals > 2)
-        mask = mask.any(dim=-1).float() * 100
+        # Mask samples outside hypercube bounds
+        bound = cfg_inf.hypercube_bound
+        mask = (samples_proposals < -bound) | (samples_proposals > bound)
+        mask = mask.any(dim=-1).float() * cfg_inf.out_of_bounds_penalty
 
         # Compute importance weights
         if mode == "proposal":
-            log_weights = -1.0 / (1.0 + self.gamma) * log_prob_cond - mask
+            log_weights = -1.0 / (1.0 + cfg_inf.gamma) * log_prob_cond - mask
         else:  # "posterior" - reweight by marginal
             log_weights = -log_prob_marg - mask
 
-        log_weights = torch.nan_to_num(log_weights, nan=-100.0, neginf=-100.0)
+        nan_val = cfg_inf.nan_replacement
+        log_weights = torch.nan_to_num(log_weights, nan=nan_val, neginf=nan_val)
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
         weights = torch.exp(log_weights)
 
@@ -600,63 +483,11 @@ class SNPE_A:
 
         return samples, logprob.detach()
 
-    def sample_posterior(self, num_samples, parent_conditions=[], evidence_conditions=[]):
-        """Sample from the posterior distribution q(θ|x)."""
-        samples, logprob = self._importance_sample(
-            num_samples, mode="posterior",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
-        return RVBatch(samples.numpy(), logprob=logprob.numpy())
+    # ==================== Save/Load ====================
 
-    def sample_proposal(self, num_samples, parent_conditions=[], evidence_conditions=[]):
-        """Sample from the widened proposal distribution for adaptive resampling."""
-        if self.sample_reference_posterior:
-            post_samples, _ = self._importance_sample(
-                128, mode="posterior",
-                parent_conditions=parent_conditions,
-                evidence_conditions=evidence_conditions,
-            )
-            mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
-            log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
-            log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
-
-        samples, logprob = self._importance_sample(
-            num_samples, mode="proposal",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
-        log({
-            "sample_proposal:mean": samples.mean().item(),
-            "sample_proposal:std": samples.std().item(),
-            "sample_proposal:logprob": logprob.mean().item(),
-        })
-        return RVBatch(samples.numpy(), logprob=logprob.numpy())
-
-    def get_discard_mask(self, theta, theta_logprob, parent_conditions=[], evidence_conditions=[]):
-        """Return boolean mask of low-likelihood samples to discard."""
-        if not self.discard_samples:
-            return torch.zeros(len(theta), dtype=torch.bool)
-
-        conditions_list = parent_conditions + evidence_conditions
-        u = self.simulator_instance.inverse(theta)
-        # Convert list to dict using condition_keys
-        conditions = {
-            k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
-        }
-        s = self._embed(conditions, train=False, use_best_fit=True)
-
-        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
-        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
-
-        u = u.to(self.device)
-        self._conditional_flow.eval()
-        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
-        log_ratio = log_prob - theta_logprob
-        return log_ratio < self.log_ratio_threshold
-
-    def save(self, node_dir: Path):
-        print("Saving:", str(node_dir))
+    def save(self, node_dir: Path) -> None:
+        """Save SNPE-A state."""
+        info(f"Saving: {node_dir}", DEBUG)
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
@@ -678,26 +509,62 @@ class SNPE_A:
         if self._best_embedding is not None:
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
 
-    def load(self, node_dir: Path):
-        print("Loading:", str(node_dir))
+    def load(self, node_dir: Path) -> None:
+        """Load SNPE-A state."""
+        info(f"Loading: {node_dir}", DEBUG)
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 
-        self._best_conditional_flow.load_state_dict(torch.load(node_dir / "conditional_flow.pth"))
-        self._best_marginal_flow.load_state_dict(torch.load(node_dir / "marginal_flow.pth"))
+        self._best_conditional_flow.load_state_dict(
+            torch.load(node_dir / "conditional_flow.pth")
+        )
+        self._best_marginal_flow.load_state_dict(
+            torch.load(node_dir / "marginal_flow.pth")
+        )
 
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
 
-    def pause(self):
-        self._pause_event.clear()
+    # ==================== Private Helpers ====================
 
-    def resume(self, reset_network=False):
-        if self.reset_network_after_pause:
-            self.networks_initialized = False
-            self._break_flag = True
-        self._pause_event.set()
+    def _embed(self, conditions: Dict, train: bool = True, use_best_fit: bool = False):
+        """Run conditions through embedding network."""
+        embedding = (
+            self._best_embedding
+            if use_best_fit and self._best_embedding is not None
+            else self._embedding
+        )
+        embedding.train() if train else embedding.eval()
+        return embedding(conditions)
 
-    def interrupt(self):
-        self._terminated = True
-        self._pause_event.set()
+    def _update_best_weights(self, network_type: str) -> None:
+        """Copy current network weights to best-fit checkpoint."""
+        if network_type == "conditional":
+            self._best_conditional_flow.load_state_dict(
+                {k: v.clone() for k, v in self._conditional_flow.state_dict().items()}
+            )
+            self._best_embedding.load_state_dict(
+                {k: v.clone() for k, v in self._embedding.state_dict().items()}
+            )
+        else:
+            self._best_marginal_flow.load_state_dict(
+                {k: v.clone() for k, v in self._marginal_flow.state_dict().items()}
+            )
+
+    def _compute_discard_mask(
+        self, theta: torch.Tensor, theta_logprob: torch.Tensor, conditions: Dict
+    ):
+        """Compute boolean mask of samples to discard based on log-likelihood ratio."""
+        cfg_inf = self.config.inference
+
+        u = self.simulator_instance.inverse(theta)
+        s = self._embed(conditions, train=False, use_best_fit=True)
+
+        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
+        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
+
+        u = u.to(self.device)
+        self._conditional_flow.eval()
+        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
+        log_ratio = log_prob - theta_logprob.cpu()
+        return log_ratio < cfg_inf.log_ratio_threshold

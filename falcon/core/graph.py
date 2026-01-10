@@ -1,6 +1,8 @@
-from omegaconf import OmegaConf
-import numpy as np
 import os
+import warnings
+
+import numpy as np
+from omegaconf import OmegaConf
 
 
 class Node:
@@ -9,14 +11,14 @@ class Node:
         name,
         simulator_cls,
         estimator_cls=None,
-        parents=[],
-        evidence=[],
-        scaffolds=[],
+        parents=None,
+        evidence=None,
+        scaffolds=None,
         observed=False,
         resample=False,
-        simulator_config={},
-        estimator_config={},
-        actor_config={},
+        simulator_config=None,
+        estimator_config=None,
+        actor_config=None,
         num_actors=1,
     ):
         """Node definition for a graphical model.
@@ -36,16 +38,16 @@ class Node:
         self.simulator_cls = simulator_cls
         self.estimator_cls = estimator_cls
 
-        self.parents = parents
-        self.evidence = evidence
-        self.scaffolds = scaffolds
+        self.parents = parents or []
+        self.evidence = evidence or []
+        self.scaffolds = scaffolds or []
         self.observed = observed
         self.resample = resample
         self.train = self.estimator_cls is not None
 
-        self.simulator_config = simulator_config
-        self.estimator_config = estimator_config
-        self.actor_config = actor_config
+        self.simulator_config = simulator_config or {}
+        self.estimator_config = estimator_config or {}
+        self.actor_config = actor_config or {}
         self.num_actors = num_actors
 
 
@@ -74,22 +76,6 @@ class Graph:
         self.sorted_inference_node_names = self._topological_sort(
             self.inference_name_list, self.evidence_dict
         )
-
-    def get_resample_parents_and_graph(self, evidence):
-        evidence = evidence[:]  # Shallow copy
-        evidence_offline = []
-        resample_subgraph = []
-        while len(evidence) > 0:
-            k = evidence.pop()
-            if self.node_dict[k].resample:
-                resample_subgraph.append(k)
-                for parent in self.parents_dict[k]:
-                    evidence.append(parent)
-            else:
-                evidence_offline.append(k)
-        resample_subgraph = resample_subgraph[::-1]  # Reverse the order
-        evidence_offline = list(set(evidence_offline))  # Remove duplicates
-        return evidence_offline, resample_subgraph
 
     def get_parents(self, node_name):
         return self.parents_dict[node_name]
@@ -192,6 +178,64 @@ def CompositeNode(names, module, **kwargs):
     return node_comp, *nodes
 
 
+# Valid keys for node configuration
+_VALID_NODE_KEYS = frozenset({
+    "parents", "evidence", "scaffolds", "observed", "resample",
+    "simulator", "estimator", "ray", "num_actors",
+})
+
+
+def _validate_node_config(node_name: str, node_config: dict) -> None:
+    """Validate a node configuration, raising errors or warnings as appropriate.
+
+    Args:
+        node_name: Name of the node being validated
+        node_config: Configuration dictionary for the node
+
+    Raises:
+        ValueError: If required fields are missing
+    """
+    # Check for unknown keys (likely typos)
+    unknown_keys = set(node_config.keys()) - _VALID_NODE_KEYS
+    if unknown_keys:
+        warnings.warn(
+            f"Node '{node_name}' has unknown config keys: {unknown_keys}. "
+            f"Valid keys are: {sorted(_VALID_NODE_KEYS)}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    # Require simulator
+    if "simulator" not in node_config:
+        raise ValueError(
+            f"Node '{node_name}' is missing required 'simulator' field."
+        )
+
+
+def _validate_node_references(nodes: list, node_names: set) -> None:
+    """Validate that all node references (parents, evidence, scaffolds) exist.
+
+    Args:
+        nodes: List of Node objects
+        node_names: Set of all node names in the graph
+
+    Raises:
+        ValueError: If a referenced node does not exist
+    """
+    for node in nodes:
+        for ref_type, refs in [
+            ("parents", node.parents),
+            ("evidence", node.evidence),
+            ("scaffolds", node.scaffolds),
+        ]:
+            for ref in refs:
+                if ref not in node_names:
+                    raise ValueError(
+                        f"Node '{node.name}' references unknown {ref_type[:-1]} '{ref}'. "
+                        f"Available nodes: {sorted(node_names)}"
+                    )
+
+
 def create_graph_from_config(graph_config, _cfg=None):
     """Create a computational graph from YAML configuration.
 
@@ -201,11 +245,17 @@ def create_graph_from_config(graph_config, _cfg=None):
 
     Returns:
         Graph: The computational graph
+
+    Raises:
+        ValueError: If configuration is invalid (missing required fields, unknown references)
     """
     nodes = []
     observations = {}
 
     for node_name, node_config in graph_config.items():
+        # Validate configuration
+        _validate_node_config(node_name, node_config)
+
         # Extract node parameters
         parents = node_config.get("parents", [])
         evidence = node_config.get("evidence", [])
@@ -274,6 +324,10 @@ def create_graph_from_config(graph_config, _cfg=None):
         )
 
         nodes.append(node)
+
+    # Validate node references
+    node_names = {node.name for node in nodes}
+    _validate_node_references(nodes, node_names)
 
     # Create and return the graph
     return Graph(nodes), observations

@@ -6,6 +6,9 @@ from .logger import (
     NullBackend,
 )
 
+# Base estimator interface
+from .base_estimator import BaseEstimator
+
 # Backend implementations
 from .local_logger import (
     LocalFileBackend,

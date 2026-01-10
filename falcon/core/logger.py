@@ -22,6 +22,9 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import ray
 from omegaconf import DictConfig
 
+# Module-level reference to keep the logger actor alive
+_logger_manager_ref = None
+
 
 class LoggerBackend(ABC):
     """Abstract base class for logging backends.
@@ -226,6 +229,24 @@ class LoggerManager:
             for backend in self.actor_backends[actor_id].values():
                 backend.log.remote(metrics, step=step, walltime=walltime)
 
+    def info(
+        self,
+        message: str,
+        level: int = 20,
+        actor_id: str = None,
+    ) -> None:
+        """Log text message to all backends for an actor.
+
+        Args:
+            message: Text message to log
+            level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
+            actor_id: Actor identifier
+        """
+        walltime = time.time()
+        if actor_id in self.actor_backends:
+            for backend in self.actor_backends[actor_id].values():
+                backend.info.remote(message, level=level, walltime=walltime)
+
     def shutdown(self) -> None:
         """Shutdown all backends for all actors."""
         for backends in self.actor_backends.values():
@@ -236,9 +257,7 @@ class LoggerManager:
 def init_logging(cfg: DictConfig) -> None:
     """Initialize logging backends based on config.
 
-    Supports both new nested config structure and legacy flat structure:
-
-    New structure:
+    Config structure:
         logging:
           wandb:
             enabled: true
@@ -249,12 +268,6 @@ def init_logging(cfg: DictConfig) -> None:
             enabled: true
             dir: ${paths.graph}
 
-    Legacy structure (backwards compatible):
-        logging:
-          project: my_project
-          group: my_group
-          dir: ${run_dir}
-
     Args:
         cfg: OmegaConf config with logging and paths sections.
     """
@@ -264,47 +277,36 @@ def init_logging(cfg: DictConfig) -> None:
 
     factories = {}
 
-    # Check for new nested structure vs legacy flat structure
-    if "wandb" in cfg.logging:
-        # New structure
-        wandb_cfg = cfg.logging.wandb
-        local_cfg = cfg.logging.get("local", {})
+    wandb_cfg = cfg.logging.wandb
+    local_cfg = cfg.logging.get("local", {})
 
-        # WandB backend
-        wandb_enabled = wandb_cfg.get("enabled", True)
-        if wandb_enabled:
-            if not WANDB_AVAILABLE:
-                print("Warning: wandb logging enabled but wandb not installed, skipping")
-            else:
-                factories["wandb"] = create_wandb_factory(
-                    project=wandb_cfg.get("project"),
-                    group=wandb_cfg.get("group"),
-                    dir=wandb_cfg.get("dir"),
-                )
-
-        # Local backend
-        local_enabled = local_cfg.get("enabled", True)
-        if local_enabled:
-            local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
-            if local_dir:
-                factories["local"] = create_local_factory(local_dir)
-    else:
-        # Legacy flat structure
-        if WANDB_AVAILABLE:
+    # WandB backend
+    wandb_enabled = wandb_cfg.get("enabled", True)
+    if wandb_enabled:
+        if not WANDB_AVAILABLE:
+            print("Warning: wandb logging enabled but wandb not installed, skipping")
+        else:
             factories["wandb"] = create_wandb_factory(
-                project=cfg.logging.get("project"),
-                group=cfg.logging.get("group"),
-                dir=cfg.logging.get("dir"),
+                project=wandb_cfg.get("project"),
+                group=wandb_cfg.get("group"),
+                dir=wandb_cfg.get("dir"),
             )
-        local_dir = cfg.paths.get("graph")
+
+    # Local backend
+    local_enabled = local_cfg.get("enabled", True)
+    if local_enabled:
+        local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
         if local_dir:
             factories["local"] = create_local_factory(local_dir)
 
     # Start the logger manager
     if factories:
-        LoggerManager.options(
-            name="falcon:global_logger", lifetime="detached"
-        ).remote(backend_factories=factories)
+        global _logger_manager_ref
+        _logger_manager_ref = LoggerManager.options(name="falcon:global_logger").remote(
+            backend_factories=factories
+        )
+        # Wait for actor to be fully initialized before returning
+        ray.get(_logger_manager_ref.__ray_ready__.remote())
 
 
 def finish_logging() -> None:

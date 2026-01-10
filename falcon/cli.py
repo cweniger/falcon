@@ -25,6 +25,7 @@ import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
 from falcon.core.logger import init_logging
+from falcon.core.logging import initialize_logging_for
 from falcon.core.run_name import generate_run_dir
 
 
@@ -231,16 +232,14 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
 def launch_mode(cfg: DictConfig) -> None:
     """Launch mode: Full training and inference pipeline."""
     ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
     ray.init(**ray_init_args)
-
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
 
     # Initialise logger (should be done before any other falcon code)
     init_logging(cfg)
+    # Capture driver stdout/stderr to driver/output.log (keep terminal output too)
+    initialize_logging_for("driver", keep_original=True)
 
     ########################
     ### Model definition ###
@@ -291,13 +290,13 @@ def launch_mode(cfg: DictConfig) -> None:
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies."""
     ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
     ray.init(**ray_init_args)
 
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
+    # Initialise logger and capture driver output
+    init_logging(cfg)
+    initialize_logging_for("driver", keep_original=True)
 
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)

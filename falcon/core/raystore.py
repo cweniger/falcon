@@ -205,9 +205,6 @@ class DatasetManagerActor:
             ids_to_tombstone = ids_training[: -self.max_training_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-    def get_num_resims(self):
-        return self.num_resims
-
     def get_samples_by_status(self, status):
         if isinstance(status, list):
             status_ids = np.where(np.isin(self.status, status))[0]
@@ -227,19 +224,16 @@ class DatasetManagerActor:
             ids_training = ids[self.status[ids] == SampleStatus.TRAINING]
             self.status[ids_training] = SampleStatus.DISFAVOURED
 
-    def append(self, data, batched=True):
-        if batched:  # TODO: Legacy structure
-            num_new_samples = data[list(data.keys())[0]].shape[0]
-            for i in range(num_new_samples):
-                sample = {key: ray.put(value[i]) for key, value in data.items()}
-                self.ray_store.append(sample)
-        else:  # TODO: Should become default
-            num_new_samples = len(data)
-            for sample in data:
-                sample_ray_objects = {
-                    key: ray.put(value) for key, value in sample.items()
-                }
-                self.ray_store.append(sample_ray_objects)
+    def append(self, data):
+        """Append samples to the buffer.
+
+        Args:
+            data: List of dicts, each dict has {key: array} without batch dimension
+        """
+        num_new_samples = len(data)
+        for sample in data:
+            sample_ray_objects = {key: ray.put(value) for key, value in sample.items()}
+            self.ray_store.append(sample_ray_objects)
         self.status = np.append(
             self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
         )
@@ -314,32 +308,63 @@ class DatasetManagerActor:
     def initialize_samples(self, deployed_graph):
         num_initial_samples = self.num_initial_samples()
         if self.initial_samples_path is not None:
-            # Load initial samples from the specified path
+            # Load initial samples from the specified path (already list of dicts)
             initial_samples = joblib.load(self.initial_samples_path)
             num_loaded_samples = len(initial_samples)
-            self.append(initial_samples, batched=False)
+            if num_loaded_samples > 0:
+                self.append(initial_samples)
         else:
             num_loaded_samples = 0
         if num_initial_samples > num_loaded_samples:
-            samples = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            # deployed_graph.sample() returns dict-of-arrays, convert to list-of-dicts
+            samples_batched = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            n = samples_batched[list(samples_batched.keys())[0]].shape[0]
+            samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
             self.append(samples)
 
+    # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
         pass
 
 
 class DatasetView(IterableDataset):
-    """Dataset view that yields samples as tuples (legacy format).
+    """Dataset view that yields samples from the Ray store.
 
-    Yields:
-        Tuple of (index, value1, value2, ...) where values correspond to keylist order.
+    Supports two output formats:
+    - "dict": yields (index, {key: value, ...}) - for Batch collation
+    - "tuple": yields (index, value1, value2, ...) - legacy format
+
+    Args:
+        keylist: List of keys to retrieve from each sample
+        filter: Optional function to transform samples
+        sample_status: Status of samples to retrieve (TRAINING, VALIDATION, etc.)
+        output_format: "dict" (default) or "tuple"
     """
 
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
+    def __init__(
+        self,
+        keylist,
+        filter=None,
+        sample_status=SampleStatus.TRAINING,
+        output_format="dict",
+    ):
         self.dataset_manager = ray.get_actor("DatasetManager")
         self.keylist = keylist
         self.filter = filter
         self.sample_status = sample_status
+        self.output_format = output_format
+
+    def _log_dataset_size(self, size):
+        """Log dataset size based on sample status."""
+        # Handle both single status and list of statuses
+        if isinstance(self.sample_status, list):
+            log({"dataset:active_size": size})
+        elif self.sample_status == SampleStatus.TRAINING:
+            log({"dataset:train_size": size})
+        elif self.sample_status == SampleStatus.VALIDATION:
+            log({"dataset:val_size": size})
+        else:
+            log({"dataset:active_size": size})
 
     def __iter__(self):
         active_samples, active_ids = ray.get(
@@ -347,56 +372,7 @@ class DatasetView(IterableDataset):
         )
 
         perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
-
-        for i in perm:
-            try:
-                sample = [ray.get(active_samples[i][key]) for key in self.keylist]
-            except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
-                continue
-            if self.filter is not None:  # Online evaluation
-                sample = self.filter(sample)
-            index = active_ids[i]
-            yield (index, *sample)
-
-        ray.get(self.dataset_manager.release_samples.remote(active_ids))
-
-
-class BatchDatasetView(IterableDataset):
-    """Dataset view that yields samples as dictionaries for Batch collation.
-
-    Works with batch_collate_fn to produce Batch objects with dictionary access.
-
-    Yields:
-        Tuple of (index, {key: value, ...}) where keys are from keylist.
-    """
-
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
-        self.dataset_manager = ray.get_actor("DatasetManager")
-        self.keylist = keylist
-        self.filter = filter
-        self.sample_status = sample_status
-
-    def __iter__(self):
-        active_samples, active_ids = ray.get(
-            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
-        )
-
-        perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
+        self._log_dataset_size(len(perm))
 
         for i in perm:
             try:
@@ -404,14 +380,23 @@ class BatchDatasetView(IterableDataset):
                     key: ray.get(active_samples[i][key]) for key in self.keylist
                 }
             except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
+                log({"dataset:retrieval_error": str(e)})
                 continue
+
             if self.filter is not None:
                 sample_dict = self.filter(sample_dict)
+
             index = active_ids[i]
-            yield (index, sample_dict)
+            if self.output_format == "tuple":
+                yield (index, *[sample_dict[k] for k in self.keylist])
+            else:
+                yield (index, sample_dict)
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
+
+
+# Backwards compatibility alias
+BatchDatasetView = DatasetView
 
 
 def batch_collate_fn(dataset_manager):
