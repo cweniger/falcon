@@ -304,8 +304,8 @@ class DeployedGraph:
         asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path))
 
     async def _launch(self, dataset_manager, observations, graph_path=None):
-        # Load graph if path is provided
-        if graph_path is not None and graph_path.exists():
+        # Load graph if saved model files exist (not just logging directories)
+        if graph_path is not None and any(graph_path.glob("*/*.pth")):
             self.load(graph_path)
 
         # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor

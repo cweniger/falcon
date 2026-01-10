@@ -22,6 +22,9 @@ from typing import Any, Callable, Dict, List, Optional, Union
 import ray
 from omegaconf import DictConfig
 
+# Module-level reference to keep the logger actor alive
+_logger_manager_ref = None
+
 
 class LoggerBackend(ABC):
     """Abstract base class for logging backends.
@@ -298,9 +301,12 @@ def init_logging(cfg: DictConfig) -> None:
 
     # Start the logger manager
     if factories:
-        LoggerManager.options(
-            name="falcon:global_logger", lifetime="detached"
-        ).remote(backend_factories=factories)
+        global _logger_manager_ref
+        _logger_manager_ref = LoggerManager.options(name="falcon:global_logger").remote(
+            backend_factories=factories
+        )
+        # Wait for actor to be fully initialized before returning
+        ray.get(_logger_manager_ref.__ray_ready__.remote())
 
 
 def finish_logging() -> None:
