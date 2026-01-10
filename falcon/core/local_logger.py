@@ -90,6 +90,12 @@ class LocalFileBackend(LoggerBackend):
 
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
 
+        # Create output.log immediately with startup message
+        self.log_path.parent.mkdir(parents=True, exist_ok=True)
+        timestamp = datetime.now().isoformat(timespec="milliseconds")
+        with open(self.log_path, "w") as f:
+            f.write(f"{timestamp} [INFO] Logger initialized for '{name}'\n")
+
     def log(
         self,
         metrics: Dict[str, Any],

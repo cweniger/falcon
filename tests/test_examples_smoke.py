@@ -49,12 +49,12 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         "falcon",
         "launch",
         f"--config-name={config_name}",
+        f"--run-dir={tmp_path}",
         # Reduce sample counts for faster testing
         "buffer.min_training_samples=64",
         "buffer.max_training_samples=128",
         "buffer.validation_window_size=16",
         "buffer.resample_batch_size=32",
-        f"run_dir={tmp_path}",
     ] + epoch_overrides
 
     # Create a clean environment for the subprocess
@@ -79,4 +79,21 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         f"Command: {' '.join(cmd)}\n"
         f"STDOUT:\n{result.stdout.decode()}\n"
         f"STDERR:\n{result.stderr.decode()}"
+    )
+
+    # Verify output.log files were created by the logging system
+    graph_dir = tmp_path / "graph_dir"
+    assert graph_dir.exists(), f"graph_dir not found at {graph_dir}"
+
+    # Check driver output.log exists
+    driver_log = graph_dir / "driver" / "output.log"
+    assert driver_log.exists(), f"Driver output.log not found at {driver_log}"
+
+    # Check that at least one node has output.log (actor logging works)
+    node_logs = list(graph_dir.glob("*/output.log"))
+    # Filter out driver to check actor logs specifically
+    actor_logs = [p for p in node_logs if p.parent.name != "driver"]
+    assert len(actor_logs) > 0, (
+        f"No actor output.log files found in {graph_dir}. "
+        f"Found directories: {[p.name for p in graph_dir.iterdir() if p.is_dir()]}"
     )
