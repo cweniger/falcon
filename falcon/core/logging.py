@@ -52,12 +52,12 @@ class _OutputCapture:
         while "\n" in self._buffer:
             line, self._buffer = self._buffer.split("\n", 1)
             if line.strip():  # Skip empty lines
-                info(line, self._level)
+                info(line, self._level, _from_capture=True)
 
     def flush(self):
         # Flush any remaining buffered content
         if self._buffer.strip():
-            info(self._buffer.strip(), self._level)
+            info(self._buffer.strip(), self._level, _from_capture=True)
             self._buffer = ""
         self._original.flush()
 
@@ -105,15 +105,17 @@ def log(metrics: dict, log_prefix=None):
         _logger_ref.log.remote(metrics, step=None, actor_id=_actor_id)
 
 
-def info(message: str, level: int = INFO):
+def info(message: str, level: int = INFO, _from_capture: bool = False):
     """Log a text message with timestamp.
 
     Args:
         message: Text message to log
         level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
+        _from_capture: Internal flag - True when called from _OutputCapture
     """
     # Echo to terminal on driver (for user visibility)
-    if _echo_to_stdout and _original_stdout:
+    # Skip if called from _OutputCapture (it already wrote to original stdout)
+    if _echo_to_stdout and _original_stdout and not _from_capture:
         _original_stdout.write(f"{message}\n")
         _original_stdout.flush()
 
