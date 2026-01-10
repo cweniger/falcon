@@ -234,6 +234,8 @@ def launch_mode(cfg: DictConfig) -> None:
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
     ray_init_args.setdefault("log_to_driver", False)
+    # Use a fixed namespace so falcon monitor can discover actors
+    ray_init_args.setdefault("namespace", "falcon")
     ray.init(**ray_init_args)
 
     # Initialise logger (should be done before any other falcon code)
@@ -292,6 +294,8 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
     ray_init_args.setdefault("log_to_driver", False)
+    # Use a fixed namespace for consistency
+    ray_init_args.setdefault("namespace", "falcon")
     ray.init(**ray_init_args)
 
     # Initialise logger and capture driver output
@@ -388,21 +392,54 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     deployed_graph.shutdown()
 
 
+def monitor_mode(address: str = "auto", refresh: float = 1.0):
+    """Monitor mode: Launch the TUI monitor for training runs."""
+    import subprocess
+    subprocess.run([
+        sys.executable, "-m", "falcon.monitor",
+        "--address", address,
+        "--refresh", str(refresh),
+    ])
+
+
 def parse_args():
     """Parse falcon CLI arguments."""
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph"]:
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph", "monitor"]:
         print("Usage:")
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon graph [--config-name FILE]")
+        print("  falcon monitor [--address ADDR] [--refresh SECS]")
         print()
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
+        print("  --address ADDR       Ray cluster address (default: auto)")
+        print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
         sys.exit(1)
 
     mode = sys.argv[1]
     args = sys.argv[2:]
+
+    # Handle monitor mode separately (doesn't need config)
+    if mode == "monitor":
+        address = "auto"
+        refresh = 1.0
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--address" and i + 1 < len(args):
+                address = args[i + 1]
+                i += 1
+            elif arg.startswith("--address="):
+                address = arg.split("=", 1)[1]
+            elif arg == "--refresh" and i + 1 < len(args):
+                refresh = float(args[i + 1])
+                i += 1
+            elif arg.startswith("--refresh="):
+                refresh = float(arg.split("=", 1)[1])
+            i += 1
+        return mode, None, None, None, None, address, refresh
 
     sample_type = None
     if mode == "sample":
@@ -432,12 +469,18 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides
+    return mode, sample_type, config_name, run_dir, overrides, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, address, refresh = parse_args()
+
+    # Monitor mode doesn't need config loading
+    if mode == "monitor":
+        monitor_mode(address=address, refresh=refresh)
+        return
+
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":

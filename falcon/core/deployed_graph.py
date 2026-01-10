@@ -63,6 +63,28 @@ class MultiplexNodeWrapper:
         """Wait for all child actors to initialize."""
         ray.get([actor.__ray_ready__.remote() for actor in self.wrapped_node_list])
 
+    def get_status(self) -> dict:
+        """Return aggregated status from all child actors."""
+        # Get status from first child (they should all be similar)
+        if self.wrapped_node_list:
+            try:
+                return ray.get(self.wrapped_node_list[0].get_status.remote(), timeout=2.0)
+            except Exception:
+                return {"status": "error", "error": "timeout"}
+        return {"status": "unknown"}
+
+    def get_log_tail(self, num_lines: int = 50) -> list:
+        """Return log tail from first child actor."""
+        if self.wrapped_node_list:
+            try:
+                return ray.get(
+                    self.wrapped_node_list[0].get_log_tail.remote(num_lines),
+                    timeout=2.0
+                )
+            except Exception:
+                return ["[Error fetching logs]"]
+        return []
+
 
 @ray.remote
 class NodeWrapper:
@@ -74,6 +96,11 @@ class NodeWrapper:
                 sys.path.insert(0, str(model_path))
 
         self.node = node
+
+        # Status tracking for monitoring
+        self._status = "initializing"
+        self._log_buffer = []
+        self._max_log_lines = 100
 
         simulator_cls = LazyLoader(node.simulator_cls)
         self.simulator_instance = simulator_cls(**node.simulator_config)
@@ -102,7 +129,11 @@ class NodeWrapper:
         # Initialize and set global logger
         initialize_logging_for(self.name)  # Set logger for global scope of this actor
 
+        # Mark initialization complete
+        self._status = "idle"
+
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
+        self._status = "training"
         info(f"Training started for: {self.name}")
         info(f"Condition keys: {self.evidence + self.scaffolds}", DEBUG)
 
@@ -110,6 +141,7 @@ class NodeWrapper:
         buffer = BufferView(dataset_manager)
 
         await self.estimator_instance.train(buffer)
+        self._status = "done"
         info(f"Training complete for: {self.name}")
 
     def sample(self, n_samples, incoming=None):
@@ -184,6 +216,44 @@ class NodeWrapper:
         if self.estimator_instance is not None:
             return self.estimator_instance.interrupt()
 
+    def get_status(self) -> dict:
+        """Return current status for monitoring."""
+        status = {
+            "name": self.name,
+            "status": self._status,
+            "samples": 0,
+            "current_epoch": 0,
+            "total_epochs": 0,
+            "loss": None,
+            "loss_history": [],
+        }
+
+        # Get estimator state if available
+        if self.estimator_instance is not None:
+            est = self.estimator_instance
+            if hasattr(est, "history"):
+                status["loss_history"] = est.history.get("val_loss", [])[-20:]
+                if status["loss_history"]:
+                    status["loss"] = status["loss_history"][-1]
+                status["current_epoch"] = len(est.history.get("epochs", []))
+            if hasattr(est, "loop_config"):
+                status["total_epochs"] = est.loop_config.num_epochs
+            if hasattr(est, "history") and est.history.get("n_samples"):
+                status["samples"] = est.history["n_samples"][-1]
+
+        return status
+
+    def get_log_tail(self, num_lines: int = 50) -> list:
+        """Return recent log lines."""
+        return self._log_buffer[-num_lines:]
+
+    def _append_log(self, message: str):
+        """Append a message to the log buffer."""
+        from datetime import datetime
+        self._log_buffer.append(f"[{datetime.now():%H:%M:%S}] {message}")
+        if len(self._log_buffer) > self._max_log_lines:
+            self._log_buffer.pop(0)
+
 
 class DeployedGraph:
     def __init__(self, graph, model_path=None):
@@ -191,7 +261,36 @@ class DeployedGraph:
         self.graph = graph
         self.model_path = model_path
         self.wrapped_nodes_dict = {}
+        self.coordinator = None
+        self._create_coordinator()
         self.deploy_nodes()
+
+    def _create_coordinator(self):
+        """Create the FalconCoordinator actor for monitoring."""
+        from falcon.core.coordinator import FalconCoordinator
+        run_dir = str(self.model_path) if self.model_path else "unknown"
+        try:
+            # Name the actor so falcon monitor can discover it
+            self.coordinator = FalconCoordinator.options(
+                name="falcon:coordinator",
+                lifetime="detached",  # Keep alive even if creator dies
+            ).remote(run_dir=run_dir)
+            info("Created falcon:coordinator actor for monitoring")
+        except ValueError as e:
+            # Actor with this name might already exist from a previous run
+            if "already exists" in str(e):
+                try:
+                    self.coordinator = ray.get_actor("falcon:coordinator")
+                    info("Connected to existing falcon:coordinator actor")
+                except Exception:
+                    info(f"Warning: Could not connect to existing coordinator")
+                    self.coordinator = None
+            else:
+                info(f"Warning: Could not create coordinator: {e}")
+                self.coordinator = None
+        except Exception as e:
+            info(f"Warning: Could not create coordinator: {e}")
+            self.coordinator = None
 
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
@@ -212,7 +311,7 @@ class DeployedGraph:
                     **node.actor_config
                 ).remote(node, self.graph, self.model_path)
 
-        # Wait for all actors to initialize
+        # Wait for all actors to initialize and register with coordinator
         for name, actor in self.wrapped_nodes_dict.items():
             try:
                 # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
@@ -221,6 +320,10 @@ class DeployedGraph:
                 else:
                     ray.get(actor.__ray_ready__.remote())
                 info(f"  ✓ {name}")
+
+                # Register node with coordinator
+                if self.coordinator:
+                    ray.get(self.coordinator.register_node.remote(name, actor))
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
@@ -310,6 +413,13 @@ class DeployedGraph:
 
         # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor
         dataset_manager = dataset_manager.dataset_manager_actor
+
+        # Register dataset manager with coordinator for monitoring
+        if self.coordinator:
+            ray.get(self.coordinator.register_dataset_manager.remote(dataset_manager))
+            # Set log directory so coordinator can read log files
+            if graph_path is not None:
+                ray.get(self.coordinator.set_log_dir.remote(str(graph_path)))
 
         # Initial data generation
         ray.get(dataset_manager.initialize_samples.remote(self))
