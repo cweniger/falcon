@@ -25,7 +25,7 @@ import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
 from falcon.core.logger import init_logging
-from falcon.core.logging import initialize_logging_for
+from falcon.core.logging import initialize_logging_for, set_falcon_log
 from falcon.core.run_name import generate_run_dir
 
 
@@ -224,9 +224,23 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     run_dir_path.mkdir(parents=True, exist_ok=True)
     if not saved_config.exists():
         OmegaConf.save(cfg, saved_config)
-        print(f"Saved config to: {saved_config}")
 
     return cfg
+
+
+class TeeOutput:
+    """Write to both terminal and log file."""
+    def __init__(self, log_file, terminal):
+        self.terminal = terminal
+        self.log = open(log_file, "a")
+    def write(self, msg):
+        self.terminal.write(msg)
+        self.log.write(msg)
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    def close(self):
+        self.log.close()
 
 
 def launch_mode(cfg: DictConfig) -> None:
@@ -236,7 +250,34 @@ def launch_mode(cfg: DictConfig) -> None:
     ray_init_args.setdefault("log_to_driver", False)
     # Use a fixed namespace so falcon monitor can discover actors
     ray_init_args.setdefault("namespace", "falcon")
+    # Suppress Ray startup banner
+    ray_init_args.setdefault("logging_level", "ERROR")
     ray.init(**ray_init_args)
+
+    # Get output directory from config
+    output_dir = Path(cfg.run_dir)
+
+    # Create falcon.log and tee output to both terminal and file
+    falcon_log = output_dir / "falcon.log"
+    tee = TeeOutput(falcon_log, sys.stdout)
+
+    # Print header (non-timestamped section)
+    tee.write(f"falcon  ▁▁▁▃▆█▆▃▁▁▁▁  v{falcon.__version__}\n\n")
+    tee.write("Output:\n")
+    tee.write(f"  {output_dir}\n\n")
+
+    # Show Ray cluster info with resources
+    ctx = ray.get_runtime_context()
+    gcs_address = ctx.gcs_address
+    is_local = ray_init_args.get("address") is None
+    ray_status = "new local instance" if is_local else "existing cluster"
+    resources = ray.cluster_resources()
+    cpu = int(resources.get("CPU", 0))
+    gpu = int(resources.get("GPU", 0))
+    mem_gb = resources.get("memory", 0) / (1024**3)
+    tee.write("Ray:\n")
+    tee.write(f"  {gcs_address} ({ray_status})\n")
+    tee.write(f"  Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB\n\n")
 
     # Initialise logger (should be done before any other falcon code)
     init_logging(cfg)
@@ -255,8 +296,14 @@ def launch_mode(cfg: DictConfig) -> None:
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
 
-    print(graph)
-    print("Observation shapes:", {k: v.shape for k, v in observations.items()})
+    tee.write(str(graph) + "\n\n")
+    tee.write("Observed:\n")
+    for name, shape in observations.items():
+        tee.write(f"  {name} {list(shape.shape)}\n")
+    tee.write("\n")
+
+    # Pass falcon.log file handle to logging module for timestamped output
+    set_falcon_log(tee.log)
 
     ####################
     ### Run analysis ###

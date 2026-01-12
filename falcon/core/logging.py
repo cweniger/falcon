@@ -31,6 +31,13 @@ _actor_id = None
 _original_stdout = None
 _original_stderr = None
 _echo_to_stdout = False  # If True, info() also prints to terminal (for driver)
+_falcon_log_file = None  # If set, info() also writes to falcon.log
+
+
+def set_falcon_log(log_file):
+    """Set the falcon.log file handle for info() to write to."""
+    global _falcon_log_file
+    _falcon_log_file = log_file
 
 
 class _OutputCapture:
@@ -113,11 +120,21 @@ def info(message: str, level: int = INFO, _from_capture: bool = False):
         level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
         _from_capture: Internal flag - True when called from _OutputCapture
     """
+    from datetime import datetime
+    timestamp = datetime.now().isoformat(timespec="milliseconds")
+    level_name = _LEVEL_NAMES.get(level, "INFO")
+    formatted_line = f"{timestamp} [{level_name}] {message}\n"
+
     # Echo to terminal on driver (for user visibility)
     # Skip if called from _OutputCapture (it already wrote to original stdout)
     if _echo_to_stdout and _original_stdout and not _from_capture:
-        _original_stdout.write(f"{message}\n")
+        _original_stdout.write(formatted_line)
         _original_stdout.flush()
+
+    # Write to falcon.log if set
+    if _falcon_log_file and not _from_capture:
+        _falcon_log_file.write(formatted_line)
+        _falcon_log_file.flush()
 
     if _logger_ref:
         _logger_ref.info.remote(message, level=level, actor_id=_actor_id)

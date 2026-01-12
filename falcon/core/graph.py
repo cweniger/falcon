@@ -129,22 +129,16 @@ class Graph:
         return Graph(new_node_list)
 
     def __str__(self):
-        # Return graph structure
-        # - Based on topological sort
-        # - Include node names and their parents in the form NAME <- PARENT1, PARENT2, ... [MODULE]
-        graph_str = "Falcon graph structure:\n"
-        graph_str += f"  Node name          List of parents                                 Class name\n"
+        """Return graph structure with arrow notation showing data flow."""
+        lines = ["Graph:"]
         for node in self.sorted_node_names:
             parents = self.get_parents(node)
-            simulator_cls = self.get_simulator_cls(node)
-            if hasattr(simulator_cls, "display_name"):
-                class_name = simulator_cls.display_name
+            simulator_cls = str(self.get_simulator_cls(node))
+            if parents:
+                lines.append(f"  {node} ← {simulator_cls}({', '.join(parents)})")
             else:
-                class_name = str(simulator_cls)
-            graph_str += (
-                f"* {node:<15} <- {', '.join(parents):<45} | {class_name:<20}\n"
-            )
-        return graph_str
+                lines.append(f"  {node} ← {simulator_cls}")
+        return "\n".join(lines)
 
 
 class Extractor:

@@ -275,13 +275,11 @@ class DeployedGraph:
                 name="falcon:coordinator",
                 lifetime="detached",  # Keep alive even if creator dies
             ).remote(run_dir=run_dir)
-            info("Created falcon:coordinator actor for monitoring")
         except ValueError as e:
             # Actor with this name might already exist from a previous run
             if "already exists" in str(e):
                 try:
                     self.coordinator = ray.get_actor("falcon:coordinator")
-                    info("Connected to existing falcon:coordinator actor")
                 except Exception:
                     info(f"Warning: Could not connect to existing coordinator")
                     self.coordinator = None
@@ -326,8 +324,6 @@ class DeployedGraph:
                     ray.get(self.coordinator.register_node.remote(name, actor))
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
-
-        info("Graph ready.")
 
     def _execute_graph(self, num_samples, sorted_node_names, conditions, sample_method):
         """Execute graph traversal with specified sampling method.
@@ -424,6 +420,9 @@ class DeployedGraph:
         # Initial data generation
         ray.get(dataset_manager.initialize_samples.remote(self))
 
+        info("")
+        info("Starting analysis. Monitor with: falcon monitor")
+
         # Training
         train_future_list = []
         for name, node in self.graph.node_dict.items():
@@ -464,17 +463,15 @@ class DeployedGraph:
                     completed_task
                 )  # Retrieve the result or raise an exception
 
-            # FIXME: Not optimal, should happen after specific time steps
-            if graph_path is not None:
-                self.save(graph_path)
-
         # Save graph if path is provided
         if graph_path is not None:
             self.save(graph_path)
 
+        info("")
+        info("Analysis completed.")
+
     def save(self, graph_dir):
         """Save the deployed graph node status."""
-        info(f"Saving deployed graph to: {graph_dir}")
         graph_dir = graph_dir.expanduser().resolve()
         graph_dir.mkdir(parents=True, exist_ok=True)
         save_futures = []
