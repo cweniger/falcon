@@ -134,7 +134,7 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         self._status = "training"
-        info(f"Training started for: {self.name}")
+        info(f"[{self.name}] Training started")
         info(f"Condition keys: {self.evidence + self.scaffolds}", DEBUG)
 
         # Create BufferView - estimator controls what keys it needs
@@ -142,7 +142,20 @@ class NodeWrapper:
 
         await self.estimator_instance.train(buffer)
         self._status = "done"
-        info(f"Training complete for: {self.name}")
+
+        # Get final loss for completion message
+        final_loss = None
+        if hasattr(self.estimator_instance, 'best_conditional_flow_val_loss'):
+            final_loss = self.estimator_instance.best_conditional_flow_val_loss
+        elif hasattr(self.estimator_instance, 'history'):
+            losses = self.estimator_instance.history.get('val_loss', [])
+            if losses:
+                final_loss = losses[-1]
+
+        if final_loss is not None:
+            info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
+        else:
+            info(f"[{self.name}] Training completed")
 
     def sample(self, n_samples, incoming=None):
         if self.estimator_instance is not None:
@@ -423,20 +436,26 @@ class DeployedGraph:
         info("")
         info("Starting analysis. Monitor with: falcon monitor")
 
-        # Training
-        train_future_list = []
+        # Training - start all training nodes
+        train_futures = {}  # Map future -> node_name for completion tracking
         for name, node in self.graph.node_dict.items():
             if node.train:
                 wrapped_node = self.wrapped_nodes_dict[name]
                 train_future = wrapped_node.train.remote(
                     dataset_manager, observations=observations
                 )
-                train_future_list.append(train_future)
+                train_futures[train_future] = name
+                info(f"[{name}] Training started")
                 time.sleep(1)
 
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
         # time.sleep(60) # Wait sixty seconds before starting resampling
 
+        # Track last status log time for periodic updates
+        last_status_log = time.time()
+        STATUS_LOG_INTERVAL = 60  # seconds
+
+        train_future_list = list(train_futures.keys())
         while train_future_list:
             ready, train_future_list = ray.wait(
                 train_future_list, num_returns=len(train_future_list), timeout=1
@@ -458,10 +477,24 @@ class DeployedGraph:
                 num_new_samples -= this_n
             self.resume()
 
+            # Periodic status update (every ~60 seconds)
+            now = time.time()
+            if now - last_status_log >= STATUS_LOG_INTERVAL:
+                last_status_log = now
+                self._log_status(dataset_manager)
+
+            # Log completed training nodes
             for completed_task in ready:
-                result = ray.get(
-                    completed_task
-                )  # Retrieve the result or raise an exception
+                ray.get(completed_task)  # Retrieve result or raise exception
+                node_name = train_futures.get(completed_task)
+                if node_name:
+                    # Get final loss from node status
+                    status = ray.get(self.wrapped_nodes_dict[node_name].get_status.remote())
+                    loss = status.get("loss")
+                    if loss is not None:
+                        info(f"[{node_name}] Training completed (loss: {loss:.4f})")
+                    else:
+                        info(f"[{node_name}] Training completed")
 
         # Save graph if path is provided
         if graph_path is not None:
@@ -469,6 +502,22 @@ class DeployedGraph:
 
         info("")
         info("Analysis completed.")
+
+    def _log_status(self, dataset_manager):
+        """Log periodic status of active training nodes and buffer (separate lines)."""
+        # Log progress for each active training node
+        for name, node in self.wrapped_nodes_dict.items():
+            status = ray.get(node.get_status.remote())
+            if status["status"] == "training":
+                epoch = status.get("current_epoch", 0)
+                total = status.get("total_epochs", 0)
+                loss = status.get("loss")
+                loss_str = f"{loss:.2f}" if loss is not None else "?"
+                info(f"[{name}] epoch {epoch}/{total}, loss {loss_str}")
+
+        # Log buffer stats (including total ever simulated)
+        stats = ray.get(dataset_manager.get_store_stats.remote())
+        info(f"Buffer: {stats['training']} train, {stats['validation']} val ({stats['total_length']} total)")
 
     def save(self, graph_dir):
         """Save the deployed graph node status."""
