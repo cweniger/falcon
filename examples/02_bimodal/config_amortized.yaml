@@ -14,6 +14,7 @@ paths:
   import: "./src"
   buffer: ${run_dir}/sim_dir
   graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
 
 # Training buffer parameters
 buffer:
@@ -85,10 +86,7 @@ graph:
 sample:
   prior:
     n: 1000
-    path: samples_prior.joblib
   proposal:
     n: 1000
-    path: samples_proposal.joblib
   posterior:
     n: 1000
-    path: samples_posterior.joblib
