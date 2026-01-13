@@ -12,4 +12,6 @@ from .core.utils import LazyLoader
 from .core.logging import log
 from .core.logger import init_logging, finish_logging
 from .core.run_reader import read_run
+from .core.run_loader import load_run
+from .core.samples_reader import read_samples
 import falcon.contrib as contrib
