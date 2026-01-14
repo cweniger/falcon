@@ -362,11 +362,11 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     }
 
     if sample_type == "prior":
-        sample_cfg = cfg.sample.prior
+        sample_cfg = cfg.sample.get("prior", {})
     elif sample_type == "posterior":
-        sample_cfg = cfg.sample.posterior
+        sample_cfg = cfg.sample.get("posterior", {})
     elif sample_type == "proposal":
-        sample_cfg = cfg.sample.proposal
+        sample_cfg = cfg.sample.get("proposal", {})
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
