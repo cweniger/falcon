@@ -362,15 +362,18 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     }
 
     if sample_type == "prior":
-        sample_cfg = cfg.sample.get("prior", {})
+        sample_cfg = cfg.sample.get("prior", None)
     elif sample_type == "posterior":
-        sample_cfg = cfg.sample.get("posterior", {})
+        sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
-        sample_cfg = cfg.sample.get("proposal", {})
+        sample_cfg = cfg.sample.get("proposal", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    num_samples = sample_cfg.get("n", 42)
+    if sample_cfg is None or "n" not in sample_cfg:
+        raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yaml.")
+
+    num_samples = sample_cfg.n
     print(f"Generating {num_samples} samples using {sample_type} sampling...")
     print(graph)
 
