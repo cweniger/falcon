@@ -1,4 +1,5 @@
 import os
+import re
 import warnings
 
 import numpy as np
@@ -172,6 +173,23 @@ def CompositeNode(names, module, **kwargs):
     return node_comp, *nodes
 
 
+def _parse_observation_path(path: str) -> tuple:
+    """Parse observation path with optional NPZ key extraction.
+
+    Supports syntax like "file.npz['key']" to extract a specific key from NPZ.
+
+    Args:
+        path: Path string, optionally with ['key'] suffix for NPZ files
+
+    Returns:
+        Tuple of (file_path, key) where key is None for regular files
+    """
+    match = re.match(r"^(.+\.npz)\['([^']+)'\]$", path)
+    if match:
+        return match.group(1), match.group(2)
+    return path, None
+
+
 # Valid keys for node configuration
 _VALID_NODE_KEYS = frozenset({
     "parents", "evidence", "scaffolds", "observed", "resample",
@@ -266,11 +284,17 @@ def create_graph_from_config(graph_config, _cfg=None):
             actor_config = OmegaConf.to_container(actor_config, resolve=True)
 
         if data_path is not None:
-            # Treat it as path to a file and load it
-            if not os.path.exists(data_path):
-                raise FileNotFoundError(f"Observation file not found: {data_path}")
-            # Load from NPZ file
-            data = np.load(data_path)
+            # Parse path for NPZ key extraction syntax: "file.npz['key']"
+            file_path, key = _parse_observation_path(data_path)
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Observation file not found: {file_path}")
+            data = np.load(file_path)
+            if key is not None:
+                # Extract specific key from NPZ
+                data = data[key]
+            elif hasattr(data, 'files') and len(data.files) == 1:
+                # Auto-extract single-key NPZ files
+                data = data[data.files[0]]
             observations[node_name] = data
 
         # Extract target from simulator

@@ -20,6 +20,7 @@ import numpy as np
 
 from omegaconf import OmegaConf, DictConfig
 
+from .graph import _parse_observation_path
 from .run_reader import RunReader
 from .samples_reader import SamplesReader
 
@@ -78,8 +79,10 @@ class Run:
                 if "observed" not in node_cfg:
                     continue
 
-                obs_path = node_cfg.observed
-                obs_path = Path(obs_path)
+                # Parse NPZ key extraction syntax: "file.npz['key']"
+                obs_path_str = node_cfg.observed
+                file_path_str, key = _parse_observation_path(obs_path_str)
+                obs_path = Path(file_path_str)
 
                 # Handle relative paths
                 if not obs_path.is_absolute():
@@ -92,7 +95,12 @@ class Run:
                         continue
 
                 if obs_path.exists():
-                    self._observations[node_name] = np.load(obs_path)
+                    data = np.load(obs_path)
+                    if key is not None:
+                        data = data[key]
+                    elif hasattr(data, 'files') and len(data.files) == 1:
+                        data = data[data.files[0]]
+                    self._observations[node_name] = data
 
         return self._observations
 
