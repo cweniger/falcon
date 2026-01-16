@@ -104,7 +104,7 @@ graph:
     simulator:                          # Defines forward model p(x|z)
       _target_: model.Simulate
       npar: 3                           # Number of parameters to sample from z
-    observed: "./data/obs_3.npy"        # Path to observed data array
+    observed: "./data/mock_data.npz['x']"  # NPZ key extraction syntax
 
 # -----------------------------------------------------------------------------
 # Sampling configuration (posterior draws after training)
