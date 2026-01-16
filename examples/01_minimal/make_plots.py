@@ -4,7 +4,7 @@ Usage: python make_plots.py RUN_PATH [SAMPLE_TYPE]
 
 SAMPLE_TYPE: posterior (default), prior, or proposal
 
-For posterior plots, loads ground truth from mock_data.npz['z_truth'] if available.
+For posterior plots, loads ground truth from mock_data.npz['z'] if available.
 """
 import sys
 import numpy as np
@@ -20,12 +20,12 @@ z = samples.stacked['z']
 # Load ground truth for posterior validation
 truths = None
 if sample_type == "posterior":
-    # Try to load z_truth from the mock data NPZ file
+    # Try to load ground truth z from the mock data NPZ file
     mock_data_path = run.run_dir.parent / "data/mock_data.npz"
     if mock_data_path.exists():
         mock_data = np.load(mock_data_path)
-        if 'z_truth' in mock_data.files:
-            truths = mock_data['z_truth']
+        if 'z' in mock_data.files:
+            truths = mock_data['z']
 
 fig = corner.corner(z, truths=truths, show_titles=True)
 fig.savefig(run.run_dir / f"corner_{sample_type}.png", dpi=150)
