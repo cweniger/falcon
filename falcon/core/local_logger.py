@@ -19,19 +19,12 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
+from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
 import ray
 
-# Import LoggerBackend from logger.py (defined there to avoid duplication)
-# Use TYPE_CHECKING to avoid circular import at runtime
-if TYPE_CHECKING:
-    from .logger import LoggerBackend
-else:
-    # At runtime, we need the actual class for inheritance
-    # This works because logger.py imports local_logger.py AFTER defining LoggerBackend
-    from .logger import LoggerBackend
+from .logger import LoggerBackend
 
 # Log level names for text logging
 _LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR"}
