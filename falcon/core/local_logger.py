@@ -1,33 +1,23 @@
 """
 Local file-based logging backend.
 
-This module provides a local logging backend that stores metrics in chunked NPZ files
-and text messages in output.log files. It implements the LoggerBackend interface and
-can be used standalone or as part of a CompositeLogger setup.
+Stores metrics in chunked NPZ files and text logs in output.log files.
 
 Storage structure:
-    {base_dir}/{actor_id}/metrics/{metric_name}/chunk_{index}.npz
-    {base_dir}/{actor_id}/output.log
+    {base_dir}/{name}/metrics/{metric_name}/chunk_{index}.npz
+    {base_dir}/{name}/output.log
 
-Each NPZ file contains:
-    - step: int64 array of step numbers
-    - value: float64 array (scalar metrics) or 2D array (array metrics)
-    - walltime: float64 array of epoch timestamps
+NPZ files contain: step (int64), value (float64 or 2D), walltime (float64).
 """
 
 import logging
 import time
-from datetime import datetime
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple, Union
 
 import numpy as np
-import ray
 
 from .logger import LoggerBackend
-
-# Log level names for text logging
-_LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR"}
 
 
 def sanitize_metric_name(name: str, actor_id: str = None) -> str:
@@ -50,18 +40,14 @@ def sanitize_metric_name(name: str, actor_id: str = None) -> str:
 
 
 class LocalFileBackend(LoggerBackend):
-    """Local file logging backend (non-Ray version).
+    """Local file logging backend.
 
-    Writes metrics to chunked NPZ files on disk. Suitable for single-process
-    use or when Ray is not needed.
+    Writes metrics to chunked NPZ files and text to output.log via Python logging.
 
     Args:
-        base_dir: Base directory for storing metrics.
-        name: Identifier for this logger (used in directory structure).
-        buffer_size: Number of entries to buffer before flushing to disk.
-            Default is 100, balancing write frequency with data safety.
-            Lower values (e.g., 10) provide more frequent saves but more I/O.
-            Higher values (e.g., 1000) reduce I/O but risk data loss on crash.
+        base_dir: Base directory for logs (creates {base_dir}/{name}/ structure)
+        name: Logger name, used as subdirectory
+        buffer_size: Metrics buffered before flush (default 100)
     """
 
     def __init__(
@@ -69,33 +55,20 @@ class LocalFileBackend(LoggerBackend):
         base_dir: str,
         name: str = "default",
         buffer_size: int = 100,
-        text_buffer_size: int = 50,
-        text_max_flush_interval: float = 5.0,
     ):
         self.base_dir = Path(base_dir)
         self.name = name
         self.metrics_dir = self.base_dir / name / "metrics"
         self.buffer_size = buffer_size
+        self.log_path = self.base_dir / name / "output.log"
 
         # Per-metric state
         self.buffers: Dict[str, List[Tuple[int, Any, float]]] = {}
         self.counters: Dict[str, int] = {}
         self.chunk_indices: Dict[str, int] = {}
 
-        # Text logging state
-        self.text_buffer: List[str] = []
-        self.text_buffer_size = text_buffer_size
-        self.text_max_flush_interval = text_max_flush_interval
-        self.last_text_flush = time.time()
-        self.log_path = self.base_dir / name / "output.log"
-
         self.metrics_dir.mkdir(parents=True, exist_ok=True)
-
-        # Create output.log immediately with startup message
         self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        timestamp = datetime.now().isoformat(timespec="milliseconds")
-        with open(self.log_path, "w") as f:
-            f.write(f"{timestamp} [INFO] Logger initialized for '{name}'\n")
 
         # Setup Python logging handler for text logging
         self._log_handler = logging.FileHandler(self.log_path)
@@ -182,44 +155,6 @@ class LocalFileBackend(LoggerBackend):
         self.chunk_indices[key] = chunk_idx + 1
         self.buffers[key] = []
 
-    def info(
-        self,
-        message: str,
-        level: int = 20,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Buffer text message, flush when buffer full or interval exceeded.
-
-        Args:
-            message: Text message to log
-            level: Log level (DEBUG=10, INFO=20, WARNING=30, ERROR=40)
-            walltime: Optional timestamp (epoch seconds)
-        """
-        if walltime is None:
-            walltime = time.time()
-        timestamp = datetime.fromtimestamp(walltime).isoformat(timespec="milliseconds")
-        level_name = _LEVEL_NAMES.get(level, f"LVL{level}")
-        line = f"{timestamp} [{level_name}] {message}\n"
-        self.text_buffer.append(line)
-
-        # Flush if buffer full or max interval exceeded
-        now = time.time()
-        if (
-            len(self.text_buffer) >= self.text_buffer_size
-            or now - self.last_text_flush >= self.text_max_flush_interval
-        ):
-            self._flush_text()
-
-    def _flush_text(self) -> None:
-        """Write buffered text messages to output.log."""
-        if not self.text_buffer:
-            return
-        self.log_path.parent.mkdir(parents=True, exist_ok=True)
-        with open(self.log_path, "a") as f:
-            f.writelines(self.text_buffer)
-        self.text_buffer = []
-        self.last_text_flush = time.time()
-
     def get_log_handler(self) -> logging.Handler:
         """Return handler for Python logging integration."""
         return self._log_handler
@@ -237,99 +172,9 @@ class LocalFileBackend(LoggerBackend):
         for key in list(self.buffers.keys()):
             if self.buffers[key]:
                 self._flush_metric(key)
-        self._flush_text()
         self._log_handler.flush()
 
     def shutdown(self) -> None:
         """Flush all remaining buffers to disk."""
         self.flush()
         self._log_handler.close()
-
-
-@ray.remote
-class LocalLoggerActor:
-    """Ray actor wrapper for LocalFileBackend.
-
-    Provides the same interface as LocalFileBackend but runs as a Ray actor
-    for distributed logging scenarios.
-
-    Args:
-        base_dir: Base directory for storing metrics.
-        name: Identifier for this logger.
-        buffer_size: Number of entries to buffer before flushing (default: 100).
-        text_buffer_size: Max text messages before flush (default: 50).
-        text_max_flush_interval: Max seconds before text flush (default: 5.0).
-    """
-
-    def __init__(
-        self,
-        base_dir: str,
-        name: str = "default",
-        buffer_size: int = 100,
-        text_buffer_size: int = 50,
-        text_max_flush_interval: float = 5.0,
-    ):
-        self._backend = LocalFileBackend(
-            base_dir, name, buffer_size, text_buffer_size, text_max_flush_interval
-        )
-
-    def log(
-        self,
-        metrics: Dict[str, Any],
-        step: Optional[int] = None,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Log metrics (delegates to LocalFileBackend)."""
-        self._backend.log(metrics, step, walltime)
-
-    def info(
-        self,
-        message: str,
-        level: int = 20,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Log text message (delegates to LocalFileBackend)."""
-        self._backend.info(message, level, walltime)
-
-    def shutdown(self) -> None:
-        """Shutdown the backend (delegates to LocalFileBackend)."""
-        self._backend.shutdown()
-
-
-def create_local_factory(
-    base_dir: str,
-    buffer_size: int = 100,
-    text_buffer_size: int = 50,
-    text_max_flush_interval: float = 5.0,
-):
-    """Create a local file backend factory for use with LoggerManager.
-
-    Args:
-        base_dir: Base directory for storing metrics.
-        buffer_size: Number of entries to buffer before flushing (default: 100).
-        text_buffer_size: Max text messages before flush (default: 50).
-        text_max_flush_interval: Max seconds before text flush (default: 5.0).
-
-    Returns:
-        Factory function that creates LocalLoggerActor instances.
-
-    Example:
-        manager = LoggerManager.remote({
-            "local": create_local_factory("/path/to/logs"),
-        })
-    """
-
-    def factory(actor_id: str):
-        return LocalLoggerActor.remote(
-            base_dir=base_dir,
-            name=actor_id,
-            buffer_size=buffer_size,
-            text_buffer_size=text_buffer_size,
-            text_max_flush_interval=text_max_flush_interval,
-        )
-
-    return factory
-
-
-# Backwards compatibility alias
-LocalLoggerWrapper = LocalLoggerActor

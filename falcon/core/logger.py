@@ -13,7 +13,7 @@ import sys
 import traceback
 import warnings
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Union
 
 
 class LoggerBackend:
@@ -301,7 +301,7 @@ class _DefaultLogger:
         pass  # Silent for metrics
 
 
-_current_logger: Any = _DefaultLogger()
+_current_logger: Union[Logger, _DefaultLogger] = _DefaultLogger()
 
 
 def get_logger() -> Any:
