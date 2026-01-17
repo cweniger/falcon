@@ -12,7 +12,6 @@ from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logging import log, info, DEBUG
 from falcon.core.utils import RVBatch
 from falcon.contrib.flow import Flow
 from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
@@ -90,6 +89,7 @@ class SNPE_A(StepwiseEstimator):
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
         config: Optional[dict] = None,
+        logger=None,
     ):
         """
         Initialize SNPE_A estimator.
@@ -99,6 +99,7 @@ class SNPE_A(StepwiseEstimator):
             theta_key: Key for theta in batch data
             condition_keys: Keys for condition data in batch
             config: Configuration dict with loop, network, optimizer, inference sections
+            logger: Logger instance for logging (optional)
         """
         # Merge user config with defaults using OmegaConf structured config
         schema = OmegaConf.structured(SNPEConfig)
@@ -109,6 +110,7 @@ class SNPE_A(StepwiseEstimator):
             loop_config=config.loop,
             theta_key=theta_key,
             condition_keys=condition_keys,
+            logger=logger,
         )
 
         self.config = config
@@ -148,7 +150,8 @@ class SNPE_A(StepwiseEstimator):
         if device:
             return torch.device(device)
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        info(f"Auto-detected device: {dev}", DEBUG)
+        if self.logger:
+            self.logger.debug(f"Auto-detected device: {dev}")
         return dev
 
     # ==================== Network Initialization ====================
@@ -156,8 +159,9 @@ class SNPE_A(StepwiseEstimator):
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
         """Initialize flow networks and optimizer."""
         self._init_parameters = [theta, conditions]
-        info("Initializing networks...", DEBUG)
-        info(f"GPU available: {torch.cuda.is_available()}", DEBUG)
+        if self.logger:
+            self.logger.debug("Initializing networks...")
+            self.logger.debug(f"GPU available: {torch.cuda.is_available()}")
 
         cfg_net = self.config.network
         cfg_opt = self.config.optimizer
@@ -200,7 +204,8 @@ class SNPE_A(StepwiseEstimator):
         )
 
         self.networks_initialized = True
-        info("Networks initialized.", DEBUG)
+        if self.logger:
+            self.logger.debug("Networks initialized.")
 
     def _create_flow(self, theta, s, is_conditional=True):
         """Create a Flow network with current config."""
@@ -238,8 +243,9 @@ class SNPE_A(StepwiseEstimator):
         ts = time.time()
         self.history[f"{phase}_ids"].extend((ts, id) for id in ids.tolist())
 
-        log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
-        log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
+        if self.logger:
+            self.logger.log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
+            self.logger.log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
 
         # Transform to hypercube space
         u = self.simulator_instance.inverse(theta)
@@ -328,17 +334,20 @@ class SNPE_A(StepwiseEstimator):
         if val_loss < self.best_conditional_flow_val_loss:
             self.best_conditional_flow_val_loss = val_loss
             self._update_best_weights("conditional")
-            log({"checkpoint:conditional": epoch})
+            if self.logger:
+                self.logger.log({"checkpoint:conditional": epoch})
 
         # Update best marginal flow
         if val_aux_loss < self.best_marginal_flow_val_loss:
             self.best_marginal_flow_val_loss = val_aux_loss
             self._update_best_weights("marginal")
-            log({"checkpoint:marginal": epoch})
+            if self.logger:
+                self.logger.log({"checkpoint:marginal": epoch})
 
         # LR scheduler step
         self._scheduler.step(val_loss)
-        log({"lr": self._optimizer.param_groups[0]["lr"]})
+        if self.logger:
+            self.logger.log({"lr": self._optimizer.param_groups[0]["lr"]})
 
     # ==================== Sampling Methods ====================
 
@@ -394,8 +403,9 @@ class SNPE_A(StepwiseEstimator):
                 evidence_conditions=evidence_conditions,
             )
             mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
-            log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
-            log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
+            if self.logger:
+                self.logger.log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
+                self.logger.log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
 
         samples, logprob = self._importance_sample(
             num_samples,
@@ -403,11 +413,12 @@ class SNPE_A(StepwiseEstimator):
             parent_conditions=parent_conditions,
             evidence_conditions=evidence_conditions,
         )
-        log({
-            "sample_proposal:mean": samples.mean().item(),
-            "sample_proposal:std": samples.std().item(),
-            "sample_proposal:logprob": logprob.mean().item(),
-        })
+        if self.logger:
+            self.logger.log({
+                "sample_proposal:mean": samples.mean().item(),
+                "sample_proposal:std": samples.std().item(),
+                "sample_proposal:logprob": logprob.mean().item(),
+            })
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
     def _importance_sample(
@@ -444,10 +455,11 @@ class SNPE_A(StepwiseEstimator):
         conditional_net.eval()
         samples_proposals = conditional_net.sample(cfg_inf.num_proposals, s).detach()
 
-        log({
-            "importance_sample:proposal_mean": samples_proposals.mean().item(),
-            "importance_sample:proposal_std": samples_proposals.std().item(),
-        })
+        if self.logger:
+            self.logger.log({
+                "importance_sample:proposal_mean": samples_proposals.mean().item(),
+                "importance_sample:proposal_std": samples_proposals.std().item(),
+            })
 
         # Compute log probs
         log_prob_cond = conditional_net.log_prob(samples_proposals, s)
@@ -472,8 +484,9 @@ class SNPE_A(StepwiseEstimator):
 
         # Effective sample size
         n_eff = 1 / (weights**2).sum(dim=0).cpu().detach().numpy()
-        log({"importance_sample:n_eff_min": n_eff.min()})
-        log({"importance_sample:n_eff_max": n_eff.max()})
+        if self.logger:
+            self.logger.log({"importance_sample:n_eff_min": n_eff.min()})
+            self.logger.log({"importance_sample:n_eff_max": n_eff.max()})
 
         # Resample
         idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
@@ -487,7 +500,8 @@ class SNPE_A(StepwiseEstimator):
 
     def save(self, node_dir: Path) -> None:
         """Save SNPE-A state."""
-        info(f"Saving: {node_dir}", DEBUG)
+        if self.logger:
+            self.logger.debug(f"Saving: {node_dir}")
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
@@ -511,7 +525,8 @@ class SNPE_A(StepwiseEstimator):
 
     def load(self, node_dir: Path) -> None:
         """Load SNPE-A state."""
-        info(f"Loading: {node_dir}", DEBUG)
+        if self.logger:
+            self.logger.debug(f"Loading: {node_dir}")
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 

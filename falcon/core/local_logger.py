@@ -15,6 +15,7 @@ Each NPZ file contains:
     - walltime: float64 array of epoch timestamps
 """
 
+import logging
 import time
 from datetime import datetime
 from pathlib import Path
@@ -23,7 +24,26 @@ from typing import Any, Dict, List, Optional, Tuple, Union
 import numpy as np
 import ray
 
-from .logger import LoggerBackend
+
+class LoggerBackend:
+    """Abstract base class for logging backends."""
+
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log a batch of metrics."""
+        pass
+
+    def shutdown(self) -> None:
+        """Clean up resources."""
+        pass
+
+    def get_log_handler(self) -> Optional[logging.Handler]:
+        """Return a logging.Handler for Python logging integration."""
+        return None
 
 # Log level names for text logging
 _LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR"}
@@ -95,6 +115,13 @@ class LocalFileBackend(LoggerBackend):
         timestamp = datetime.now().isoformat(timespec="milliseconds")
         with open(self.log_path, "w") as f:
             f.write(f"{timestamp} [INFO] Logger initialized for '{name}'\n")
+
+        # Setup Python logging handler for text logging
+        self._log_handler = logging.FileHandler(self.log_path)
+        self._log_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s',
+            datefmt='%Y-%m-%dT%H:%M:%S'
+        ))
 
     def log(
         self,
@@ -212,12 +239,30 @@ class LocalFileBackend(LoggerBackend):
         self.text_buffer = []
         self.last_text_flush = time.time()
 
-    def shutdown(self) -> None:
-        """Flush all remaining buffers to disk."""
+    def get_log_handler(self) -> logging.Handler:
+        """Return handler for Python logging integration."""
+        return self._log_handler
+
+    def get_log_tail(self, n: int = 50) -> List[str]:
+        """Read last n lines from disk."""
+        if not self.log_path.exists():
+            return []
+        with open(self.log_path) as f:
+            lines = f.readlines()
+        return [line.rstrip() for line in lines[-n:]]
+
+    def flush(self) -> None:
+        """Flush all buffers to disk."""
         for key in list(self.buffers.keys()):
             if self.buffers[key]:
                 self._flush_metric(key)
         self._flush_text()
+        self._log_handler.flush()
+
+    def shutdown(self) -> None:
+        """Flush all remaining buffers to disk."""
+        self.flush()
+        self._log_handler.close()
 
 
 @ray.remote

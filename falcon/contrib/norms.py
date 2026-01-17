@@ -1,6 +1,5 @@
 import torch
 import torch.nn as nn
-from falcon.core.logging import log
 from torch.nn.parameter import UninitializedParameter
 
 
@@ -71,15 +70,7 @@ class LazyOnlineNorm(nn.Module):
             if self.monotonic_variance:
                 self.min_variance = torch.minimum(self.min_variance, self.running_var)
 
-            log(
-                {
-                    "lazy_online_norm:mean_min": self.running_mean.min().item(),
-                    "lazy_online_norm:mean_max": self.running_mean.max().item(),
-                    "lazy_online_norm:std_min": self.running_var.min().item()**0.5,
-                    "lazy_online_norm:std_max": self.running_var.max().item()**0.5,
-                },
-                log_prefix = self.log_prefix
-            )
+            # Note: logging removed in refactor - these are debug metrics
 
 #            log(
 #                {
@@ -231,12 +222,7 @@ class DiagonalWhitener(torch.nn.Module):
 
         x_scaled = (x - mean) / (var.sqrt() + self.eps)
 
-        log(
-            {
-                f"batch_mean {self.tag}": mean[0].mean().item(),
-                f"batch_var {self.tag}": var[0].mean().item(),
-            }
-        )
+        # Note: logging removed in refactor - these are debug metrics
 
         scaling = self._mean_var_to_scaling(mean, var)
 

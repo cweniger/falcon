@@ -10,11 +10,12 @@ WandB is an optional dependency. If not installed, attempting to use
 WandB backends will raise an ImportError with installation instructions.
 """
 
+import logging
 from typing import Any, Dict, Optional
 
 import ray
 
-from .logger import LoggerBackend
+from .local_logger import LoggerBackend
 
 # Optional wandb import
 try:
@@ -31,6 +32,22 @@ def _check_wandb_available():
         raise ImportError(
             "WandB is not installed. Install it with: pip install wandb"
         )
+
+
+class WandBLogHandler(logging.Handler):
+    """Forward log messages to WandB console output."""
+
+    def __init__(self, run):
+        super().__init__()
+        self.run = run
+
+    def emit(self, record):
+        try:
+            msg = self.format(record)
+            # Log as console output to wandb (non-committing to avoid step issues)
+            self.run.log({"_console": msg}, commit=False)
+        except Exception:
+            pass  # Don't crash on wandb errors
 
 
 class WandBBackend(LoggerBackend):
@@ -71,6 +88,10 @@ class WandBBackend(LoggerBackend):
 
         self.run = wandb.init(**wandb_kwargs)
 
+        # Setup Python logging handler
+        self._log_handler = WandBLogHandler(self.run)
+        self._log_handler.setFormatter(logging.Formatter('%(message)s'))
+
     def log(
         self,
         metrics: Dict[str, Any],
@@ -86,6 +107,10 @@ class WandBBackend(LoggerBackend):
             self.run.log(metrics, step=step)
         except Exception as e:
             print(f"WandB logging error: {e}")
+
+    def get_log_handler(self) -> logging.Handler:
+        """Return handler for Python logging integration."""
+        return self._log_handler
 
     def shutdown(self) -> None:
         """Finish the WandB run."""
