@@ -13,6 +13,9 @@ setup(
         "omegaconf",
         "coolname",
     ],
+    extras_require={
+        "monitor": ["textual>=0.40.0"],
+    },
     entry_points={
         "console_scripts": [
             "falcon=falcon.cli:main",

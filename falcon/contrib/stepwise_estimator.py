@@ -7,7 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from falcon.core.base_estimator import BaseEstimator
-from falcon.core.logging import log, info
+from falcon.core.logger import log, debug, info, warning, error
 
 
 @dataclass

@@ -97,3 +97,11 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         f"No actor output.log files found in {graph_dir}. "
         f"Found directories: {[p.name for p in graph_dir.iterdir() if p.is_dir()]}"
     )
+
+    # Check driver/output.log exists with runtime logging
+    driver_log = graph_dir / "driver" / "output.log"
+    assert driver_log.exists(), f"driver/output.log not found at {driver_log}"
+    driver_log_content = driver_log.read_text()
+    assert len(driver_log_content) > 0, "driver/output.log is empty"
+    # Verify it contains timestamped log entries
+    assert "[INFO]" in driver_log_content, "driver/output.log missing INFO level entries"
