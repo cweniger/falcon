@@ -7,6 +7,7 @@ from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 from falcon.core.base_estimator import BaseEstimator
+from falcon.core.logger import log, debug, info, warning, error
 
 
 @dataclass
@@ -39,7 +40,6 @@ class StepwiseEstimator(BaseEstimator):
         loop_config: TrainingLoopConfig,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
-        logger=None,
     ):
         """
         Initialize the stepwise estimator.
@@ -49,12 +49,10 @@ class StepwiseEstimator(BaseEstimator):
             loop_config: Training loop configuration
             theta_key: Key for theta in batch data
             condition_keys: Keys for condition data in batch
-            logger: Logger instance for logging (optional)
         """
         self.simulator_instance = simulator_instance
         self.loop_config = loop_config
         self.param_dim = simulator_instance.param_dim
-        self.logger = logger
 
         # Key configuration for Batch access
         self.theta_key = theta_key
@@ -154,9 +152,8 @@ class StepwiseEstimator(BaseEstimator):
         t0 = time.perf_counter()
 
         for epoch in range(cfg.num_epochs):
-            if self.logger:
-                self.logger.info(f"Epoch {epoch+1}/{cfg.num_epochs}")
-                self.logger.log({"epoch": epoch + 1})
+            info(f"Epoch {epoch+1}/{cfg.num_epochs}")
+            log({"epoch": epoch + 1})
 
             # === Training phase ===
             train_metrics_sum = {}
@@ -171,9 +168,8 @@ class StepwiseEstimator(BaseEstimator):
                 num_train_batches += 1
 
                 # Log step-level metrics
-                if self.logger:
-                    for k, v in metrics.items():
-                        self.logger.log({f"train:{k}": v})
+                for k, v in metrics.items():
+                    log({f"train:{k}": v})
 
                 # Async yield and pause check
                 await asyncio.sleep(0)
@@ -212,9 +208,8 @@ class StepwiseEstimator(BaseEstimator):
             }
 
             # Log validation metrics
-            if self.logger:
-                for k, v in val_metrics_avg.items():
-                    self.logger.log({f"val:{k}": v})
+            for k, v in val_metrics_avg.items():
+                log({f"val:{k}": v})
 
             # === End of epoch hook ===
             self.on_epoch_end(epoch, val_metrics_avg)
@@ -233,8 +228,7 @@ class StepwiseEstimator(BaseEstimator):
             )
 
             if epochs_no_improve >= cfg.early_stop_patience:
-                if self.logger:
-                    self.logger.info("Early stopping triggered.")
+                info("Early stopping triggered.")
                 break
 
             await self._pause_event.wait()
@@ -251,8 +245,7 @@ class StepwiseEstimator(BaseEstimator):
 
         elapsed = (time.perf_counter() - t0) / 60.0
         self.history["elapsed_min"].append(elapsed)
-        if self.logger:
-            self.logger.log({"elapsed_minutes": elapsed})
+        log({"elapsed_minutes": elapsed})
 
         try:
             stats = buffer.get_stats()

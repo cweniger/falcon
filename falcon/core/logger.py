@@ -247,13 +247,38 @@ class Logger:
 
 
 # ============================================================================
-# Module-level logger instance for backward compatibility
+# Module-level logger and convenience functions
 # ============================================================================
 
-_current_logger: Optional[Logger] = None
+
+class _DefaultLogger:
+    """Fallback logger that prints to console when no Logger is set.
+
+    Useful for testing/debugging code outside of falcon context.
+    Text messages print to console, metrics are silently ignored.
+    """
+
+    def debug(self, message: str) -> None:
+        pass  # Silent for debug
+
+    def info(self, message: str) -> None:
+        print(f"[INFO] {message}")
+
+    def warning(self, message: str) -> None:
+        print(f"[WARNING] {message}")
+
+    def error(self, message: str) -> None:
+        print(f"[ERROR] {message}", file=sys.stderr)
+
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None,
+            prefix: Optional[str] = None) -> None:
+        pass  # Silent for metrics
 
 
-def get_logger() -> Optional[Logger]:
+_current_logger: Any = _DefaultLogger()
+
+
+def get_logger() -> Any:
     """Get the current module-level logger instance."""
     return _current_logger
 
@@ -262,3 +287,38 @@ def set_logger(logger: Logger) -> None:
     """Set the current module-level logger instance."""
     global _current_logger
     _current_logger = logger
+
+
+# ---- Module-level convenience functions ----
+# These dispatch to _current_logger, allowing simulators and estimators
+# to log without needing explicit logger parameters.
+
+def log(metrics: Dict[str, Any], step: Optional[int] = None, prefix: Optional[str] = None) -> None:
+    """Log metrics to the current logger.
+
+    Args:
+        metrics: Dictionary of metric names to values
+        step: Optional step number
+        prefix: Optional prefix to add to all metric names
+    """
+    _current_logger.log(metrics, step=step, prefix=prefix)
+
+
+def debug(message: str) -> None:
+    """Log a debug message."""
+    _current_logger.debug(message)
+
+
+def info(message: str) -> None:
+    """Log an info message."""
+    _current_logger.info(message)
+
+
+def warning(message: str) -> None:
+    """Log a warning message."""
+    _current_logger.warning(message)
+
+
+def error(message: str) -> None:
+    """Log an error message."""
+    _current_logger.error(message)

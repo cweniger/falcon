@@ -126,7 +126,6 @@ class NodeWrapper:
                 theta_key=node.name,
                 condition_keys=self.condition_keys,
                 config=node.estimator_config,
-                logger=self.logger,
             )
         else:
             self.estimator_instance = None
