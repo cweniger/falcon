@@ -98,10 +98,10 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         f"Found directories: {[p.name for p in graph_dir.iterdir() if p.is_dir()]}"
     )
 
-    # Check falcon.log exists in output directory with runtime logging
-    falcon_log = tmp_path / "falcon.log"
-    assert falcon_log.exists(), f"falcon.log not found at {falcon_log}"
-    falcon_log_content = falcon_log.read_text()
-    assert len(falcon_log_content) > 0, "falcon.log is empty"
+    # Check driver/output.log exists with runtime logging
+    driver_log = graph_dir / "driver" / "output.log"
+    assert driver_log.exists(), f"driver/output.log not found at {driver_log}"
+    driver_log_content = driver_log.read_text()
+    assert len(driver_log_content) > 0, "driver/output.log is empty"
     # Verify it contains timestamped log entries
-    assert "[INFO]" in falcon_log_content, "falcon.log missing INFO level entries"
+    assert "[INFO]" in driver_log_content, "driver/output.log missing INFO level entries"

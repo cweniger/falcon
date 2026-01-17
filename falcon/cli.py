@@ -24,7 +24,7 @@ from omegaconf import OmegaConf, DictConfig
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
-from falcon.core.logger import Logger
+from falcon.core.logger import Logger, set_logger, info
 from falcon.core.run_name import generate_run_dir
 
 
@@ -247,34 +247,24 @@ def launch_mode(cfg: DictConfig) -> None:
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
 
-    # Generate wandb group if not set
+    # Generate wandb group if not set - use run-dir folder name
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     if logging_cfg.get("wandb", {}).get("enabled", False):
         if not logging_cfg.get("wandb", {}).get("group"):
-            logging_cfg.setdefault("wandb", {})["group"] = f"run_{datetime.now():%Y%m%d_%H%M%S}"
+            # Use the run-dir folder name as the group name
+            logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
 
     # Ensure local dir is set to graph path
     logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
 
-    # Create falcon.log header (before Ray so we can log early)
-    falcon_log = output_dir / "falcon.log"
-    with open(falcon_log, "w") as f:
-        f.write(f"falcon  ▁▁▁▃▆█▆▃▁▁▁▁  v{falcon.__version__}\n\n")
-        f.write("Output:\n")
-        f.write(f"  {output_dir}\n\n")
-
-    # Create driver logger (can start before Ray!)
+    # Create driver logger and set as module-level logger
+    # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
 
-    # Also write driver logs to falcon.log for runtime visibility
-    import logging
-    falcon_log_handler = logging.FileHandler(falcon_log, mode='a')
-    falcon_log_handler.setFormatter(logging.Formatter(
-        '%(asctime)s [%(levelname)s] %(message)s',
-        datefmt='%Y-%m-%dT%H:%M:%S'
-    ))
-    falcon_log_handler.setLevel(logging.INFO)
-    driver_logger._logger.addHandler(falcon_log_handler)
+    # Log startup info
+    info(f"falcon v{falcon.__version__}")
+    info(f"Output: {output_dir}")
 
     # Initialize Ray
     ray_init_args = cfg.get("ray", {}).get("init", {})
@@ -296,13 +286,8 @@ def launch_mode(cfg: DictConfig) -> None:
     gpu = int(resources.get("GPU", 0))
     mem_gb = resources.get("memory", 0) / (1024**3)
 
-    # Append Ray info to falcon.log
-    with open(falcon_log, "a") as f:
-        f.write("Ray:\n")
-        f.write(f"  {gcs_address} ({ray_status})\n")
-        f.write(f"  Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB\n\n")
-
-    driver_logger.info(f"Initialized Ray: {gcs_address}")
+    info(f"Ray: {gcs_address} ({ray_status})")
+    info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
 
     ########################
     ### Model definition ###
@@ -316,13 +301,10 @@ def launch_mode(cfg: DictConfig) -> None:
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
 
-    # Append graph info to falcon.log
-    with open(falcon_log, "a") as f:
-        f.write(str(graph) + "\n\n")
-        f.write("Observed:\n")
-        for name, shape in observations.items():
-            f.write(f"  {name} {list(shape.shape)}\n")
-        f.write("\n")
+    # Log graph info
+    info(str(graph))
+    for name, shape in observations.items():
+        info(f"Observed: {name} {list(shape.shape)}")
 
     ####################
     ### Run analysis ###
@@ -366,8 +348,9 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
 
-    # Create driver logger
+    # Create driver logger and set as module-level logger
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
 
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
@@ -394,8 +377,8 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
     num_samples = sample_cfg.get("n", 42)
-    print(f"Generating {num_samples} samples using {sample_type} sampling...")
-    print(graph)
+    info(f"Generating {num_samples} samples using {sample_type} sampling...")
+    info(str(graph))
 
     # Deploy graph for sampling
     deployed_graph = falcon.DeployedGraph(

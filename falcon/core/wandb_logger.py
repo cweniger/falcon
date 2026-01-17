@@ -11,11 +11,15 @@ WandB backends will raise an ImportError with installation instructions.
 """
 
 import logging
-from typing import Any, Dict, Optional
+from typing import Any, Dict, Optional, TYPE_CHECKING
 
 import ray
 
-from .local_logger import LoggerBackend
+# Import LoggerBackend from logger.py (defined there as the canonical location)
+if TYPE_CHECKING:
+    from .logger import LoggerBackend
+else:
+    from .logger import LoggerBackend
 
 # Optional wandb import
 try:

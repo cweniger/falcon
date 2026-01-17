@@ -7,7 +7,7 @@ import joblib
 import ray
 from torch.utils.data import IterableDataset
 
-from falcon.core.logger import Logger
+from falcon.core.logger import Logger, set_logger, log, error
 
 
 class Batch:
@@ -134,11 +134,10 @@ class DatasetManagerActor:
         self.status = np.zeros(0, dtype=int)
         self.ref_counts = np.zeros(0, dtype=int)
 
-        # Create logger
+        # Create logger and set as module-level logger
         if log_config:
-            self.logger = Logger("Dataset", log_config, capture_exceptions=True)
-        else:
-            self.logger = None
+            logger = Logger("dataset", log_config, capture_exceptions=True)
+            set_logger(logger)
 
         asyncio.create_task(self.monitor())
 
@@ -247,13 +246,15 @@ class DatasetManagerActor:
 
         self.rotate_sample_buffer()
 
-        if self.logger:
-            self.logger.log({"buffer:n_total": len(self.ray_store)})
-            self.logger.log({"buffer:n_validation": sum(self.status == SampleStatus.VALIDATION)})
-            self.logger.log({"buffer:n_training": sum(self.status == SampleStatus.TRAINING)})
-            self.logger.log({"buffer:n_disfavoured": sum(self.status == SampleStatus.DISFAVOURED)})
-            self.logger.log({"buffer:n_tombstone": sum(self.status == SampleStatus.TOMBSTONE)})
-            self.logger.log({"buffer:n_deleted": sum(self.status == SampleStatus.DELETED)})
+        # Log buffer statistics
+        log({
+            "n_total": len(self.ray_store),
+            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
+            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
+            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
+            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
+        }, prefix="buffer")
 
         self.dump_store()
 
@@ -363,8 +364,14 @@ class DatasetView(IterableDataset):
 
     def _log_dataset_size(self, size):
         """Log dataset size based on sample status."""
-        # Note: logging removed in refactor - no logger available in DatasetView
-        pass
+        # Determine prefix based on sample status
+        if self.sample_status == SampleStatus.VALIDATION:
+            prefix = "dataset:validation"
+        elif isinstance(self.sample_status, list):
+            prefix = "dataset:training"
+        else:
+            prefix = "dataset"
+        log({"active_size": size}, prefix=prefix)
 
     def __iter__(self):
         active_samples, active_ids = ray.get(
@@ -380,8 +387,7 @@ class DatasetView(IterableDataset):
                     key: ray.get(active_samples[i][key]) for key in self.keylist
                 }
             except Exception as e:
-                # Note: error logging removed in refactor - no logger available
-                print(f"Dataset retrieval error: {e}", file=sys.stderr)
+                error(f"Dataset retrieval error: {e}")
                 continue
 
             if self.filter is not None:

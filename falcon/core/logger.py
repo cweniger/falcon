@@ -15,6 +15,32 @@ import warnings
 from pathlib import Path
 from typing import Any, Dict, List, Optional
 
+
+class LoggerBackend:
+    """Abstract base class for logging backends.
+
+    All logging backends (local file, WandB, etc.) should implement this interface.
+    """
+
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        walltime: Optional[float] = None,
+    ) -> None:
+        """Log a batch of metrics."""
+        pass
+
+    def shutdown(self) -> None:
+        """Clean up resources."""
+        pass
+
+    def get_log_handler(self) -> Optional[logging.Handler]:
+        """Return a logging.Handler for Python logging integration."""
+        return None
+
+
+# Import backends after LoggerBackend is defined to avoid circular imports
 from .local_logger import LocalFileBackend
 from .wandb_logger import WandBBackend, WANDB_AVAILABLE
 
@@ -239,10 +265,10 @@ class Logger:
 
     # ---- For Monitor ----
 
-    def get_log_tail(self, n: int = 50) -> List[str]:
+    def get_output_log_tail(self, n: int = 50) -> List[str]:
         """Get last n log lines (reads from disk)."""
         if self._local:
-            return self._local.get_log_tail(n)
+            return self._local.get_output_log_tail(n)
         return []
 
 

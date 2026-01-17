@@ -19,31 +19,19 @@ import logging
 import time
 from datetime import datetime
 from pathlib import Path
-from typing import Any, Dict, List, Optional, Tuple, Union
+from typing import Any, Dict, List, Optional, Tuple, Union, TYPE_CHECKING
 
 import numpy as np
 import ray
 
-
-class LoggerBackend:
-    """Abstract base class for logging backends."""
-
-    def log(
-        self,
-        metrics: Dict[str, Any],
-        step: Optional[int] = None,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Log a batch of metrics."""
-        pass
-
-    def shutdown(self) -> None:
-        """Clean up resources."""
-        pass
-
-    def get_log_handler(self) -> Optional[logging.Handler]:
-        """Return a logging.Handler for Python logging integration."""
-        return None
+# Import LoggerBackend from logger.py (defined there to avoid duplication)
+# Use TYPE_CHECKING to avoid circular import at runtime
+if TYPE_CHECKING:
+    from .logger import LoggerBackend
+else:
+    # At runtime, we need the actual class for inheritance
+    # This works because logger.py imports local_logger.py AFTER defining LoggerBackend
+    from .logger import LoggerBackend
 
 # Log level names for text logging
 _LEVEL_NAMES = {10: "DEBUG", 20: "INFO", 30: "WARNING", 40: "ERROR"}
@@ -243,7 +231,7 @@ class LocalFileBackend(LoggerBackend):
         """Return handler for Python logging integration."""
         return self._log_handler
 
-    def get_log_tail(self, n: int = 50) -> List[str]:
+    def get_output_log_tail(self, n: int = 50) -> List[str]:
         """Read last n lines from disk."""
         if not self.log_path.exists():
             return []

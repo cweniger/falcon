@@ -8,7 +8,7 @@ from pathlib import Path
 import numpy as np
 from omegaconf import ListConfig
 
-from falcon.core.logger import Logger
+from falcon.core.logger import Logger, set_logger, debug, info, warning, error, log
 from falcon.core.raystore import BufferView
 from .utils import LazyLoader, as_rvbatch
 
@@ -73,12 +73,12 @@ class MultiplexNodeWrapper:
                 return {"status": "error", "error": "timeout"}
         return {"status": "unknown"}
 
-    def get_log_tail(self, num_lines: int = 50) -> list:
+    def get_output_log_tail(self, num_lines: int = 50) -> list:
         """Return log tail from first child actor."""
         if self.wrapped_node_list:
             try:
                 return ray.get(
-                    self.wrapped_node_list[0].get_log_tail.remote(num_lines),
+                    self.wrapped_node_list[0].get_output_log_tail.remote(num_lines),
                     timeout=2.0
                 )
             except Exception:
@@ -98,16 +98,14 @@ class NodeWrapper:
         self.node = node
         self.name = node.name
 
-        # Create logger directly (no Ray actor)
+        # Create logger and set as module-level logger
+        # This enables falcon.log(), falcon.info() etc. for simulators and estimators
         if log_config:
-            self.logger = Logger(self.name, log_config, capture_exceptions=True)
+            self._logger = Logger(self.name, log_config, capture_exceptions=True)
         else:
             # Fallback: create a minimal logger config
-            self.logger = Logger(self.name, {"local": {"enabled": True, "dir": "."}}, capture_exceptions=True)
-
-        # Set module-level logger so falcon.log() works in simulators
-        from falcon.core.logger import set_logger
-        set_logger(self.logger)
+            self._logger = Logger(self.name, {"local": {"enabled": True, "dir": "."}}, capture_exceptions=True)
+        set_logger(self._logger)
 
         # Status tracking for monitoring
         self._status = "initializing"
@@ -117,7 +115,7 @@ class NodeWrapper:
 
         # Condition keys for embedding (evidence + scaffolds)
         self.condition_keys = self.node.evidence + self.node.scaffolds
-        self.logger.debug(f"Condition keys: {self.condition_keys}")
+        debug(f"Condition keys: {self.condition_keys}")
 
         if node.estimator_cls is not None:
             estimator_cls = LazyLoader(node.estimator_cls)
@@ -140,8 +138,8 @@ class NodeWrapper:
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         self._status = "training"
-        self.logger.info(f"[{self.name}] Training started")
-        self.logger.debug(f"Condition keys: {self.evidence + self.scaffolds}")
+        info(f"[{self.name}] Training started")
+        debug(f"Condition keys: {self.evidence + self.scaffolds}")
 
         # Create BufferView - estimator controls what keys it needs
         buffer = BufferView(dataset_manager)
@@ -159,9 +157,9 @@ class NodeWrapper:
                 final_loss = losses[-1]
 
         if final_loss is not None:
-            self.logger.info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
+            info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
         else:
-            self.logger.info(f"[{self.name}] Training completed")
+            info(f"[{self.name}] Training completed")
 
     def sample(self, n_samples, incoming=None):
         if self.estimator_instance is not None:
@@ -262,84 +260,60 @@ class NodeWrapper:
 
         return status
 
-    def get_log_tail(self, num_lines: int = 50) -> list:
+    def get_output_log_tail(self, num_lines: int = 50) -> list:
         """Return recent log lines from output.log."""
-        return self.logger.get_log_tail(num_lines)
+        return self._logger.get_output_log_tail(num_lines)
 
     def shutdown(self):
         """Shutdown the node and its logger."""
-        if hasattr(self, 'logger'):
-            self.logger.shutdown()
+        if hasattr(self, '_logger'):
+            self._logger.shutdown()
 
 
 class DeployedGraph:
     def __init__(self, graph, model_path=None, log_config=None):
-        """Initialize a DeployedGraph with the given conceptual graph of nodes."""
+        """Initialize a DeployedGraph with the given conceptual graph of nodes.
+
+        Note: This class uses falcon.info(), falcon.warning() etc. for logging.
+        These functions use the module-level logger set by cli.py via set_logger().
+        """
         self.graph = graph
         self.model_path = model_path
         self.log_config = log_config or {}
         self.wrapped_nodes_dict = {}
-        self.coordinator = None
+        self.monitor_bridge = None
 
-        # Create a driver-side logger for DeployedGraph (but don't capture exceptions,
-        # as the main driver logger already does that)
-        self._logger = None
-        self._init_logger()
-
-        self._create_coordinator()
+        self._create_monitor_bridge()
         self.deploy_nodes()
 
-    def _init_logger(self):
-        """Initialize or reinitialize the logger."""
-        if self._logger is None:
-            self._logger = Logger("deployed_graph", self.log_config, capture_exceptions=False)
-
-    @property
-    def logger(self):
-        """Get the logger, initializing if needed (e.g., after deserialization)."""
-        if self._logger is None:
-            self._init_logger()
-        return self._logger
-
-    def __getstate__(self):
-        """Exclude logger from pickling (for Ray serialization)."""
-        state = self.__dict__.copy()
-        state['_logger'] = None  # Logger contains locks that can't be pickled
-        return state
-
-    def __setstate__(self, state):
-        """Restore state and reinitialize logger."""
-        self.__dict__.update(state)
-        # Logger will be reinitialized on first access via the property
-
-    def _create_coordinator(self):
-        """Create the FalconCoordinator actor for monitoring."""
-        from falcon.core.coordinator import FalconCoordinator
+    def _create_monitor_bridge(self):
+        """Create the MonitorBridge actor for falcon monitor TUI."""
+        from falcon.core.monitor_bridge import MonitorBridge
         run_dir = str(self.model_path) if self.model_path else "unknown"
         try:
             # Name the actor so falcon monitor can discover it
-            self.coordinator = FalconCoordinator.options(
-                name="falcon:coordinator",
+            self.monitor_bridge = MonitorBridge.options(
+                name="falcon:monitor_bridge",
                 lifetime="detached",  # Keep alive even if creator dies
             ).remote(run_dir=run_dir)
         except ValueError as e:
             # Actor with this name might already exist from a previous run
             if "already exists" in str(e):
                 try:
-                    self.coordinator = ray.get_actor("falcon:coordinator")
+                    self.monitor_bridge = ray.get_actor("falcon:monitor_bridge")
                 except Exception:
-                    self.logger.warning("Could not connect to existing coordinator")
-                    self.coordinator = None
+                    warning("Could not connect to existing monitor bridge")
+                    self.monitor_bridge = None
             else:
-                self.logger.warning(f"Could not create coordinator: {e}")
-                self.coordinator = None
+                warning(f"Could not create monitor bridge: {e}")
+                self.monitor_bridge = None
         except Exception as e:
-            self.logger.warning(f"Could not create coordinator: {e}")
-            self.coordinator = None
+            warning(f"Could not create monitor bridge: {e}")
+            self.monitor_bridge = None
 
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
-        self.logger.info("Spinning up graph...")
+        info("Spinning up graph...")
 
         # Create all actors (non-blocking)
         for node in self.graph.node_list:
@@ -357,7 +331,7 @@ class DeployedGraph:
                     **node.actor_config
                 ).remote(node, self.graph, self.model_path, self.log_config)
 
-        # Wait for all actors to initialize and register with coordinator
+        # Wait for all actors to initialize and register with monitor bridge
         for name, actor in self.wrapped_nodes_dict.items():
             try:
                 # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
@@ -365,11 +339,11 @@ class DeployedGraph:
                     ray.get(actor.wait_ready.remote())
                 else:
                     ray.get(actor.__ray_ready__.remote())
-                self.logger.info(f"  ✓ {name}")
+                info(f"  ✓ {name}")
 
-                # Register node with coordinator
-                if self.coordinator:
-                    ray.get(self.coordinator.register_node.remote(name, actor))
+                # Register node with monitor bridge
+                if self.monitor_bridge:
+                    ray.get(self.monitor_bridge.register_node.remote(name, actor))
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
@@ -458,18 +432,18 @@ class DeployedGraph:
         # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor
         dataset_manager = dataset_manager.dataset_manager_actor
 
-        # Register dataset manager with coordinator for monitoring
-        if self.coordinator:
-            ray.get(self.coordinator.register_dataset_manager.remote(dataset_manager))
-            # Set log directory so coordinator can read log files
+        # Register dataset manager with monitor bridge for monitoring
+        if self.monitor_bridge:
+            ray.get(self.monitor_bridge.register_dataset_manager.remote(dataset_manager))
+            # Set log directory so monitor bridge can read log files
             if graph_path is not None:
-                ray.get(self.coordinator.set_log_dir.remote(str(graph_path)))
+                ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
 
         # Initial data generation
         ray.get(dataset_manager.initialize_samples.remote(self))
 
-        self.logger.info("")
-        self.logger.info("Starting analysis. Monitor with: falcon monitor")
+        info("")
+        info("Starting analysis. Monitor with: falcon monitor")
 
         # Training - start all training nodes
         train_futures = {}  # Map future -> node_name for completion tracking
@@ -480,7 +454,7 @@ class DeployedGraph:
                     dataset_manager, observations=observations
                 )
                 train_futures[train_future] = name
-                self.logger.info(f"[{name}] Training started")
+                info(f"[{name}] Training started")
                 time.sleep(1)
 
         resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
@@ -527,16 +501,16 @@ class DeployedGraph:
                     status = ray.get(self.wrapped_nodes_dict[node_name].get_status.remote())
                     loss = status.get("loss")
                     if loss is not None:
-                        self.logger.info(f"[{node_name}] Training completed (loss: {loss:.4f})")
+                        info(f"[{node_name}] Training completed (loss: {loss:.4f})")
                     else:
-                        self.logger.info(f"[{node_name}] Training completed")
+                        info(f"[{node_name}] Training completed")
 
         # Save graph if path is provided
         if graph_path is not None:
             self.save(graph_path)
 
-        self.logger.info("")
-        self.logger.info("Analysis completed.")
+        info("")
+        info("Analysis completed.")
 
     def _log_status(self, dataset_manager):
         """Log periodic status of active training nodes and buffer (separate lines)."""
@@ -548,11 +522,11 @@ class DeployedGraph:
                 total = status.get("total_epochs", 0)
                 loss = status.get("loss")
                 loss_str = f"{loss:.2f}" if loss is not None else "?"
-                self.logger.info(f"[{name}] epoch {epoch}/{total}, loss {loss_str}")
+                info(f"[{name}] epoch {epoch}/{total}, loss {loss_str}")
 
         # Log buffer stats (including total ever simulated)
         stats = ray.get(dataset_manager.get_store_stats.remote())
-        self.logger.info(f"Buffer: {stats['training']} train, {stats['validation']} val ({stats['total_length']} total)")
+        info(f"Buffer: {stats['training']} train, {stats['validation']} val ({stats['total_length']} total)")
 
     def save(self, graph_dir):
         """Save the deployed graph node status."""
@@ -567,7 +541,7 @@ class DeployedGraph:
 
     def load(self, graph_dir):
         """Load the deployed graph nodes status."""
-        self.logger.info(f"Loading deployed graph from: {graph_dir}")
+        info(f"Loading deployed graph from: {graph_dir}")
         load_futures = []
         for name, node in self.wrapped_nodes_dict.items():
             node_dir = Path(graph_dir) / name
