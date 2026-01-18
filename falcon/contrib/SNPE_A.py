@@ -12,8 +12,8 @@ from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logging import log, info, DEBUG
 from falcon.core.utils import RVBatch
+from falcon.core.logger import log, debug, info, warning, error
 from falcon.contrib.flow import Flow
 from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
 from falcon.contrib.torch_embedding import instantiate_embedding
@@ -148,7 +148,7 @@ class SNPE_A(StepwiseEstimator):
         if device:
             return torch.device(device)
         dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        info(f"Auto-detected device: {dev}", DEBUG)
+        debug(f"Auto-detected device: {dev}")
         return dev
 
     # ==================== Network Initialization ====================
@@ -156,8 +156,8 @@ class SNPE_A(StepwiseEstimator):
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
         """Initialize flow networks and optimizer."""
         self._init_parameters = [theta, conditions]
-        info("Initializing networks...", DEBUG)
-        info(f"GPU available: {torch.cuda.is_available()}", DEBUG)
+        debug("Initializing networks...")
+        debug(f"GPU available: {torch.cuda.is_available()}")
 
         cfg_net = self.config.network
         cfg_opt = self.config.optimizer
@@ -200,7 +200,7 @@ class SNPE_A(StepwiseEstimator):
         )
 
         self.networks_initialized = True
-        info("Networks initialized.", DEBUG)
+        debug("Networks initialized.")
 
     def _create_flow(self, theta, s, is_conditional=True):
         """Create a Flow network with current config."""
@@ -487,7 +487,7 @@ class SNPE_A(StepwiseEstimator):
 
     def save(self, node_dir: Path) -> None:
         """Save SNPE-A state."""
-        info(f"Saving: {node_dir}", DEBUG)
+        debug(f"Saving: {node_dir}")
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
@@ -511,7 +511,7 @@ class SNPE_A(StepwiseEstimator):
 
     def load(self, node_dir: Path) -> None:
         """Load SNPE-A state."""
-        info(f"Loading: {node_dir}", DEBUG)
+        debug(f"Loading: {node_dir}")
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 

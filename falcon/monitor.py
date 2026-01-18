@@ -75,7 +75,7 @@ class FalconMonitor(App):
         super().__init__()
         self.ray_address = ray_address
         self.refresh_interval = refresh_interval
-        self.coordinator = None
+        self.monitor_bridge = None
         self.nodes = []
         self.current_node_idx = 0
         self.started_at = None
@@ -97,12 +97,12 @@ class FalconMonitor(App):
             )
             return
 
-        # Discover coordinator
+        # Discover monitor bridge
         try:
-            self.coordinator = ray.get_actor("falcon:coordinator")
+            self.monitor_bridge = ray.get_actor("falcon:monitor_bridge")
         except ValueError:
             self.query_one("#status_bar", Static).update(
-                "[yellow]No Falcon training running (coordinator not found)[/yellow]"
+                "[yellow]No Falcon training running (monitor bridge not found)[/yellow]"
             )
             self.query_one("#buffer_bar", Static).update(
                 "Start a training run with 'falcon launch' first"
@@ -119,11 +119,11 @@ class FalconMonitor(App):
         self.refresh_data()
 
     def refresh_data(self) -> None:
-        if not self.coordinator:
+        if not self.monitor_bridge:
             return
 
         try:
-            status = ray.get(self.coordinator.get_status.remote(), timeout=5.0)
+            status = ray.get(self.monitor_bridge.get_status.remote(), timeout=5.0)
         except Exception as e:
             self.query_one("#status_bar", Static).update(f"[red]Error: {e}[/red]")
             return
@@ -226,7 +226,7 @@ class FalconMonitor(App):
             )
 
     def update_log_view(self) -> None:
-        if not self.nodes or not self.coordinator:
+        if not self.nodes or not self.monitor_bridge:
             return
 
         node_name = self.nodes[self.current_node_idx]
@@ -235,7 +235,7 @@ class FalconMonitor(App):
 
         try:
             lines = ray.get(
-                self.coordinator.get_node_log.remote(node_name, 30),
+                self.monitor_bridge.get_node_log.remote(node_name, 30),
                 timeout=2.0
             )
             log_view.write(f"[bold]Log ({node_name}):[/bold]")

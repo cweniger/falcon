@@ -1,7 +1,8 @@
 import torch
 import torch.nn as nn
-from falcon.core.logging import log
 from torch.nn.parameter import UninitializedParameter
+
+from falcon.core.logger import log
 
 
 class LazyOnlineNorm(nn.Module):
@@ -71,48 +72,14 @@ class LazyOnlineNorm(nn.Module):
             if self.monotonic_variance:
                 self.min_variance = torch.minimum(self.min_variance, self.running_var)
 
-            log(
-                {
-                    "lazy_online_norm:mean_min": self.running_mean.min().item(),
-                    "lazy_online_norm:mean_max": self.running_mean.max().item(),
-                    "lazy_online_norm:std_min": self.running_var.min().item()**0.5,
-                    "lazy_online_norm:std_max": self.running_var.max().item()**0.5,
-                },
-                log_prefix = self.log_prefix
-            )
-
-#            log(
-#                {
-#                    "running_mean_max": self.running_mean.max().item()
-#                }, log_prefix=self.log_prefix
-#            )
-#
-#            log(
-#                {
-#                    f"{self.log_prefix}running_mean_{i}": self.running_mean[i].item()
-#                    for i in range(self.running_mean.shape[0])
-#                }
-#            )
-#            log(
-#                {
-#                    f"{self.log_prefix}running_std_{i}": self.running_var[i].item()
-#                    ** 0.5
-#                    for i in range(self.running_var.shape[0])
-#                }
-#            )
-#            log(
-#                {
-#                    f"{self.log_prefix}batch_mean_{i}": batch_mean[i].item()
-#                    for i in range(batch_mean.shape[0])
-#                }
-#            )
-#            log(
-#                {
-#                    f"{self.log_prefix}batch_std_{i}": batch_var[i].item() ** 0.5
-#                    for i in range(batch_var.shape[0])
-#                }
-#            )
-#
+            # Log normalization statistics
+            if self.log_prefix:
+                log({
+                    "mean_min": self.running_mean.min().item(),
+                    "mean_max": self.running_mean.max().item(),
+                    "std_min": self.running_var.sqrt().min().item(),
+                    "std_max": self.running_var.sqrt().max().item(),
+                }, prefix=self.log_prefix)
         # Use minimum variance for normalization if monotonic_variance is enabled
         effective_var = (
             self.min_variance if self.monotonic_variance else self.running_var
@@ -231,12 +198,11 @@ class DiagonalWhitener(torch.nn.Module):
 
         x_scaled = (x - mean) / (var.sqrt() + self.eps)
 
-        log(
-            {
-                f"batch_mean {self.tag}": mean[0].mean().item(),
-                f"batch_var {self.tag}": var[0].mean().item(),
-            }
-        )
+        # Log batch statistics
+        log({
+            "batch_mean": batch_mean.mean().item(),
+            "batch_var": batch_var.mean().item(),
+        }, prefix="whitener")
 
         scaling = self._mean_var_to_scaling(mean, var)
 

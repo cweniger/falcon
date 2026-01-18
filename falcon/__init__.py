@@ -9,8 +9,7 @@ from .core.graph import Node, Graph, CompositeNode
 from .core.deployed_graph import DeployedGraph
 from .core.raystore import get_ray_dataset_manager
 from .core.utils import LazyLoader
-from .core.logging import log
-from .core.logger import init_logging, finish_logging
+from .core.logger import Logger, get_logger, set_logger, log, debug, info, warning, error
 from .core.run_reader import read_run
 from .core.run_loader import load_run
 from .core.samples_reader import read_samples

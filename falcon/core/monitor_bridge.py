@@ -1,4 +1,4 @@
-"""Coordinator actor for falcon monitor."""
+"""Monitor bridge actor for falcon monitor TUI."""
 
 import ray
 from datetime import datetime
@@ -7,12 +7,12 @@ from typing import Dict, List, Optional
 
 
 @ray.remote
-class FalconCoordinator:
+class MonitorBridge:
     """
-    Central coordination actor for monitoring.
+    Bridge between running falcon process and falcon monitor TUI.
 
     Holds references to all node actors and provides aggregated status.
-    Discovered by falcon monitor via ray.get_actor("falcon:coordinator").
+    Discovered by falcon monitor via ray.get_actor("falcon:monitor_bridge").
     """
 
     def __init__(self, run_dir: str):

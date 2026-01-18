@@ -24,8 +24,7 @@ from omegaconf import OmegaConf, DictConfig
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
-from falcon.core.logger import init_logging
-from falcon.core.logging import initialize_logging_for, set_falcon_log
+from falcon.core.logger import Logger, set_logger, info
 from falcon.core.run_name import generate_run_dir
 
 
@@ -245,6 +244,29 @@ class TeeOutput:
 
 def launch_mode(cfg: DictConfig) -> None:
     """Launch mode: Full training and inference pipeline."""
+    # Get output directory from config
+    output_dir = Path(cfg.run_dir)
+
+    # Generate wandb group if not set - use run-dir folder name
+    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+    if logging_cfg.get("wandb", {}).get("enabled", False):
+        if not logging_cfg.get("wandb", {}).get("group"):
+            # Use the run-dir folder name as the group name
+            logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
+
+    # Ensure local dir is set to graph path
+    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+
+    # Create driver logger and set as module-level logger
+    # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
+    driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
+
+    # Log startup info
+    info(f"falcon v{falcon.__version__}")
+    info(f"Output: {output_dir}")
+
+    # Initialize Ray
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
     ray_init_args.setdefault("log_to_driver", False)
@@ -253,18 +275,6 @@ def launch_mode(cfg: DictConfig) -> None:
     # Suppress Ray startup banner
     ray_init_args.setdefault("logging_level", "ERROR")
     ray.init(**ray_init_args)
-
-    # Get output directory from config
-    output_dir = Path(cfg.run_dir)
-
-    # Create falcon.log and tee output to both terminal and file
-    falcon_log = output_dir / "falcon.log"
-    tee = TeeOutput(falcon_log, sys.stdout)
-
-    # Print header (non-timestamped section)
-    tee.write(f"falcon  ▁▁▁▃▆█▆▃▁▁▁▁  v{falcon.__version__}\n\n")
-    tee.write("Output:\n")
-    tee.write(f"  {output_dir}\n\n")
 
     # Show Ray cluster info with resources
     ctx = ray.get_runtime_context()
@@ -275,14 +285,9 @@ def launch_mode(cfg: DictConfig) -> None:
     cpu = int(resources.get("CPU", 0))
     gpu = int(resources.get("GPU", 0))
     mem_gb = resources.get("memory", 0) / (1024**3)
-    tee.write("Ray:\n")
-    tee.write(f"  {gcs_address} ({ray_status})\n")
-    tee.write(f"  Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB\n\n")
 
-    # Initialise logger (should be done before any other falcon code)
-    init_logging(cfg)
-    # Capture driver stdout/stderr to driver/output.log (keep terminal output too)
-    initialize_logging_for("driver", keep_original=True)
+    info(f"Ray: {gcs_address} ({ray_status})")
+    info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
 
     ########################
     ### Model definition ###
@@ -296,21 +301,21 @@ def launch_mode(cfg: DictConfig) -> None:
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
 
-    tee.write(str(graph) + "\n\n")
-    tee.write("Observed:\n")
+    # Log graph info
+    info(str(graph))
     for name, shape in observations.items():
-        tee.write(f"  {name} {list(shape.shape)}\n")
-    tee.write("\n")
-
-    # Pass falcon.log file handle to logging module for timestamped output
-    set_falcon_log(tee.log)
+        info(f"Observed: {name} {list(shape.shape)}")
 
     ####################
     ### Run analysis ###
     ####################
 
-    # 1) Deploy graph
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
+    # 1) Deploy graph (pass logging config)
+    deployed_graph = falcon.DeployedGraph(
+        graph,
+        model_path=cfg.paths.get("import"),
+        log_config=logging_cfg,
+    )
 
     # 2) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
@@ -322,6 +327,7 @@ def launch_mode(cfg: DictConfig) -> None:
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
         dump_config=cfg.buffer.get("dump", None),
+        log_config=logging_cfg,
     )
 
     # 3) Launch training & simulations
@@ -333,7 +339,7 @@ def launch_mode(cfg: DictConfig) -> None:
     ##########################
 
     deployed_graph.shutdown()
-    falcon.finish_logging()
+    driver_logger.shutdown()
 
 
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
@@ -342,16 +348,19 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     Samples are saved as individual NPZ files in:
         {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
     """
+    # Setup logging config
+    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+
+    # Create driver logger and set as module-level logger
+    driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
     ray_init_args.setdefault("log_to_driver", False)
     # Use a fixed namespace for consistency
     ray_init_args.setdefault("namespace", "falcon")
     ray.init(**ray_init_args)
-
-    # Initialise logger and capture driver output
-    init_logging(cfg)
-    initialize_logging_for("driver", keep_original=True)
 
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
@@ -374,11 +383,15 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
         raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yaml.")
 
     num_samples = sample_cfg.n
-    print(f"Generating {num_samples} samples using {sample_type} sampling...")
-    print(graph)
+    info(f"Generating {num_samples} samples using {sample_type} sampling...")
+    info(str(graph))
 
     # Deploy graph for sampling
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
+    deployed_graph = falcon.DeployedGraph(
+        graph,
+        model_path=cfg.paths.get("import"),
+        log_config=logging_cfg,
+    )
 
     if sample_type == "prior":
         # Generate forward samples from prior
@@ -447,6 +460,7 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
 
     # Clean up
     deployed_graph.shutdown()
+    driver_logger.shutdown()
 
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
