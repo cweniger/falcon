@@ -15,7 +15,7 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime
-import joblib
+import numpy as np
 import torch
 import ray
 
@@ -343,7 +343,11 @@ def launch_mode(cfg: DictConfig) -> None:
 
 
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
-    """Sample mode: Generate samples using different sampling strategies."""
+    """Sample mode: Generate samples using different sampling strategies.
+
+    Samples are saved as individual NPZ files in:
+        {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
+    """
     # Setup logging config
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
@@ -351,7 +355,6 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     # Create driver logger and set as module-level logger
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
     set_logger(driver_logger)
-
     ray_init_args = cfg.get("ray", {}).get("init", {})
     # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
     ray_init_args.setdefault("log_to_driver", False)
@@ -368,15 +371,18 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     }
 
     if sample_type == "prior":
-        sample_cfg = cfg.sample.prior
+        sample_cfg = cfg.sample.get("prior", None)
     elif sample_type == "posterior":
-        sample_cfg = cfg.sample.posterior
+        sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
-        sample_cfg = cfg.sample.proposal
+        sample_cfg = cfg.sample.get("proposal", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    num_samples = sample_cfg.get("n", 42)
+    if sample_cfg is None or "n" not in sample_cfg:
+        raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yaml.")
+
+    num_samples = sample_cfg.n
     info(f"Generating {num_samples} samples using {sample_type} sampling...")
     info(str(graph))
 
@@ -434,20 +440,23 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     for key, value in save_data.items():
         print(f"  {key}: {value.shape}")
 
-    # Save to NPZ file
-    output_path = sample_cfg.path
-    output_dir = os.path.dirname(output_path)
-    if output_dir:  # Only create directory if it's not empty
-        os.makedirs(output_dir, exist_ok=True)
+    # Determine output directory
+    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    batch_timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
+    output_dir = Path(samples_dir) / sample_type / batch_timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saving samples to: {output_path}")
-    save_data_reversed = []
+    print(f"Saving samples to: {output_dir}/")
+
+    # Save each sample as individual NPZ file
     num_samples = len(next(iter(save_data.values())))
     for i in range(num_samples):
-        save_data_reversed.append({k: v[i] for k, v in save_data.items()})
-    joblib.dump(save_data_reversed, output_path)
+        sample_data = {k: v[i] for k, v in save_data.items()}
+        sample_data["_batch"] = batch_timestamp
+        sample_path = output_dir / f"{i:06d}.npz"
+        np.savez(sample_path, **sample_data)
 
-    print(f"Saved {sample_type} samples to: {output_path}")
+    print(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
     # Clean up
     deployed_graph.shutdown()

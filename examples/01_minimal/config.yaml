@@ -47,6 +47,7 @@ paths:
   import: "./src"                       # Local folder(s) with user-defined code (e.g. model.py)
   buffer: ${run_dir}/sim_dir            # Directory where Falcon stores simulated training data
   graph: ${run_dir}/graph_dir           # Directory for serialized graph and trained networks
+  samples: ${run_dir}/samples_dir       # Directory for generated samples (posterior, prior, etc.)
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
@@ -103,7 +104,7 @@ graph:
     simulator:                          # Defines forward model p(x|z)
       _target_: model.Simulate
       npar: 3                           # Number of parameters to sample from z
-    observed: "./data/obs_3.npy"        # Path to observed data array
+    observed: "./data/mock_data.npz['x']"  # NPZ key extraction syntax
 
 # -----------------------------------------------------------------------------
 # Sampling configuration (posterior draws after training)
@@ -111,4 +112,4 @@ graph:
 sample:
   posterior:
     n: 1000                             # Number of posterior samples to draw
-    path: samples_posterior.joblib      # Output path for saved samples (under hydra.run.dir)
+    # Output: ${paths.samples}/posterior/{timestamp}/
