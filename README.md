@@ -1,430 +1,347 @@
-# 🪶 Falcon - Distributed Dynamic Simulation-Based Inference
+# Falcon - Distributed Dynamic Simulation-Based Inference
 
 *Falcon* is a Python framework for **simulation-based inference (SBI)** that enables adaptive learning of complex conditional distributions. Built on top of PyTorch, Ray, and sbi, *Falcon* provides a declarative approach to building probabilistic models with automatic parallelization and experiment tracking.
 
 ## Key Features
 
-- **Declarative Model Definition**: Define complex probabilistic models using simple YAML configuration files
-- **Adaptive Sampling**: Automatically adjusts simulation parameters based on training progress
-- **Distributed Computing**: Built-in support for parallel execution using Ray
-- **Neural Density Estimation**: Multiple neural network architectures for posterior estimation (NSF, MAF, NAF, etc.)
-- **Experiment Tracking**: Integrated Weights & Biases (WandB) logging for monitoring training
-- **Flexible Architecture**: Modular design supporting various SBI algorithms including SNPE-A
+- **Declarative Model Definition**: Define complex probabilistic models using YAML configuration
+- **Graph-Based Architecture**: Express dependencies between random variables as a directed graph
+- **Adaptive Sampling**: Automatically manage simulation buffers with configurable resampling
+- **Distributed Computing**: Built-in parallelization using Ray actors
+- **Pluggable Estimators**: Modular design for different inference algorithms
+- **Experiment Tracking**: Integrated WandB and local file logging
 
 ## Installation
 
-### Prerequisites
-
-- Python 3.8 or higher
-- PyTorch 2.0 or higher
-- CUDA (optional, for GPU acceleration)
-
-### Install from source
-
 ```bash
-# Clone the repository
 git clone https://github.com/cweniger/falcon.git
 cd falcon
-
-# Install
 pip install .
 ```
 
-### Dependencies
+**Dependencies** (automatically installed):
 
-*Falcon* requires the following packages (automatically installed):
-- `torch>=2.0.0` - Deep learning framework
-- `numpy` - Numerical computing
-- `ray` - Distributed computing
-- `sbi` - Simulation-based inference toolbox
-- `hydra-core` - Configuration management
-- `omegaconf` - Configuration utilities
-- `wandb>=0.15.0` - Experiment tracking
+| Package | Purpose |
+|---------|---------|
+| `torch>=2.0.0` | Deep learning framework |
+| `numpy` | Numerical computing |
+| `ray` | Distributed computing |
+| `sbi` | Simulation-based inference |
+| `omegaconf` | Configuration management |
+| `wandb>=0.15.0` | Experiment tracking |
+| `coolname` | Auto-naming for runs |
 
-## Project Structure
+**Optional**: `pip install "falcon[monitor]"` for TUI dashboard
 
-```
-falcon/
-├── falcon/                 # Core library
-│   ├── core/              # Core components
-│   │   ├── graph.py       # Graph-based model definition
-│   │   ├── deployed_graph.py  # Runtime graph execution
-│   │   ├── raystore.py    # Distributed data management
-│   │   └── logging.py     # Logging utilities
-│   ├── contrib/           # Built-in components
-│   │   ├── SNPE_A.py      # SNPE-A implementation
-│   │   ├── torch_embedding.py  # Neural embeddings
-│   │   └── hypercubemappingprior.py  # Prior distributions
-│   └── cli.py             # Command-line interface
-├── examples/              # Example configurations
-│   ├── 01_minimal/        # Basic SBI example
-│   └── 02_bimodal/        # Advanced bimodal example
-└── setup.py               # Package configuration
-```
-
-## Configuration Structure
-
-*Falcon* uses Hydra/OmegaConf for configuration management. Each experiment is defined by a `config.yaml` file:
-
-### Core Configuration Sections
-
-```yaml
-# Experiment tracking with Weights & Biases
-logging:
-  project: falcon_examples       # WandB project name
-  group: experiment_01           # Experiment group
-  dir: ${hydra:run.dir}         # Output directory
-
-# Directory paths
-paths:
-  import: "./src"               # User code location
-  buffer: ${hydra:run.dir}/sim_dir    # Simulation data
-  graph: ${hydra:run.dir}/graph_dir   # Trained models
-
-# Training buffer configuration
-buffer:
-  min_training_samples: 4096    # Min samples before training
-  max_training_samples: 32768   # Max buffer size
-  validation_window_size: 256   # Validation split size
-  resample_batch_size: 128      # New samples per iteration
-  keep_resampling: true         # Continue after max reached
-  resample_interval: 10         # Epochs between resampling
-
-# Graph definition (model architecture)
-graph:
-  # Define nodes and their relationships
-  parameter_node:
-    evidence: [observation_node]  # Inference target
-    simulator:                   # Prior distribution
-      _target_: falcon.contrib.HypercubeMappingPrior
-      priors: [['uniform', -10, 10], ...]
-    estimator:                   # Posterior estimator
-      _target_: falcon.contrib.SNPE_A
-      net_type: nsf              # Neural network type
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.01
-    ray:
-      num_gpus: 0                # GPU allocation
-
-  observation_node:
-    parents: [parameter_node]    # Dependencies
-    simulator:                   # Forward model
-      _target_: model.YourSimulator
-    observed: "./data/obs.npy"   # Observed data
-
-# Sampling configuration
-sample:
-  posterior:
-    n: 1000                      # Number of samples
-    path: samples_posterior.joblib
-```
-
-### Key Configuration Parameters
-
-#### Buffer Settings
-- `min_training_samples`: Minimum samples required before training begins
-- `max_training_samples`: Maximum number of samples retained in memory
-- `keep_resampling`: Whether to continue generating samples after reaching maximum
-- `resample_interval`: How often (in epochs) to generate new samples
-
-#### Estimator Options
-- `net_type`: Neural network architecture (`nsf`, `maf`, `naf`, `gf`, `zuko_gf`)
-- `gamma`: SNPE-A mixing coefficient for amortization
-- `theta_norm`: Enable parameter space normalization
-- `early_stop_patience`: Epochs without improvement before stopping
-
-#### Ray Configuration
-- `num_gpus`: GPU count per worker (0 for CPU-only)
-- `init`: Additional Ray initialization parameters
-
-## Usage
-
-*Falcon* provides a simple command-line interface for running experiments:
-
-### Launch Training
-
-```bash
-# Run training with default configuration
-falcon launch
-
-# Run with specific output directory
-falcon launch hydra.run.dir=outputs/my_experiment
-
-# Override configuration parameters
-falcon launch buffer.num_epochs=500 graph.z.estimator.lr=0.001
-```
-
-### Generate Samples
-
-```bash
-# Sample from prior distribution
-falcon sample prior
-
-# Sample from trained posterior (after training)
-falcon sample posterior
-
-# Sample from proposal distribution
-falcon sample proposal
-```
-
-### Running Examples
-
-#### Example 1: Minimal Configuration
+## Quick Start
 
 ```bash
 cd examples/01_minimal
-falcon launch hydra.run.dir=outputs/run_01
-falcon sample posterior hydra.run.dir=outputs/run_01
+falcon launch --run-dir outputs/run_01
+falcon sample posterior --run-dir outputs/run_01
 ```
 
-This example demonstrates:
-- Basic 3-parameter inference problem
-- Simple forward model
-- Neural spline flow (NSF) posterior estimation
+## Command-Line Interface
 
-#### Example 2: Bimodal Distribution
+| Command | Description |
+|---------|-------------|
+| `falcon launch` | Run training |
+| `falcon sample prior\|posterior\|proposal` | Generate samples |
+| `falcon graph` | Visualize graph structure |
+| `falcon monitor` | Real-time TUI dashboard |
 
 ```bash
-cd examples/02_bimodal
-# Regular training
-falcon launch --config-name config_regular
-
-# Amortized inference
-falcon launch --config-name config_amortized
-
-# Round-based training with renewal
-falcon launch --config-name config_rounds_renew
+falcon launch --run-dir DIR              # Specify output directory
+falcon launch --config-name NAME         # Use alternate config file
+falcon launch key=value                  # Override config parameters
+falcon sample posterior --run-dir DIR    # Sample from trained model
 ```
 
-This example showcases:
-- Complex 10-dimensional parameter space
-- Bimodal posterior distributions
-- Different training strategies (regular, amortized, round-based)
-- GPU acceleration
+## Core Concepts
 
-## Creating Your Own Models
+### Computational Graph
 
-### Step 1: Define Your Simulator
+Falcon models are defined as directed acyclic graphs where:
+- **Nodes** represent random variables
+- **Edges** define dependencies between variables
+- **Simulators** define forward models (priors or conditional distributions)
+- **Estimators** learn inverse mappings (posteriors)
 
-Create a Python module in your `src/` directory:
+```yaml
+graph:
+  z:                              # Latent parameters (to be inferred)
+    evidence: [x]                 # Inferred from observation x
+    simulator: ...                # Prior p(z)
+    estimator: ...                # Learns p(z|x)
+
+  x:                              # Observation
+    parents: [z]                  # Depends on z
+    simulator: ...                # Forward model p(x|z)
+    observed: "./data/obs.npy"    # Observed data
+```
+
+### Configuration Structure
+
+```yaml
+logging:                          # Experiment tracking
+  wandb:
+    enabled: false
+    project: my_project
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:                            # Directory layout
+  import: "./src"                 # User code location
+  buffer: ${run_dir}/sim_dir      # Simulation data
+  graph: ${run_dir}/graph_dir     # Trained models
+  samples: ${run_dir}/samples_dir # Generated samples
+
+buffer:                           # Sample management
+  min_training_samples: 4096
+  max_training_samples: 32768
+  resample_batch_size: 128
+  resample_interval: 10
+
+graph:                            # Model definition
+  # Node definitions...
+
+sample:                           # Sampling settings
+  posterior:
+    n: 1000
+```
+
+### Simulators
+
+Simulators define probability distributions. They must implement `simulate_batch`:
+
+```python
+class MySimulator:
+    def simulate_batch(self, batch_size: int, **parent_values) -> torch.Tensor:
+        """Generate samples conditioned on parent values."""
+        z = parent_values['z']  # Parent node values
+        return forward_model(z)
+```
+
+**Built-in simulators:**
+- `falcon.contrib.HypercubeMappingPrior` - Configurable prior distributions
+
+### Estimators
+
+Estimators learn conditional distributions from simulated data. They must implement the `BaseEstimator` interface.
+
+**Built-in estimators:**
+- `falcon.contrib.SNPE_A` - Sequential Neural Posterior Estimation ([detailed docs](docs/estimators/SNPE_A.md))
+
+### Buffer Management
+
+The buffer controls how training data is collected and managed:
+
+| Parameter | Description |
+|-----------|-------------|
+| `min_training_samples` | Minimum samples before training starts |
+| `max_training_samples` | Maximum buffer size |
+| `resample_batch_size` | New samples per resampling step |
+| `resample_interval` | Epochs between resampling |
+| `keep_resampling` | Continue after max reached |
+| `validation_window_size` | Validation split size |
+
+### Prior Distributions
+
+`HypercubeMappingPrior` supports these distribution types:
+
+```yaml
+priors:
+  - ['uniform', low, high]
+  - ['normal', mean, std]
+  - ['triangular', low, mode, high]
+  - ['cosine', low, high]
+  - ['sine', low, high]
+  - ['uvol', low, high]              # Uniform-in-volume
+```
+
+## Creating a Model
+
+### 1. Define Your Simulator
 
 ```python
 # src/model.py
 import torch
 
-class MySimulator:
-    def __init__(self, param1=1.0):
-        self.param1 = param1
+class Simulate:
+    def __init__(self, noise_scale: float = 0.1):
+        self.noise_scale = noise_scale
 
-    def __call__(self, z):
-        # z: input parameters [batch_size, n_params]
-        # return: simulated data [batch_size, n_observables]
-        return torch.sin(z * self.param1)
+    def simulate_batch(self, batch_size: int, z: torch.Tensor) -> torch.Tensor:
+        return z + torch.randn_like(z) * self.noise_scale
 
-class MyEmbedding(torch.nn.Module):
-    def __init__(self, input_dim, output_dim=32):
+class E(torch.nn.Module):
+    """Embedding network."""
+    def __init__(self):
         super().__init__()
         self.net = torch.nn.Sequential(
-            torch.nn.Linear(input_dim, 64),
+            torch.nn.LazyLinear(64),
             torch.nn.ReLU(),
-            torch.nn.Linear(64, output_dim)
+            torch.nn.Linear(64, 32)
         )
 
-    def forward(self, x):
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
         return self.net(x)
 ```
 
-### Step 2: Create Configuration
+### 2. Create Configuration
 
 ```yaml
 # config.yaml
 logging:
-  project: my_project
-  group: experiment_01
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
 
 paths:
   import: "./src"
-  buffer: ${hydra:run.dir}/sim_dir
-  graph: ${hydra:run.dir}/graph_dir
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
 
 buffer:
-  min_training_samples: 1024
+  min_training_samples: 2048
   max_training_samples: 8192
+  resample_batch_size: 128
+  resample_interval: 10
 
 graph:
-  theta:
+  z:
     evidence: [x]
     simulator:
       _target_: falcon.contrib.HypercubeMappingPrior
-      priors: [['uniform', -5, 5], ['uniform', -5, 5]]
+      priors:
+        - ['uniform', -5.0, 5.0]
+        - ['uniform', -5.0, 5.0]
     estimator:
       _target_: falcon.contrib.SNPE_A
-      embedding:
-        _target_: model.MyEmbedding
-        _input_: [x]
-        input_dim: 10
-        output_dim: 32
-      net_type: nsf
-      num_epochs: 200
+      # See docs/estimators/SNPE_A.md for configuration options
 
   x:
-    parents: [theta]
+    parents: [z]
     simulator:
-      _target_: model.MySimulator
-      param1: 2.0
+      _target_: model.Simulate
+      noise_scale: 0.1
     observed: "./data/observations.npy"
+
+sample:
+  posterior:
+    n: 1000
 ```
 
-### Step 3: Prepare Observations
+### 3. Prepare Data and Run
 
 ```python
-# Generate or load your observed data
 import numpy as np
-observations = np.random.randn(10)  # Your actual data
-np.save("data/observations.npy", observations)
+np.save("data/observations.npy", np.array([1.5, -0.3]))
 ```
 
-### Step 4: Run Training
-
 ```bash
-falcon launch
+falcon launch --run-dir outputs/my_run
+falcon sample posterior --run-dir outputs/my_run
 ```
 
 ## Advanced Features
 
 ### Multi-Node Graphs
 
-*Falcon* supports complex dependency graphs with multiple nodes:
-
 ```yaml
 graph:
-  # Latent parameters
   z:
     evidence: [x]
     simulator: ...
     estimator: ...
 
-  # Intermediate signal
   signal:
     parents: [z]
-    simulator: model.SignalGenerator
+    simulator:
+      _target_: model.Signal
 
-  # Noise component
   noise:
-    simulator: model.NoiseGenerator
+    simulator:
+      _target_: model.Noise
 
-  # Final observation
   x:
     parents: [signal, noise]
-    simulator: model.Combiner
+    simulator:
+      _target_: model.Combine
     observed: "./data/obs.npy"
 ```
 
-### Custom Neural Networks
-
-Implement custom embedding networks for complex data:
-
-```python
-class ConvolutionalEmbedding(torch.nn.Module):
-    """For image data"""
-    def __init__(self):
-        super().__init__()
-        self.conv = torch.nn.Sequential(
-            torch.nn.Conv2d(1, 32, 3),
-            torch.nn.ReLU(),
-            torch.nn.MaxPool2d(2),
-            torch.nn.Flatten()
-        )
-
-    def forward(self, x):
-        return self.conv(x)
-```
-
-### Distributed Training
-
-Configure Ray for distributed execution:
+### GPU Allocation
 
 ```yaml
-ray:
-  init:
-    num_cpus: 8
-    num_gpus: 2
-    dashboard_host: "0.0.0.0"
-
 graph:
   z:
     ray:
-      num_gpus: 1  # Per-worker GPU allocation
+      num_gpus: 1      # Full GPU
+      # num_gpus: 0.5  # Fractional GPU (multiple nodes per GPU)
 ```
 
-## Monitoring and Debugging
+### Intermediate Sample Dumping
 
-### Weights & Biases Integration
+```yaml
+buffer:
+  dump:
+    enabled: true
+    path: sample_{step}.joblib
+```
 
-*Falcon* automatically logs training metrics to WandB:
-
-1. Set up WandB account: https://wandb.ai
-2. Configure project in `config.yaml`
-3. Monitor training at https://wandb.ai/your-username/your-project
-
-Logged metrics include:
-- Training/validation loss
-- Learning rate schedules
-- Sample generation statistics
-- Model architecture details
-
-### Output Structure
-
-After training, *Falcon* creates:
+## Output Structure
 
 ```
-outputs/run_name/
-├── sim_dir/           # Generated simulation data
-│   └── samples_*.pt   # Training samples
-├── graph_dir/         # Trained models
-│   ├── graph.pkl      # Graph structure
-│   └── estimators/    # Neural network weights
-├── samples_posterior.joblib  # Posterior samples
-└── .hydra/            # Configuration logs
+{run_dir}/
+├── sim_dir/                    # Simulation buffer
+│   └── samples_*.pt
+├── graph_dir/                  # Trained models
+│   ├── graph.pkl
+│   ├── {node}/estimator.pt
+│   ├── output.log
+│   └── metrics/
+├── samples_dir/                # Generated samples
+│   └── posterior/{timestamp}/
+└── config.yaml
 ```
+
+## Examples
+
+| Example | Description |
+|---------|-------------|
+| `01_minimal` | Basic 3-parameter inference |
+| `02_bimodal` | 10D bimodal posterior with training strategies |
+| `03_composite` | Multi-node graph with image embeddings |
+
+## Documentation
+
+- [SNPE_A Estimator](docs/estimators/SNPE_A.md) - Detailed configuration reference
 
 ## Troubleshooting
 
-### Common Issues
-
-1. **Out of Memory**: Reduce `buffer.max_training_samples` or `batch_size`
-2. **Slow Training**: Enable GPU with `ray.num_gpus: 1`
-3. **Poor Convergence**: Adjust `lr`, `num_epochs`, or try different `net_type`
-4. **Import Errors**: Ensure `paths.import` points to your model code
-
-### Performance Tips
-
-- Use GPU acceleration for large models
-- Enable `theta_norm` for high-dimensional parameter spaces
-- Adjust `resample_interval` based on simulation cost
-- Use `early_stop_patience` to prevent overfitting
+| Issue | Solution |
+|-------|----------|
+| Out of Memory | Reduce `max_training_samples` or batch size |
+| Slow Training | Enable GPU: `ray.num_gpus: 1` |
+| Import Errors | Check `paths.import` points to your code |
+| Monitor not working | `pip install "falcon[monitor]"` |
 
 ## Citation
 
-If you use *Falcon* in your research, please cite:
-
 ```bibtex
 @software{falcon2024,
-  title = {Falcon: Federated Adaptive Learning of CONditional distributions},
+  title = {Falcon: Distributed Dynamic Simulation-Based Inference},
+  author = {Weniger, Christoph},
   year = {2024},
-  url = {https://github.com/yourusername/falcon}
+  url = {https://github.com/cweniger/falcon}
 }
 ```
 
 ## License
 
-This project is licensed under the MIT License - see the [LICENSE](LICENSE) file for details.
-
-## Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-## Support
-
-For questions and support, please open an issue on GitHub or contact the maintainers.
+MIT License - see [LICENSE](LICENSE) for details.
