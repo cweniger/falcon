@@ -15,7 +15,7 @@ import sys
 import os
 from pathlib import Path
 from datetime import datetime
-import joblib
+import numpy as np
 import torch
 import ray
 
@@ -24,7 +24,7 @@ from omegaconf import OmegaConf, DictConfig
 import falcon
 from falcon.core.utils import load_observations
 from falcon.core.graph import create_graph_from_config
-from falcon.core.logger import init_logging
+from falcon.core.logger import Logger, set_logger, info
 from falcon.core.run_name import generate_run_dir
 
 
@@ -223,24 +223,71 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     run_dir_path.mkdir(parents=True, exist_ok=True)
     if not saved_config.exists():
         OmegaConf.save(cfg, saved_config)
-        print(f"Saved config to: {saved_config}")
 
     return cfg
 
 
+class TeeOutput:
+    """Write to both terminal and log file."""
+    def __init__(self, log_file, terminal):
+        self.terminal = terminal
+        self.log = open(log_file, "a")
+    def write(self, msg):
+        self.terminal.write(msg)
+        self.log.write(msg)
+    def flush(self):
+        self.terminal.flush()
+        self.log.flush()
+    def close(self):
+        self.log.close()
+
+
 def launch_mode(cfg: DictConfig) -> None:
     """Launch mode: Full training and inference pipeline."""
+    # Get output directory from config
+    output_dir = Path(cfg.run_dir)
+
+    # Generate wandb group if not set - use run-dir folder name
+    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+    if logging_cfg.get("wandb", {}).get("enabled", False):
+        if not logging_cfg.get("wandb", {}).get("group"):
+            # Use the run-dir folder name as the group name
+            logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
+
+    # Ensure local dir is set to graph path
+    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+
+    # Create driver logger and set as module-level logger
+    # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
+    driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
+
+    # Log startup info
+    info(f"falcon v{falcon.__version__}")
+    info(f"Output: {output_dir}")
+
+    # Initialize Ray
     ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
+    # Use a fixed namespace so falcon monitor can discover actors
+    ray_init_args.setdefault("namespace", "falcon")
+    # Suppress Ray startup banner
+    ray_init_args.setdefault("logging_level", "ERROR")
     ray.init(**ray_init_args)
 
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
+    # Show Ray cluster info with resources
+    ctx = ray.get_runtime_context()
+    gcs_address = ctx.gcs_address
+    is_local = ray_init_args.get("address") is None
+    ray_status = "new local instance" if is_local else "existing cluster"
+    resources = ray.cluster_resources()
+    cpu = int(resources.get("CPU", 0))
+    gpu = int(resources.get("GPU", 0))
+    mem_gb = resources.get("memory", 0) / (1024**3)
 
-    # Initialise logger (should be done before any other falcon code)
-    init_logging(cfg)
+    info(f"Ray: {gcs_address} ({ray_status})")
+    info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
 
     ########################
     ### Model definition ###
@@ -254,15 +301,21 @@ def launch_mode(cfg: DictConfig) -> None:
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
 
-    print(graph)
-    print("Observation shapes:", {k: v.shape for k, v in observations.items()})
+    # Log graph info
+    info(str(graph))
+    for name, shape in observations.items():
+        info(f"Observed: {name} {list(shape.shape)}")
 
     ####################
     ### Run analysis ###
     ####################
 
-    # 1) Deploy graph
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
+    # 1) Deploy graph (pass logging config)
+    deployed_graph = falcon.DeployedGraph(
+        graph,
+        model_path=cfg.paths.get("import"),
+        log_config=logging_cfg,
+    )
 
     # 2) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
@@ -274,6 +327,7 @@ def launch_mode(cfg: DictConfig) -> None:
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
         dump_config=cfg.buffer.get("dump", None),
+        log_config=logging_cfg,
     )
 
     # 3) Launch training & simulations
@@ -285,19 +339,28 @@ def launch_mode(cfg: DictConfig) -> None:
     ##########################
 
     deployed_graph.shutdown()
-    falcon.finish_logging()
+    driver_logger.shutdown()
 
 
 def sample_mode(cfg: DictConfig, sample_type: str) -> None:
-    """Sample mode: Generate samples using different sampling strategies."""
-    ray_init_args = cfg.get("ray", {}).get("init", {})
-    ray.init(**ray_init_args)
+    """Sample mode: Generate samples using different sampling strategies.
 
-#    # Add model path to Python path for imports
-#    if cfg.model_path:
-#        model_path = Path(cfg.model_path).resolve()
-#        if model_path not in sys.path:
-#            sys.path.insert(0, str(model_path))
+    Samples are saved as individual NPZ files in:
+        {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
+    """
+    # Setup logging config
+    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+
+    # Create driver logger and set as module-level logger
+    driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+    set_logger(driver_logger)
+    ray_init_args = cfg.get("ray", {}).get("init", {})
+    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
+    ray_init_args.setdefault("log_to_driver", False)
+    # Use a fixed namespace for consistency
+    ray_init_args.setdefault("namespace", "falcon")
+    ray.init(**ray_init_args)
 
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
@@ -308,20 +371,27 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     }
 
     if sample_type == "prior":
-        sample_cfg = cfg.sample.prior
+        sample_cfg = cfg.sample.get("prior", None)
     elif sample_type == "posterior":
-        sample_cfg = cfg.sample.posterior
+        sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
-        sample_cfg = cfg.sample.proposal
+        sample_cfg = cfg.sample.get("proposal", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    num_samples = sample_cfg.get("n", 42)
-    print(f"Generating {num_samples} samples using {sample_type} sampling...")
-    print(graph)
+    if sample_cfg is None or "n" not in sample_cfg:
+        raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yaml.")
+
+    num_samples = sample_cfg.n
+    info(f"Generating {num_samples} samples using {sample_type} sampling...")
+    info(str(graph))
 
     # Deploy graph for sampling
-    deployed_graph = falcon.DeployedGraph(graph, model_path=cfg.paths.get("import"))
+    deployed_graph = falcon.DeployedGraph(
+        graph,
+        model_path=cfg.paths.get("import"),
+        log_config=logging_cfg,
+    )
 
     if sample_type == "prior":
         # Generate forward samples from prior
@@ -370,40 +440,77 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     for key, value in save_data.items():
         print(f"  {key}: {value.shape}")
 
-    # Save to NPZ file
-    output_path = sample_cfg.path
-    output_dir = os.path.dirname(output_path)
-    if output_dir:  # Only create directory if it's not empty
-        os.makedirs(output_dir, exist_ok=True)
+    # Determine output directory
+    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    batch_timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
+    output_dir = Path(samples_dir) / sample_type / batch_timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
 
-    print(f"Saving samples to: {output_path}")
-    save_data_reversed = []
+    print(f"Saving samples to: {output_dir}/")
+
+    # Save each sample as individual NPZ file
     num_samples = len(next(iter(save_data.values())))
     for i in range(num_samples):
-        save_data_reversed.append({k: v[i] for k, v in save_data.items()})
-    joblib.dump(save_data_reversed, output_path)
+        sample_data = {k: v[i] for k, v in save_data.items()}
+        sample_data["_batch"] = batch_timestamp
+        sample_path = output_dir / f"{i:06d}.npz"
+        np.savez(sample_path, **sample_data)
 
-    print(f"Saved {sample_type} samples to: {output_path}")
+    print(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
     # Clean up
     deployed_graph.shutdown()
+    driver_logger.shutdown()
+
+
+def monitor_mode(address: str = "auto", refresh: float = 1.0):
+    """Monitor mode: Launch the TUI monitor for training runs."""
+    import subprocess
+    subprocess.run([
+        sys.executable, "-m", "falcon.monitor",
+        "--address", address,
+        "--refresh", str(refresh),
+    ])
 
 
 def parse_args():
     """Parse falcon CLI arguments."""
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph"]:
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph", "monitor"]:
         print("Usage:")
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon graph [--config-name FILE]")
+        print("  falcon monitor [--address ADDR] [--refresh SECS]")
         print()
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
+        print("  --address ADDR       Ray cluster address (default: auto)")
+        print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
         sys.exit(1)
 
     mode = sys.argv[1]
     args = sys.argv[2:]
+
+    # Handle monitor mode separately (doesn't need config)
+    if mode == "monitor":
+        address = "auto"
+        refresh = 1.0
+        i = 0
+        while i < len(args):
+            arg = args[i]
+            if arg == "--address" and i + 1 < len(args):
+                address = args[i + 1]
+                i += 1
+            elif arg.startswith("--address="):
+                address = arg.split("=", 1)[1]
+            elif arg == "--refresh" and i + 1 < len(args):
+                refresh = float(args[i + 1])
+                i += 1
+            elif arg.startswith("--refresh="):
+                refresh = float(arg.split("=", 1)[1])
+            i += 1
+        return mode, None, None, None, None, address, refresh
 
     sample_type = None
     if mode == "sample":
@@ -433,12 +540,18 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides
+    return mode, sample_type, config_name, run_dir, overrides, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, address, refresh = parse_args()
+
+    # Monitor mode doesn't need config loading
+    if mode == "monitor":
+        monitor_mode(address=address, refresh=refresh)
+        return
+
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":

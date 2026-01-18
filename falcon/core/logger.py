@@ -1,138 +1,26 @@
 """
-Modular logging system with pluggable backends.
-
-This module provides an abstract logging interface that supports multiple
-backends (WandB, local files, TensorBoard, etc.) through a common API.
+Unified logging for falcon nodes and driver.
 
 Usage:
-    # Single metric (ergonomic)
-    logger.log("train/loss", 0.5, step=10)
-
-    # Batch metrics
-    logger.log({"train/loss": 0.5, "train/acc": 0.9}, step=10)
-
-    # Initialize from config
-    init_logging(cfg)
+    logger = Logger("node_z", config)
+    logger.info("Training started")
+    logger.log({"loss": 0.5})
+    logger.shutdown()
 """
 
-import time
-from abc import ABC, abstractmethod
-from typing import Any, Callable, Dict, List, Optional, Union
+import logging
+import sys
+import traceback
+import warnings
+from pathlib import Path
+from typing import Any, Dict, List, Optional, Union
 
-import ray
-from omegaconf import DictConfig
 
-
-class LoggerBackend(ABC):
+class LoggerBackend:
     """Abstract base class for logging backends.
 
-    Implement this interface to add new logging destinations
-    (e.g., TensorBoard, MLflow, custom storage).
+    All logging backends (local file, WandB, etc.) should implement this interface.
     """
-
-    @abstractmethod
-    def log(
-        self,
-        metrics: Dict[str, Any],
-        step: Optional[int] = None,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Log a batch of metrics.
-
-        Args:
-            metrics: Dictionary mapping metric names to values.
-            step: Optional step/iteration number.
-            walltime: Optional timestamp (epoch seconds). If not provided,
-                backends may generate their own timestamp.
-        """
-        pass
-
-    @abstractmethod
-    def shutdown(self) -> None:
-        """Clean up resources (flush buffers, close connections, etc.)."""
-        pass
-
-
-class CompositeLogger:
-    """Logger that dispatches to multiple backends.
-
-    Provides a unified API for logging to multiple destinations simultaneously.
-    Supports both single-metric and batch-metric logging styles.
-
-    Example:
-        logger = CompositeLogger([wandb_backend, local_backend])
-        logger.log("loss", 0.5, step=10)  # single metric
-        logger.log({"loss": 0.5, "acc": 0.9}, step=10)  # batch
-    """
-
-    def __init__(self, backends: Optional[List[LoggerBackend]] = None):
-        """Initialize with a list of backends.
-
-        Args:
-            backends: List of LoggerBackend instances. Can be empty initially
-                      and backends added later via add_backend().
-        """
-        self.backends: List[LoggerBackend] = backends or []
-
-    def add_backend(self, backend: LoggerBackend) -> None:
-        """Add a logging backend."""
-        self.backends.append(backend)
-
-    def log(
-        self,
-        key_or_metrics: Union[str, Dict[str, Any]],
-        value: Optional[Any] = None,
-        *,
-        step: Optional[int] = None,
-        walltime: Optional[float] = None,
-    ) -> None:
-        """Log metrics to all backends.
-
-        Supports two calling conventions:
-
-        1. Single metric (key-value style):
-           logger.log("train/loss", 0.5, step=10)
-
-        2. Batch metrics (dict style):
-           logger.log({"train/loss": 0.5, "val/loss": 0.6}, step=10)
-
-        Args:
-            key_or_metrics: Either a metric name (str) or dict of metrics.
-            value: Metric value (required if key_or_metrics is a string).
-            step: Optional step/iteration number.
-            walltime: Optional timestamp (epoch seconds). If not provided,
-                a timestamp is generated once and passed to all backends.
-
-        Raises:
-            ValueError: If key_or_metrics is a string but value is None.
-        """
-        # Normalize to dict format
-        if isinstance(key_or_metrics, dict):
-            metrics = key_or_metrics
-        else:
-            if value is None:
-                raise ValueError(
-                    f"value is required when logging a single metric. "
-                    f"Got key={key_or_metrics!r}, value=None"
-                )
-            metrics = {key_or_metrics: value}
-
-        # Generate walltime once for all backends (consistency)
-        if walltime is None:
-            walltime = time.time()
-
-        # Dispatch to all backends
-        for backend in self.backends:
-            backend.log(metrics, step=step, walltime=walltime)
-
-    def shutdown(self) -> None:
-        """Shutdown all backends."""
-        for backend in self.backends:
-            backend.shutdown()
-
-
-class NullBackend(LoggerBackend):
-    """No-op backend for testing or disabling logging."""
 
     def log(
         self,
@@ -140,179 +28,323 @@ class NullBackend(LoggerBackend):
         step: Optional[int] = None,
         walltime: Optional[float] = None,
     ) -> None:
+        """Log a batch of metrics."""
         pass
 
     def shutdown(self) -> None:
+        """Clean up resources."""
         pass
 
+    def get_log_handler(self) -> Optional[logging.Handler]:
+        """Return a logging.Handler for Python logging integration."""
+        return None
 
-# Type for backend factory functions
-# Factory takes actor_id and returns a Ray actor
-BackendFactory = Callable[[str], Any]
+
+# Import backends after LoggerBackend is defined to avoid circular imports
+from .local_logger import LocalFileBackend
+from .wandb_logger import WandBBackend, WANDB_AVAILABLE
 
 
-@ray.remote
-class LoggerManager:
-    """Central manager for distributed logging with multiple backends.
+class _StreamCapture:
+    """Capture a stream (stderr) and forward to logger."""
 
-    Manages per-actor logger instances and dispatches log calls to all
-    configured backends. Backend types are registered via factory functions,
-    making it easy to add new backends without modifying this class.
+    def __init__(self, original, logger, level=logging.ERROR):
+        self._original = original
+        self._logger = logger
+        self._level = level
+        self._buffer = ""
 
-    Args:
-        backend_factories: Dict mapping backend names to factory functions.
-            Each factory takes (actor_id, config) and returns a Ray actor.
+    def write(self, text):
+        # Write to original (so it still appears in terminal if driver)
+        self._original.write(text)
+
+        # Buffer and log complete lines
+        self._buffer += text
+        while '\n' in self._buffer:
+            line, self._buffer = self._buffer.split('\n', 1)
+            if line.strip():
+                self._logger.log(self._level, line)
+
+    def flush(self):
+        self._original.flush()
+        if self._buffer.strip():
+            self._logger.log(self._level, self._buffer.strip())
+            self._buffer = ""
+
+    def isatty(self):
+        return self._original.isatty()
+
+    def __getattr__(self, name):
+        return getattr(self._original, name)
+
+
+class Logger:
+    """
+    Unified logger for a single node/driver.
+
+    Text logging (with levels):
+        logger.debug("...")   # Level 10
+        logger.info("...")    # Level 20
+        logger.warning("...")  # Level 30
+        logger.error("...")   # Level 40
+
+    Metric logging:
+        logger.log({"loss": 0.5, "accuracy": 0.9})
+        logger.log({"loss": 0.4}, step=10)
+
+    Exception capture:
+        - All uncaught exceptions -> output.log
+        - All stderr output -> output.log
+        - All warnings -> output.log
+
+    Lifecycle:
+        logger.flush()
+        logger.shutdown()
     """
 
-    def __init__(self, backend_factories: Optional[Dict[str, BackendFactory]] = None):
-        self.backend_factories = backend_factories or {}
-        self.actor_backends: Dict[str, Dict[str, Any]] = {}
+    LEVELS = {
+        "DEBUG": logging.DEBUG,
+        "INFO": logging.INFO,
+        "WARNING": logging.WARNING,
+        "ERROR": logging.ERROR,
+    }
 
-    def register_backend(self, name: str, factory: BackendFactory) -> None:
-        """Register a backend factory.
-
+    def __init__(self, name: str, config: dict, capture_exceptions: bool = True):
+        """
         Args:
-            name: Backend identifier (e.g., "wandb", "local").
-            factory: Callable that creates a backend actor.
+            name: Identifier ("driver", "z", "theta", etc.)
+            config: Run-level logging config from YAML
+            capture_exceptions: If True, capture stderr and uncaught exceptions
         """
-        self.backend_factories[name] = factory
-
-    def init(self, actor_id: str) -> None:
-        """Initialize all registered backends for an actor.
-
-        Args:
-            actor_id: Unique identifier for the actor.
-        """
-        self.actor_backends[actor_id] = {}
-        for name, factory in self.backend_factories.items():
-            self.actor_backends[actor_id][name] = factory(actor_id)
-
-    def log(
-        self,
-        key_or_metrics: Any,
-        value: Optional[Any] = None,
-        *,
-        step: Optional[int] = None,
-        actor_id: str = None,
-    ) -> None:
-        """Log metrics to all backends for an actor.
-
-        Supports two calling conventions:
-
-        1. Single metric:
-           manager.log("train/loss", 0.5, step=10, actor_id="node_z")
-
-        2. Batch metrics:
-           manager.log({"loss": 0.5, "acc": 0.9}, step=10, actor_id="node_z")
-
-        Walltime is generated once and passed to all backends for consistency.
-        """
-        # Normalize to dict format
-        if isinstance(key_or_metrics, dict):
-            metrics = key_or_metrics
-        else:
-            if value is None:
-                raise ValueError(
-                    f"value is required when logging a single metric. "
-                    f"Got key={key_or_metrics!r}, value=None"
-                )
-            metrics = {key_or_metrics: value}
-
-        # Generate walltime once for all backends (consistency)
-        walltime = time.time()
-
-        # Dispatch to all backends for this actor
-        if actor_id in self.actor_backends:
-            for backend in self.actor_backends[actor_id].values():
-                backend.log.remote(metrics, step=step, walltime=walltime)
-
-    def shutdown(self) -> None:
-        """Shutdown all backends for all actors."""
-        for backends in self.actor_backends.values():
-            for backend in backends.values():
-                ray.get(backend.shutdown.remote())
-
-
-def init_logging(cfg: DictConfig) -> None:
-    """Initialize logging backends based on config.
-
-    Supports both new nested config structure and legacy flat structure:
-
-    New structure:
-        logging:
-          wandb:
-            enabled: true
-            project: my_project
-            group: my_group
-            dir: ${run_dir}
-          local:
-            enabled: true
-            dir: ${paths.graph}
-
-    Legacy structure (backwards compatible):
-        logging:
-          project: my_project
-          group: my_group
-          dir: ${run_dir}
-
-    Args:
-        cfg: OmegaConf config with logging and paths sections.
-    """
-    # Import here to avoid circular imports
-    from .local_logger import create_local_factory
-    from .wandb_logger import WANDB_AVAILABLE, create_wandb_factory
-
-    factories = {}
-
-    # Check for new nested structure vs legacy flat structure
-    if "wandb" in cfg.logging:
-        # New structure
-        wandb_cfg = cfg.logging.wandb
-        local_cfg = cfg.logging.get("local", {})
-
-        # WandB backend
-        wandb_enabled = wandb_cfg.get("enabled", True)
-        if wandb_enabled:
-            if not WANDB_AVAILABLE:
-                print("Warning: wandb logging enabled but wandb not installed, skipping")
-            else:
-                factories["wandb"] = create_wandb_factory(
-                    project=wandb_cfg.get("project"),
-                    group=wandb_cfg.get("group"),
-                    dir=wandb_cfg.get("dir"),
-                )
+        self.name = name
+        self._backends: List = []
+        self._original_stderr = None
+        self._original_excepthook = None
 
         # Local backend
-        local_enabled = local_cfg.get("enabled", True)
-        if local_enabled:
-            local_dir = local_cfg.get("dir") or cfg.paths.get("graph")
-            if local_dir:
-                factories["local"] = create_local_factory(local_dir)
-    else:
-        # Legacy flat structure
-        if WANDB_AVAILABLE:
-            factories["wandb"] = create_wandb_factory(
-                project=cfg.logging.get("project"),
-                group=cfg.logging.get("group"),
-                dir=cfg.logging.get("dir"),
+        local_cfg = config.get("local", {})
+        if local_cfg.get("enabled", True):
+            base_dir = Path(local_cfg.get("dir", "."))
+            self._local = LocalFileBackend(
+                base_dir=str(base_dir),
+                name=name,
+                buffer_size=local_cfg.get("buffer_size", 100),
             )
-        local_dir = cfg.paths.get("graph")
-        if local_dir:
-            factories["local"] = create_local_factory(local_dir)
+            self._backends.append(self._local)
+        else:
+            self._local = None
 
-    # Start the logger manager
-    if factories:
-        LoggerManager.options(
-            name="falcon:global_logger", lifetime="detached"
-        ).remote(backend_factories=factories)
+        # WandB backend
+        wandb_cfg = config.get("wandb", {})
+        wandb_enabled = wandb_cfg.get("enabled", False)
+        if wandb_cfg.get("driver_only", False) and name != "driver":
+            wandb_enabled = False
+
+        if wandb_enabled and WANDB_AVAILABLE:
+            self._wandb = WandBBackend(
+                project=wandb_cfg.get("project"),
+                group=wandb_cfg.get("group"),  # shared across all nodes
+                name=name,                      # node-specific
+                dir=wandb_cfg.get("dir"),
+            )
+            self._backends.append(self._wandb)
+        else:
+            self._wandb = None
+
+        # Python logger for text
+        self._logger = logging.getLogger(f"falcon.{name}")
+        self._logger.setLevel(logging.DEBUG)
+        self._logger.handlers.clear()
+        self._logger.propagate = False
+
+        # Add handlers from backends
+        for backend in self._backends:
+            handler = backend.get_log_handler()
+            if handler:
+                level_str = config.get(
+                    "local" if backend == self._local else "wandb", {}
+                ).get("level", "DEBUG")
+                handler.setLevel(self.LEVELS.get(level_str, logging.DEBUG))
+                self._logger.addHandler(handler)
+
+        # Console handler (for driver or if configured)
+        if name == "driver" or config.get("console", {}).get("enabled", False):
+            console = logging.StreamHandler()
+            console.setFormatter(logging.Formatter(
+                '%(asctime)s [%(levelname)s] %(message)s',
+                datefmt='%Y-%m-%dT%H:%M:%S'
+            ))
+            console.setLevel(self.LEVELS.get(
+                config.get("console", {}).get("level", "INFO"),
+                logging.INFO
+            ))
+            self._logger.addHandler(console)
+
+        # Capture exceptions, stderr, and warnings
+        if capture_exceptions:
+            self._setup_exception_capture()
+
+    def _setup_exception_capture(self):
+        """Capture stderr and uncaught exceptions to output.log."""
+        # Capture stderr (includes tracebacks from raised exceptions)
+        self._original_stderr = sys.stderr
+        sys.stderr = _StreamCapture(self._original_stderr, self._logger, level=logging.ERROR)
+
+        # Capture uncaught exceptions
+        self._original_excepthook = sys.excepthook
+        sys.excepthook = self._exception_handler
+
+        # Capture warnings via logging
+        logging.captureWarnings(True)
+        warnings_logger = logging.getLogger('py.warnings')
+        warnings_logger.handlers.clear()
+        for handler in self._logger.handlers:
+            warnings_logger.addHandler(handler)
+
+    def _exception_handler(self, exc_type, exc_value, exc_tb):
+        """Log uncaught exceptions before they crash the process."""
+        tb_str = ''.join(traceback.format_exception(exc_type, exc_value, exc_tb))
+        self._logger.error(f"Uncaught exception:\n{tb_str}")
+        # Still call original hook
+        if self._original_excepthook:
+            self._original_excepthook(exc_type, exc_value, exc_tb)
+
+    def _restore_exception_capture(self):
+        """Restore original stderr and excepthook."""
+        if self._original_stderr:
+            sys.stderr = self._original_stderr
+            self._original_stderr = None
+        if self._original_excepthook:
+            sys.excepthook = self._original_excepthook
+            self._original_excepthook = None
+
+    # ---- Text Logging ----
+
+    def debug(self, message: str) -> None:
+        self._logger.debug(message)
+
+    def info(self, message: str) -> None:
+        self._logger.info(message)
+
+    def warning(self, message: str) -> None:
+        self._logger.warning(message)
+
+    def error(self, message: str) -> None:
+        self._logger.error(message)
+
+    # ---- Metric Logging ----
+
+    def log(
+        self,
+        metrics: Dict[str, Any],
+        step: Optional[int] = None,
+        prefix: Optional[str] = None,
+    ) -> None:
+        """Log metrics to all backends."""
+        if prefix:
+            metrics = {f"{prefix}/{k}": v for k, v in metrics.items()}
+
+        for backend in self._backends:
+            backend.log(metrics, step=step)
+
+    # ---- Lifecycle ----
+
+    def flush(self) -> None:
+        """Force flush all buffered data."""
+        for backend in self._backends:
+            if hasattr(backend, "flush"):
+                backend.flush()
+
+    def shutdown(self) -> None:
+        """Flush and close all backends, restore stderr/excepthook."""
+        self.flush()
+        self._restore_exception_capture()
+        for backend in self._backends:
+            backend.shutdown()
+        self._logger.handlers.clear()
+
+    # ---- For Monitor ----
+
+    def get_output_log_tail(self, n: int = 50) -> List[str]:
+        """Get last n log lines (reads from disk)."""
+        if self._local:
+            return self._local.get_output_log_tail(n)
+        return []
 
 
-def finish_logging() -> None:
-    """Stop the global logger manager and all backends."""
-    try:
-        logger = ray.get_actor(name="falcon:global_logger")
-        ray.get(logger.shutdown.remote())
-        ray.kill(logger)
-    except ValueError:
-        # Actor doesn't exist, nothing to shut down
-        pass
+# ============================================================================
+# Module-level logger and convenience functions
+# ============================================================================
+
+
+class _DefaultLogger:
+    """Fallback logger that prints to console when no Logger is set.
+
+    Useful for testing/debugging code outside of falcon context.
+    Text messages print to console, metrics are silently ignored.
+    """
+
+    def debug(self, message: str) -> None:
+        pass  # Silent for debug
+
+    def info(self, message: str) -> None:
+        print(f"[INFO] {message}")
+
+    def warning(self, message: str) -> None:
+        print(f"[WARNING] {message}")
+
+    def error(self, message: str) -> None:
+        print(f"[ERROR] {message}", file=sys.stderr)
+
+    def log(self, metrics: Dict[str, Any], step: Optional[int] = None,
+            prefix: Optional[str] = None) -> None:
+        pass  # Silent for metrics
+
+
+_current_logger: Union[Logger, _DefaultLogger] = _DefaultLogger()
+
+
+def get_logger() -> Any:
+    """Get the current module-level logger instance."""
+    return _current_logger
+
+
+def set_logger(logger: Logger) -> None:
+    """Set the current module-level logger instance."""
+    global _current_logger
+    _current_logger = logger
+
+
+# ---- Module-level convenience functions ----
+# These dispatch to _current_logger, allowing simulators and estimators
+# to log without needing explicit logger parameters.
+
+def log(metrics: Dict[str, Any], step: Optional[int] = None, prefix: Optional[str] = None) -> None:
+    """Log metrics to the current logger.
+
+    Args:
+        metrics: Dictionary of metric names to values
+        step: Optional step number
+        prefix: Optional prefix to add to all metric names
+    """
+    _current_logger.log(metrics, step=step, prefix=prefix)
+
+
+def debug(message: str) -> None:
+    """Log a debug message."""
+    _current_logger.debug(message)
+
+
+def info(message: str) -> None:
+    """Log an info message."""
+    _current_logger.info(message)
+
+
+def warning(message: str) -> None:
+    """Log a warning message."""
+    _current_logger.warning(message)
+
+
+def error(message: str) -> None:
+    """Log an error message."""
+    _current_logger.error(message)

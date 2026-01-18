@@ -1,12 +1,13 @@
 import numpy as np
 import asyncio
+import sys
 from enum import IntEnum
 import joblib
 
 import ray
 from torch.utils.data import IterableDataset
 
-from falcon.core.logging import initialize_logging_for, log
+from falcon.core.logger import Logger, set_logger, log, error
 
 
 class Batch:
@@ -117,6 +118,7 @@ class DatasetManagerActor:
         initial_samples_path=None,
         keep_resampling=True,
         dump_config=None,
+        log_config=None,
     ):
         self.max_training_samples = max_training_samples
         self.min_training_samples = min_training_samples
@@ -132,7 +134,10 @@ class DatasetManagerActor:
         self.status = np.zeros(0, dtype=int)
         self.ref_counts = np.zeros(0, dtype=int)
 
-        initialize_logging_for("Dataset")
+        # Create logger and set as module-level logger
+        if log_config:
+            logger = Logger("dataset", log_config, capture_exceptions=True)
+            set_logger(logger)
 
         asyncio.create_task(self.monitor())
 
@@ -205,9 +210,6 @@ class DatasetManagerActor:
             ids_to_tombstone = ids_training[: -self.max_training_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-    def get_num_resims(self):
-        return self.num_resims
-
     def get_samples_by_status(self, status):
         if isinstance(status, list):
             status_ids = np.where(np.isin(self.status, status))[0]
@@ -227,19 +229,16 @@ class DatasetManagerActor:
             ids_training = ids[self.status[ids] == SampleStatus.TRAINING]
             self.status[ids_training] = SampleStatus.DISFAVOURED
 
-    def append(self, data, batched=True):
-        if batched:  # TODO: Legacy structure
-            num_new_samples = data[list(data.keys())[0]].shape[0]
-            for i in range(num_new_samples):
-                sample = {key: ray.put(value[i]) for key, value in data.items()}
-                self.ray_store.append(sample)
-        else:  # TODO: Should become default
-            num_new_samples = len(data)
-            for sample in data:
-                sample_ray_objects = {
-                    key: ray.put(value) for key, value in sample.items()
-                }
-                self.ray_store.append(sample_ray_objects)
+    def append(self, data):
+        """Append samples to the buffer.
+
+        Args:
+            data: List of dicts, each dict has {key: array} without batch dimension
+        """
+        num_new_samples = len(data)
+        for sample in data:
+            sample_ray_objects = {key: ray.put(value) for key, value in sample.items()}
+            self.ray_store.append(sample_ray_objects)
         self.status = np.append(
             self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
         )
@@ -247,12 +246,15 @@ class DatasetManagerActor:
 
         self.rotate_sample_buffer()
 
-        log({"buffer:n_total": len(self.ray_store)})
-        log({"buffer:n_validation": sum(self.status == SampleStatus.VALIDATION)})
-        log({"buffer:n_training": sum(self.status == SampleStatus.TRAINING)})
-        log({"buffer:n_disfavoured": sum(self.status == SampleStatus.DISFAVOURED)})
-        log({"buffer:n_tombstone": sum(self.status == SampleStatus.TOMBSTONE)})
-        log({"buffer:n_deleted": sum(self.status == SampleStatus.DELETED)})
+        # Log buffer statistics
+        log({
+            "n_total": len(self.ray_store),
+            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
+            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
+            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
+            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
+        }, prefix="buffer")
 
         self.dump_store()
 
@@ -314,32 +316,62 @@ class DatasetManagerActor:
     def initialize_samples(self, deployed_graph):
         num_initial_samples = self.num_initial_samples()
         if self.initial_samples_path is not None:
-            # Load initial samples from the specified path
+            # Load initial samples from the specified path (already list of dicts)
             initial_samples = joblib.load(self.initial_samples_path)
             num_loaded_samples = len(initial_samples)
-            self.append(initial_samples, batched=False)
+            if num_loaded_samples > 0:
+                self.append(initial_samples)
         else:
             num_loaded_samples = 0
         if num_initial_samples > num_loaded_samples:
-            samples = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            # deployed_graph.sample() returns dict-of-arrays, convert to list-of-dicts
+            samples_batched = deployed_graph.sample(num_initial_samples - num_loaded_samples)
+            n = samples_batched[list(samples_batched.keys())[0]].shape[0]
+            samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
             self.append(samples)
 
+    # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
         pass
 
 
 class DatasetView(IterableDataset):
-    """Dataset view that yields samples as tuples (legacy format).
+    """Dataset view that yields samples from the Ray store.
 
-    Yields:
-        Tuple of (index, value1, value2, ...) where values correspond to keylist order.
+    Supports two output formats:
+    - "dict": yields (index, {key: value, ...}) - for Batch collation
+    - "tuple": yields (index, value1, value2, ...) - legacy format
+
+    Args:
+        keylist: List of keys to retrieve from each sample
+        filter: Optional function to transform samples
+        sample_status: Status of samples to retrieve (TRAINING, VALIDATION, etc.)
+        output_format: "dict" (default) or "tuple"
     """
 
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
+    def __init__(
+        self,
+        keylist,
+        filter=None,
+        sample_status=SampleStatus.TRAINING,
+        output_format="dict",
+    ):
         self.dataset_manager = ray.get_actor("DatasetManager")
         self.keylist = keylist
         self.filter = filter
         self.sample_status = sample_status
+        self.output_format = output_format
+
+    def _log_dataset_size(self, size):
+        """Log dataset size based on sample status."""
+        # Determine prefix based on sample status
+        if self.sample_status == SampleStatus.VALIDATION:
+            prefix = "dataset:validation"
+        elif isinstance(self.sample_status, list):
+            prefix = "dataset:training"
+        else:
+            prefix = "dataset"
+        log({"active_size": size}, prefix=prefix)
 
     def __iter__(self):
         active_samples, active_ids = ray.get(
@@ -347,56 +379,7 @@ class DatasetView(IterableDataset):
         )
 
         perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
-
-        for i in perm:
-            try:
-                sample = [ray.get(active_samples[i][key]) for key in self.keylist]
-            except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
-                continue
-            if self.filter is not None:  # Online evaluation
-                sample = self.filter(sample)
-            index = active_ids[i]
-            yield (index, *sample)
-
-        ray.get(self.dataset_manager.release_samples.remote(active_ids))
-
-
-class BatchDatasetView(IterableDataset):
-    """Dataset view that yields samples as dictionaries for Batch collation.
-
-    Works with batch_collate_fn to produce Batch objects with dictionary access.
-
-    Yields:
-        Tuple of (index, {key: value, ...}) where keys are from keylist.
-    """
-
-    def __init__(self, keylist, filter=None, sample_status=SampleStatus.TRAINING):
-        self.dataset_manager = ray.get_actor("DatasetManager")
-        self.keylist = keylist
-        self.filter = filter
-        self.sample_status = sample_status
-
-    def __iter__(self):
-        active_samples, active_ids = ray.get(
-            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
-        )
-
-        perm = np.random.permutation(len(active_samples))
-
-        if self.sample_status == SampleStatus.TRAINING:
-            log({"dataset:train_size": len(perm)})
-        elif self.sample_status == SampleStatus.VALIDATION:
-            log({"dataset:val_size": len(perm)})
-        else:
-            log({"dataset:active_size": len(perm)})
+        self._log_dataset_size(len(perm))
 
         for i in perm:
             try:
@@ -404,14 +387,23 @@ class BatchDatasetView(IterableDataset):
                     key: ray.get(active_samples[i][key]) for key in self.keylist
                 }
             except Exception as e:
-                print(f"Error retrieving sample {i}: {e}")
+                error(f"Dataset retrieval error: {e}")
                 continue
+
             if self.filter is not None:
                 sample_dict = self.filter(sample_dict)
+
             index = active_ids[i]
-            yield (index, sample_dict)
+            if self.output_format == "tuple":
+                yield (index, *[sample_dict[k] for k in self.keylist])
+            else:
+                yield (index, sample_dict)
 
         ray.get(self.dataset_manager.release_samples.remote(active_ids))
+
+
+# Backwards compatibility alias
+BatchDatasetView = DatasetView
 
 
 def batch_collate_fn(dataset_manager):
@@ -538,6 +530,7 @@ def get_ray_dataset_manager(
     initial_samples_path=None,
     keep_resampling=True,
     dump_config=None,
+    log_config=None,
 ):
     dataset_manager_actor = DatasetManagerActor.remote(
         min_training_samples=min_training_samples,
@@ -548,6 +541,7 @@ def get_ray_dataset_manager(
         keep_resampling=keep_resampling,
         initial_samples_path=initial_samples_path,
         dump_config=dump_config,
+        log_config=log_config,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)
     return dataset_manager

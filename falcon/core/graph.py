@@ -1,6 +1,9 @@
-from omegaconf import OmegaConf
-import numpy as np
 import os
+import re
+import warnings
+
+import numpy as np
+from omegaconf import OmegaConf
 
 
 class Node:
@@ -9,14 +12,14 @@ class Node:
         name,
         simulator_cls,
         estimator_cls=None,
-        parents=[],
-        evidence=[],
-        scaffolds=[],
+        parents=None,
+        evidence=None,
+        scaffolds=None,
         observed=False,
         resample=False,
-        simulator_config={},
-        estimator_config={},
-        actor_config={},
+        simulator_config=None,
+        estimator_config=None,
+        actor_config=None,
         num_actors=1,
     ):
         """Node definition for a graphical model.
@@ -36,16 +39,16 @@ class Node:
         self.simulator_cls = simulator_cls
         self.estimator_cls = estimator_cls
 
-        self.parents = parents
-        self.evidence = evidence
-        self.scaffolds = scaffolds
+        self.parents = parents or []
+        self.evidence = evidence or []
+        self.scaffolds = scaffolds or []
         self.observed = observed
         self.resample = resample
         self.train = self.estimator_cls is not None
 
-        self.simulator_config = simulator_config
-        self.estimator_config = estimator_config
-        self.actor_config = actor_config
+        self.simulator_config = simulator_config or {}
+        self.estimator_config = estimator_config or {}
+        self.actor_config = actor_config or {}
         self.num_actors = num_actors
 
 
@@ -74,22 +77,6 @@ class Graph:
         self.sorted_inference_node_names = self._topological_sort(
             self.inference_name_list, self.evidence_dict
         )
-
-    def get_resample_parents_and_graph(self, evidence):
-        evidence = evidence[:]  # Shallow copy
-        evidence_offline = []
-        resample_subgraph = []
-        while len(evidence) > 0:
-            k = evidence.pop()
-            if self.node_dict[k].resample:
-                resample_subgraph.append(k)
-                for parent in self.parents_dict[k]:
-                    evidence.append(parent)
-            else:
-                evidence_offline.append(k)
-        resample_subgraph = resample_subgraph[::-1]  # Reverse the order
-        evidence_offline = list(set(evidence_offline))  # Remove duplicates
-        return evidence_offline, resample_subgraph
 
     def get_parents(self, node_name):
         return self.parents_dict[node_name]
@@ -192,6 +179,81 @@ def CompositeNode(names, module, **kwargs):
     return node_comp, *nodes
 
 
+def _parse_observation_path(path: str) -> tuple:
+    """Parse observation path with optional NPZ key extraction.
+
+    Supports syntax like "file.npz['key']" to extract a specific key from NPZ.
+
+    Args:
+        path: Path string, optionally with ['key'] suffix for NPZ files
+
+    Returns:
+        Tuple of (file_path, key) where key is None for regular files
+    """
+    match = re.match(r"^(.+\.npz)\['([^']+)'\]$", path)
+    if match:
+        return match.group(1), match.group(2)
+    return path, None
+
+
+# Valid keys for node configuration
+_VALID_NODE_KEYS = frozenset({
+    "parents", "evidence", "scaffolds", "observed", "resample",
+    "simulator", "estimator", "ray", "num_actors",
+})
+
+
+def _validate_node_config(node_name: str, node_config: dict) -> None:
+    """Validate a node configuration, raising errors or warnings as appropriate.
+
+    Args:
+        node_name: Name of the node being validated
+        node_config: Configuration dictionary for the node
+
+    Raises:
+        ValueError: If required fields are missing
+    """
+    # Check for unknown keys (likely typos)
+    unknown_keys = set(node_config.keys()) - _VALID_NODE_KEYS
+    if unknown_keys:
+        warnings.warn(
+            f"Node '{node_name}' has unknown config keys: {unknown_keys}. "
+            f"Valid keys are: {sorted(_VALID_NODE_KEYS)}",
+            UserWarning,
+            stacklevel=3,
+        )
+
+    # Require simulator
+    if "simulator" not in node_config:
+        raise ValueError(
+            f"Node '{node_name}' is missing required 'simulator' field."
+        )
+
+
+def _validate_node_references(nodes: list, node_names: set) -> None:
+    """Validate that all node references (parents, evidence, scaffolds) exist.
+
+    Args:
+        nodes: List of Node objects
+        node_names: Set of all node names in the graph
+
+    Raises:
+        ValueError: If a referenced node does not exist
+    """
+    for node in nodes:
+        for ref_type, refs in [
+            ("parents", node.parents),
+            ("evidence", node.evidence),
+            ("scaffolds", node.scaffolds),
+        ]:
+            for ref in refs:
+                if ref not in node_names:
+                    raise ValueError(
+                        f"Node '{node.name}' references unknown {ref_type[:-1]} '{ref}'. "
+                        f"Available nodes: {sorted(node_names)}"
+                    )
+
+
 def create_graph_from_config(graph_config, _cfg=None):
     """Create a computational graph from YAML configuration.
 
@@ -201,11 +263,17 @@ def create_graph_from_config(graph_config, _cfg=None):
 
     Returns:
         Graph: The computational graph
+
+    Raises:
+        ValueError: If configuration is invalid (missing required fields, unknown references)
     """
     nodes = []
     observations = {}
 
     for node_name, node_config in graph_config.items():
+        # Validate configuration
+        _validate_node_config(node_name, node_config)
+
         # Extract node parameters
         parents = node_config.get("parents", [])
         evidence = node_config.get("evidence", [])
@@ -222,11 +290,17 @@ def create_graph_from_config(graph_config, _cfg=None):
             actor_config = OmegaConf.to_container(actor_config, resolve=True)
 
         if data_path is not None:
-            # Treat it as path to a file and load it
-            if not os.path.exists(data_path):
-                raise FileNotFoundError(f"Observation file not found: {data_path}")
-            # Load from NPZ file
-            data = np.load(data_path)
+            # Parse path for NPZ key extraction syntax: "file.npz['key']"
+            file_path, key = _parse_observation_path(data_path)
+            if not os.path.exists(file_path):
+                raise FileNotFoundError(f"Observation file not found: {file_path}")
+            data = np.load(file_path)
+            if key is not None:
+                # Extract specific key from NPZ
+                data = data[key]
+            elif hasattr(data, 'files') and len(data.files) == 1:
+                # Auto-extract single-key NPZ files
+                data = data[data.files[0]]
             observations[node_name] = data
 
         # Extract target from simulator
@@ -274,6 +348,10 @@ def create_graph_from_config(graph_config, _cfg=None):
         )
 
         nodes.append(node)
+
+    # Validate node references
+    node_names = {node.name for node in nodes}
+    _validate_node_references(nodes, node_names)
 
     # Create and return the graph
     return Graph(nodes), observations

@@ -47,6 +47,7 @@ paths:
   import: "./src"                       # Local folder(s) with user-defined code (e.g. model.py)
   buffer: ${run_dir}/sim_dir            # Directory where Falcon stores simulated training data
   graph: ${run_dir}/graph_dir           # Directory for serialized graph and trained networks
+  samples: ${run_dir}/samples_dir       # Directory for generated samples (posterior, prior, etc.)
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
@@ -75,27 +76,25 @@ graph:
 
     estimator:                          # Posterior estimator network
       _target_: falcon.contrib.SNPE_A   # Sequential Neural Posterior Estimation (SNPE-A)
-
-      net_type: nsf                     # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
-      theta_norm: true                  # Normalize parameter space
-      norm_momentum: 0.003              # Momentum for online normalization updates
-
-      embedding:                        # Neural embedding for observation x
-         _target_: model.E
-         _input_: [x]
-
-      # --- Training parameters ---
-      num_epochs: 300
-      batch_size: 128
-      lr: 0.01
-      scheduler_patience: 16            # LR decay after N stagnant epochs
-      lr_decay_factor: 0.5              # LR decay multiplier
-      early_stop_patience: 32           # Early stopping patience
-
-      # --- SNPE-specific parameters ---
-      gamma: 0.5                        # Mixing coefficient for amortization weighting
-      discard_samples: false
-      log_ratio_threshold: -20          # Stability cutoff for log ratios
+      loop:                             # Training loop parameters
+        num_epochs: 300
+        batch_size: 128
+        early_stop_patience: 32         # Early stopping patience
+      network:                          # Neural network architecture
+        net_type: nsf                   # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
+        theta_norm: true                # Normalize parameter space
+        norm_momentum: 0.003            # Momentum for online normalization updates
+        embedding:                      # Neural embedding for observation x
+          _target_: model.E
+          _input_: [x]
+      optimizer:                        # Optimizer parameters
+        lr: 0.01
+        lr_decay_factor: 0.5            # LR decay multiplier
+        scheduler_patience: 16          # LR decay after N stagnant epochs
+      inference:                        # Inference and sampling parameters
+        gamma: 0.5                      # Mixing coefficient for amortization weighting
+        discard_samples: false
+        log_ratio_threshold: -20        # Stability cutoff for log ratios
 
     ray:
       num_gpus: 0                       # GPU count per Ray worker (0 = CPU)
@@ -105,7 +104,7 @@ graph:
     simulator:                          # Defines forward model p(x|z)
       _target_: model.Simulate
       npar: 3                           # Number of parameters to sample from z
-    observed: "./data/obs_3.npy"        # Path to observed data array
+    observed: "./data/mock_data.npz['x']"  # NPZ key extraction syntax
 
 # -----------------------------------------------------------------------------
 # Sampling configuration (posterior draws after training)
@@ -113,4 +112,4 @@ graph:
 sample:
   posterior:
     n: 1000                             # Number of posterior samples to draw
-    path: samples_posterior.joblib      # Output path for saved samples (under hydra.run.dir)
+    # Output: ${paths.samples}/posterior/{timestamp}/

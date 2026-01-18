@@ -15,16 +15,16 @@ EXAMPLES_DIR = Path(__file__).parent.parent / "examples"
 # Each tuple: (example_dir_name, config_name, epoch_overrides)
 EXAMPLE_CONFIGS = [
     # 01_minimal: single estimator 'z'
-    ("01_minimal", "config", ["graph.z.estimator.num_epochs=2"]),
+    ("01_minimal", "config.yaml", ["graph.z.estimator.loop.num_epochs=2"]),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
-    ("02_bimodal", "config_regular", ["graph.z.estimator.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("02_bimodal", "config_regular.yaml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 03_composite: two estimators 'z1' and 'z2' (needs GPU override)
     (
         "03_composite",
-        "config",
+        "config.yaml",
         [
-            "graph.z1.estimator.num_epochs=2",
-            "graph.z2.estimator.num_epochs=2",
+            "graph.z1.estimator.loop.num_epochs=2",
+            "graph.z2.estimator.loop.num_epochs=2",
             "graph.z1.ray.num_gpus=0",
             "graph.z2.ray.num_gpus=0",
         ],
@@ -49,12 +49,12 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         "falcon",
         "launch",
         f"--config-name={config_name}",
+        f"--run-dir={tmp_path}",
         # Reduce sample counts for faster testing
         "buffer.min_training_samples=64",
         "buffer.max_training_samples=128",
         "buffer.validation_window_size=16",
         "buffer.resample_batch_size=32",
-        f"run_dir={tmp_path}",
     ] + epoch_overrides
 
     # Create a clean environment for the subprocess
@@ -80,3 +80,28 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         f"STDOUT:\n{result.stdout.decode()}\n"
         f"STDERR:\n{result.stderr.decode()}"
     )
+
+    # Verify output.log files were created by the logging system
+    graph_dir = tmp_path / "graph_dir"
+    assert graph_dir.exists(), f"graph_dir not found at {graph_dir}"
+
+    # Check driver output.log exists
+    driver_log = graph_dir / "driver" / "output.log"
+    assert driver_log.exists(), f"Driver output.log not found at {driver_log}"
+
+    # Check that at least one node has output.log (actor logging works)
+    node_logs = list(graph_dir.glob("*/output.log"))
+    # Filter out driver to check actor logs specifically
+    actor_logs = [p for p in node_logs if p.parent.name != "driver"]
+    assert len(actor_logs) > 0, (
+        f"No actor output.log files found in {graph_dir}. "
+        f"Found directories: {[p.name for p in graph_dir.iterdir() if p.is_dir()]}"
+    )
+
+    # Check driver/output.log exists with runtime logging
+    driver_log = graph_dir / "driver" / "output.log"
+    assert driver_log.exists(), f"driver/output.log not found at {driver_log}"
+    driver_log_content = driver_log.read_text()
+    assert len(driver_log_content) > 0, "driver/output.log is empty"
+    # Verify it contains timestamped log entries
+    assert "[INFO]" in driver_log_content, "driver/output.log missing INFO level entries"

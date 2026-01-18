@@ -1,20 +1,9 @@
 # Core logging interface
-from .logger import (
-    LoggerBackend,
-    CompositeLogger,
-    LoggerManager,
-    NullBackend,
-)
+from .logger import Logger, LoggerBackend, get_logger, set_logger
+
+# Base estimator interface
+from .base_estimator import BaseEstimator
 
 # Backend implementations
-from .local_logger import (
-    LocalFileBackend,
-    LocalLoggerActor,
-    create_local_factory,
-)
-from .wandb_logger import (
-    WANDB_AVAILABLE,
-    WandBBackend,
-    WandBLoggerActor,
-    create_wandb_factory,
-)
+from .local_logger import LocalFileBackend
+from .wandb_logger import WANDB_AVAILABLE, WandBBackend
