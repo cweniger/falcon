@@ -1,5 +1,7 @@
 # Falcon - Distributed Dynamic Simulation-Based Inference
 
+[![Documentation](https://img.shields.io/badge/docs-cweniger.github.io%2Ffalcon-blue)](https://cweniger.github.io/falcon/)
+
 *Falcon* is a Python framework for **simulation-based inference (SBI)** that enables adaptive learning of complex conditional distributions. Built on top of PyTorch, Ray, and sbi, *Falcon* provides a declarative approach to building probabilistic models with automatic parallelization and experiment tracking.
 
 ## Key Features
@@ -320,7 +322,11 @@ buffer:
 
 ## Documentation
 
-- [SNPE_A Estimator](docs/estimators/SNPE_A.md) - Detailed configuration reference
+Full documentation is available at **[cweniger.github.io/falcon](https://cweniger.github.io/falcon/)**
+
+- [Getting Started](https://cweniger.github.io/falcon/getting-started/)
+- [Configuration Reference](https://cweniger.github.io/falcon/configuration/)
+- [API Reference](https://cweniger.github.io/falcon/api/)
 
 ## Troubleshooting
 
