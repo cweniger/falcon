@@ -15,6 +15,11 @@ setup(
     ],
     extras_require={
         "monitor": ["textual>=0.40.0"],
+        "docs": [
+            "mkdocs>=1.5",
+            "mkdocs-material>=9.0",
+            "mkdocstrings[python]>=0.24",
+        ],
     },
     entry_points={
         "console_scripts": [
