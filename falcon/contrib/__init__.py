@@ -9,3 +9,11 @@ from .SNPE_A import (
     OptimizerConfig,
     InferenceConfig,
 )
+from .SNPE_gaussian import (
+    SNPE_gaussian,
+    GaussianConfig,
+    GaussianNetworkConfig,
+    GaussianOptimizerConfig,
+    GaussianInferenceConfig,
+    GaussianPosterior,
+)
