@@ -447,3 +447,71 @@ class LossBasedEstimator(StepwiseEstimator):
         # LR scheduler step
         self._scheduler.step(val_loss)
         log({"lr": self._optimizer.param_groups[0]["lr"]})
+
+    # ==================== Inference Model Access ====================
+
+    @property
+    def inference_model(self) -> Optional[nn.Module]:
+        """Get the best model for inference. Returns None if not yet trained."""
+        return self._best_model
+
+    @property
+    def has_trained_model(self) -> bool:
+        """Check if a trained model is available for inference."""
+        return self._best_model is not None
+
+    # ==================== Save/Load ====================
+
+    def save(self, node_dir) -> None:
+        """Save model state. Override to add extra state."""
+        from pathlib import Path
+        node_dir = Path(node_dir)
+
+        if not self.networks_initialized:
+            raise RuntimeError("Cannot save: networks not initialized.")
+
+        # Save model weights
+        torch.save(self._best_model.state_dict(), node_dir / "model.pth")
+
+        # Save history
+        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
+        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
+        torch.save(self.history["epochs"], node_dir / "epochs.pth")
+        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
+        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
+        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
+        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
+
+    def _rebuild_model_for_load(self, node_dir) -> nn.Module:
+        """Rebuild the model structure for loading weights.
+
+        Override in subclass to provide model reconstruction logic.
+        By default, raises NotImplementedError.
+        """
+        raise NotImplementedError(
+            "Subclass must implement _rebuild_model_for_load to restore model structure."
+        )
+
+    def load(self, node_dir) -> None:
+        """Load model state. Override _rebuild_model_for_load to customize."""
+        from pathlib import Path
+        node_dir = Path(node_dir)
+
+        # Rebuild model structure (subclass provides this)
+        self._model = self._rebuild_model_for_load(node_dir)
+        self._best_model = self._clone_model(self._model)
+
+        # Setup optimizer and scheduler
+        cfg = self.optimizer_config
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
+        self._scheduler = ReduceLROnPlateau(
+            self._optimizer,
+            mode="min",
+            factor=cfg.lr_decay_factor,
+            patience=cfg.scheduler_patience,
+        )
+
+        self.networks_initialized = True
+
+        # Load weights into best model
+        self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))

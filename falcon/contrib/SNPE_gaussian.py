@@ -497,16 +497,16 @@ class SNPE_gaussian(LossBasedEstimator):
         return RVBatch(samples, logprob=logprob)
 
     def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> RVBatch:
-        """Internal sampling method using best model.
+        """Internal sampling method using inference model.
 
-        Falls back to sample_prior if best model not yet available.
+        Falls back to sample_prior if model not yet available.
 
         Args:
             num_samples: Number of samples to generate
             conditions: Dict mapping node names to condition tensors
             gamma: Tempering parameter (None for untempered posterior)
         """
-        if self._best_model is None:
+        if not self.has_trained_model:
             return self.sample_prior(num_samples)
 
         assert conditions, "Conditions must be provided for sampling."
@@ -517,10 +517,11 @@ class SNPE_gaussian(LossBasedEstimator):
             for k, v in conditions.items()
         }
 
+        model = self.inference_model
         with torch.no_grad():
-            self._best_model.eval()
-            samples = self._best_model.sample(conditions_device, gamma=gamma)
-            logprob = self._best_model.log_prob(samples, conditions_device)
+            model.eval()
+            samples = model.sample(conditions_device, gamma=gamma)
+            logprob = model.log_prob(samples, conditions_device)
 
         return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
 
@@ -543,51 +544,26 @@ class SNPE_gaussian(LossBasedEstimator):
     def save(self, node_dir: Path) -> None:
         """Save SNPE_gaussian state."""
         debug(f"Saving: {node_dir}")
-        if not self.networks_initialized:
-            raise RuntimeError("Networks not initialized.")
 
-        # Save best model state
-        torch.save(self._best_model.state_dict(), node_dir / "model.pth")
+        # Save base class state (model weights, history)
+        super().save(node_dir)
+
+        # Save extra state specific to SNPE_gaussian
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
-
-        # Save history
-        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
-        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
         torch.save(self.history["theta_mins"], node_dir / "theta_mins_batches.pth")
         torch.save(self.history["theta_maxs"], node_dir / "theta_maxs_batches.pth")
-        torch.save(self.history["epochs"], node_dir / "epochs.pth")
-        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
-        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
-        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
-        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
+
+    def _rebuild_model_for_load(self, node_dir: Path) -> nn.Module:
+        """Rebuild model from saved init parameters."""
+        init_parameters = torch.load(node_dir / "init_parameters.pth")
+        theta, conditions = init_parameters[0], init_parameters[1]
+        self._init_parameters = [theta, conditions]
+        return self._build_model_from_params(theta, conditions)
 
     def load(self, node_dir: Path) -> None:
         """Load SNPE_gaussian state."""
         debug(f"Loading: {node_dir}")
-        init_parameters = torch.load(node_dir / "init_parameters.pth")
-        theta, conditions = init_parameters[0], init_parameters[1]
-
-        # Build model from stored init parameters
-        self._init_parameters = [theta, conditions]
-        self._model = self._build_model_from_params(theta, conditions)
-        self._best_model = self._clone_model(self._model)
-
-        # Setup optimizer and scheduler (from LossBasedEstimator)
-        cfg = self.optimizer_config
-        from torch.optim import AdamW
-        from torch.optim.lr_scheduler import ReduceLROnPlateau
-        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg.lr_decay_factor,
-            patience=cfg.scheduler_patience,
-        )
-
-        self.networks_initialized = True
-
-        # Load best model weights
-        self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))
+        super().load(node_dir)
 
     # ==================== Private Helpers ====================
 
