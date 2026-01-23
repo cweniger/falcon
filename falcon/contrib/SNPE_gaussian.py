@@ -41,7 +41,6 @@ class GaussianNetworkConfig:
 
     hidden_dim: int = 128
     num_layers: int = 3
-    activation: str = "relu"
     momentum: float = 0.01
     min_var: float = 1e-6
     eig_update_freq: int = 1
@@ -81,30 +80,16 @@ class GaussianConfig:
 # ==================== Helper Functions ====================
 
 
-def get_activation(name: str) -> nn.Module:
-    """Get activation function by name."""
-    activations = {
-        "relu": nn.ReLU,
-        "tanh": nn.Tanh,
-        "gelu": nn.GELU,
-        "silu": nn.SiLU,
-    }
-    if name not in activations:
-        raise ValueError(f"Unknown activation: {name}. Choose from {list(activations.keys())}")
-    return activations[name]()
-
-
 def build_mlp(
     input_dim: int,
     hidden_dim: int,
     output_dim: int,
     num_layers: int,
-    activation: str,
 ) -> nn.Sequential:
     """Build MLP with specified architecture."""
-    layers = [nn.Linear(input_dim, hidden_dim), get_activation(activation)]
+    layers = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
     for _ in range(num_layers - 1):
-        layers.extend([nn.Linear(hidden_dim, hidden_dim), get_activation(activation)])
+        layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
     layers.append(nn.Linear(hidden_dim, output_dim))
     return nn.Sequential(*layers)
 
@@ -134,7 +119,6 @@ class GaussianPosterior(nn.Module):
         condition_dim: int,
         hidden_dim: int = 128,
         num_layers: int = 3,
-        activation: str = "relu",
         momentum: float = 0.01,
         min_var: float = 1e-6,
         eig_update_freq: int = 1,
@@ -148,7 +132,7 @@ class GaussianPosterior(nn.Module):
         self.step_counter = 0
 
         # MLP for mean prediction
-        self.net = build_mlp(condition_dim, hidden_dim, param_dim, num_layers, activation)
+        self.net = build_mlp(condition_dim, hidden_dim, param_dim, num_layers)
 
         # Input statistics (conditions)
         self.register_buffer("input_mean", torch.zeros(condition_dim))
@@ -417,7 +401,6 @@ class SNPE_gaussian(StepwiseEstimator):
             condition_dim=condition_dim,
             hidden_dim=cfg_net.hidden_dim,
             num_layers=cfg_net.num_layers,
-            activation=cfg_net.activation,
             momentum=cfg_net.momentum,
             min_var=cfg_net.min_var,
             eig_update_freq=cfg_net.eig_update_freq,
@@ -429,7 +412,6 @@ class SNPE_gaussian(StepwiseEstimator):
             condition_dim=condition_dim,
             hidden_dim=cfg_net.hidden_dim,
             num_layers=cfg_net.num_layers,
-            activation=cfg_net.activation,
             momentum=cfg_net.momentum,
             min_var=cfg_net.min_var,
             eig_update_freq=cfg_net.eig_update_freq,
