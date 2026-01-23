@@ -57,7 +57,6 @@ class GaussianInferenceConfig:
     gamma: float = 0.5
     discard_samples: bool = True
     log_ratio_threshold: float = -20.0
-    use_best_model_during_inference: bool = True
 
 
 def _default_optimizer_config():
@@ -189,53 +188,21 @@ class GaussianPosterior(nn.Module):
 
         return -0.5 * (self.param_dim * np.log(2 * np.pi) + log_det + mahal)
 
-    def sample(self, conditions: torch.Tensor, gamma: float = 1.0) -> torch.Tensor:
-        """Sample from tempered posterior.
+    def sample(self, conditions: torch.Tensor, gamma: Optional[float] = None) -> torch.Tensor:
+        """Sample from the posterior, optionally tempered.
 
-        The proposal precision is: gamma * lambda_like + 1
-        where lambda_like = max(1/d - 1, 0) and d are posterior covariance eigenvalues.
+        Tempering interpolates between prior (gamma=0) and posterior (gamma=None/inf):
+        - gamma=None: Sample from learned posterior N(mu(x), Sigma)
+        - gamma in (0,1): Widened proposal for exploration (used in adaptive resampling)
+        - gamma=0: Equivalent to prior
 
-        When gamma=1, this samples from the posterior.
-        When gamma<1, this samples from a wider proposal distribution.
-
-        Args:
-            conditions: Condition tensor of shape (batch, condition_dim)
-            gamma: Tempering parameter. gamma=1 gives posterior, gamma<1 gives wider proposal.
-
-        Returns:
-            Samples of shape (batch, param_dim)
-        """
-        mean = self._forward_mean(conditions)
-        d = self._residual_eigvals  # posterior covariance eigenvalues
-        V = self._residual_eigvecs
-
-        a = gamma / (1 + gamma)
-
-        # Likelihood precision eigenvalues: max(1/d - 1, 0)
-        # Truncate at 0 for directions where posterior is wider than prior
-        lambda_like = (1.0 / d - 1.0).clamp(min=0)
-
-        # Proposal precision eigenvalues: a * lambda_like + 1
-        lambda_prop = a * lambda_like + 1.0
-
-        # Proposal variance eigenvalues
-        var_prop = 1.0 / lambda_prop
-
-        # Mean shrinkage in eigenbasis
-        # alpha_i = a / (d_i * lambda_prop_i)
-        mean_proj = V.T @ mean.T  # (param_dim, batch)
-        alpha = a / (d * lambda_prop)
-        mean_prop = (V @ (alpha.unsqueeze(1) * mean_proj)).T  # (batch, param_dim)
-
-        # Sample: mean_prop + V @ diag(sqrt(var_prop)) @ eps
-        eps = torch.randn_like(mean)
-        return mean_prop + (V @ (torch.sqrt(var_prop).unsqueeze(1) * eps.T)).T
-
-    def sample_posterior(self, conditions: torch.Tensor) -> torch.Tensor:
-        """Sample from the posterior distribution (gamma -> infinity equivalent).
+        The tempered distribution has precision: gamma * Lambda_like + I
+        where Lambda_like = max(Sigma^{-1} - I, 0) is the likelihood precision.
 
         Args:
             conditions: Condition tensor of shape (batch, condition_dim)
+            gamma: Tempering parameter. None means untempered posterior.
+                   Lower values give wider distributions.
 
         Returns:
             Samples of shape (batch, param_dim)
@@ -244,9 +211,29 @@ class GaussianPosterior(nn.Module):
         V = self._residual_eigvecs
         d = self._residual_eigvals
 
-        # Sample from N(mean, residual_cov)
+        # Untempered posterior: sample from N(mean, residual_cov)
+        if gamma is None:
+            eps = torch.randn_like(mean)
+            return mean + (V @ (torch.sqrt(d).unsqueeze(1) * eps.T)).T
+
+        # Tempered sampling
+        a = gamma / (1 + gamma)
+
+        # Likelihood precision eigenvalues: max(1/d - 1, 0)
+        lambda_like = (1.0 / d - 1.0).clamp(min=0)
+
+        # Proposal precision and variance eigenvalues
+        lambda_prop = a * lambda_like + 1.0
+        var_prop = 1.0 / lambda_prop
+
+        # Mean shrinkage in eigenbasis
+        mean_proj = V.T @ mean.T  # (param_dim, batch)
+        alpha = a / (d * lambda_prop)
+        mean_prop = (V @ (alpha.unsqueeze(1) * mean_proj)).T  # (batch, param_dim)
+
+        # Sample
         eps = torch.randn_like(mean)
-        return mean + (V @ (torch.sqrt(d).unsqueeze(1) * eps.T)).T
+        return mean_prop + (V @ (torch.sqrt(var_prop).unsqueeze(1) * eps.T)).T
 
     # ==================== Internal Methods ====================
 
@@ -506,9 +493,47 @@ class SNPE_gaussian(LossBasedEstimator):
         if parent_conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
-        # Compute log probability from simulator
-        logprob = np.zeros(num_samples)  # Prior logprob handled by simulator
+        logprob = np.zeros(num_samples)
         return RVBatch(samples, logprob=logprob)
+
+    def _prepare_conditions(
+        self,
+        num_samples: int,
+        parent_conditions: Optional[List],
+        evidence_conditions: Optional[List],
+    ) -> Dict[str, torch.Tensor]:
+        """Prepare conditions dict for sampling."""
+        conditions_list = (parent_conditions or []) + (evidence_conditions or [])
+        assert conditions_list, "Conditions must be provided for sampling."
+
+        conditions = {
+            k: v.to(self.device, dtype=torch.float32)
+            for k, v in zip(self.condition_keys, conditions_list)
+        }
+        return {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
+
+    def _sample(
+        self,
+        num_samples: int,
+        parent_conditions: Optional[List],
+        evidence_conditions: Optional[List],
+        gamma: Optional[float],
+    ) -> RVBatch:
+        """Internal sampling method using best model.
+
+        Falls back to sample_prior if best model not yet available.
+        """
+        if self._best_model is None:
+            return self.sample_prior(num_samples, parent_conditions)
+
+        conditions = self._prepare_conditions(num_samples, parent_conditions, evidence_conditions)
+
+        with torch.no_grad():
+            self._best_model.eval()
+            samples = self._best_model.sample(conditions, gamma=gamma)
+            logprob = self._best_model.log_prob(samples, conditions)
+
+        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
 
     def sample_posterior(
         self,
@@ -517,32 +542,7 @@ class SNPE_gaussian(LossBasedEstimator):
         evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
         """Sample from the posterior distribution q(theta|x)."""
-        # Fall back to prior if networks not yet initialized
-        if not self.networks_initialized:
-            return self.sample_prior(num_samples, parent_conditions)
-
-        cfg_inf = self.config.inference
-
-        conditions_list = (parent_conditions or []) + (evidence_conditions or [])
-        assert conditions_list, "Conditions must be provided for posterior sampling."
-
-        # Convert list to dict using condition_keys (ensure float32)
-        conditions = {
-            k: v.to(self.device, dtype=torch.float32) for k, v in zip(self.condition_keys, conditions_list)
-        }
-
-        # Expand conditions for num_samples
-        conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
-
-        # Use best model if configured
-        model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
-
-        with torch.no_grad():
-            model.eval()
-            samples = model.sample_posterior(conditions)
-            logprob = model.log_prob(samples, conditions)
-
-        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
+        return self._sample(num_samples, parent_conditions, evidence_conditions, gamma=None)
 
     def sample_proposal(
         self,
@@ -550,42 +550,17 @@ class SNPE_gaussian(LossBasedEstimator):
         parent_conditions: Optional[List] = None,
         evidence_conditions: Optional[List] = None,
     ) -> RVBatch:
-        """Sample from the widened proposal distribution for adaptive resampling.
-
-        Uses eigenvalue-based tempering to widen the posterior for exploration.
-        """
-        # Fall back to prior if networks not yet initialized
-        if not self.networks_initialized:
-            return self.sample_prior(num_samples, parent_conditions)
-
-        cfg_inf = self.config.inference
-
-        conditions_list = (parent_conditions or []) + (evidence_conditions or [])
-        assert conditions_list, "Conditions must be provided for proposal sampling."
-
-        # Convert list to dict using condition_keys (ensure float32)
-        conditions = {
-            k: v.to(self.device, dtype=torch.float32) for k, v in zip(self.condition_keys, conditions_list)
-        }
-
-        # Expand conditions for num_samples
-        conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
-
-        # Use best model if configured
-        model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
-
-        with torch.no_grad():
-            model.eval()
-            samples = model.sample(conditions, gamma=cfg_inf.gamma)
-            logprob = model.log_prob(samples, conditions)
-
+        """Sample from widened proposal distribution for adaptive resampling."""
+        result = self._sample(
+            num_samples, parent_conditions, evidence_conditions,
+            gamma=self.config.inference.gamma
+        )
         log({
-            "sample_proposal:mean": samples.mean().item(),
-            "sample_proposal:std": samples.std().item(),
-            "sample_proposal:logprob": logprob.mean().item(),
+            "sample_proposal:mean": result.value.mean(),
+            "sample_proposal:std": result.value.std(),
+            "sample_proposal:logprob": result.logprob.mean(),
         })
-
-        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
+        return result
 
     # ==================== Save/Load ====================
 

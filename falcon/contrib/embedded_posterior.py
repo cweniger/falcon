@@ -47,12 +47,15 @@ class EmbeddedPosterior(nn.Module):
         s = self._embed(conditions)
         return self.posterior.log_prob(theta, s)
 
-    def sample(self, conditions: Dict[str, torch.Tensor], gamma: float = 1.0) -> torch.Tensor:
-        """Sample from tempered posterior with embedded conditions."""
+    def sample(self, conditions: Dict[str, torch.Tensor], gamma: float = None) -> torch.Tensor:
+        """Sample from posterior with embedded conditions.
+
+        Args:
+            conditions: Dict of condition tensors
+            gamma: Tempering parameter. None for untempered posterior.
+
+        Returns:
+            Samples tensor
+        """
         s = self._embed(conditions)
         return self.posterior.sample(s, gamma)
-
-    def sample_posterior(self, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Sample from posterior with embedded conditions."""
-        s = self._embed(conditions)
-        return self.posterior.sample_posterior(s)
