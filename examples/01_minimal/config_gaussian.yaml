@@ -70,7 +70,6 @@ graph:
       network:
         hidden_dim: 128               # MLP hidden layer dimension
         num_layers: 3                 # Number of hidden layers
-        activation: relu              # Activation function (relu, tanh, gelu, silu)
         momentum: 0.01                # EMA momentum for running statistics
         min_var: 1.0e-6               # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency

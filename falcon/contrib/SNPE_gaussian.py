@@ -13,22 +13,23 @@ Benefits over flow-based approaches:
 - Tempered proposals: Eigenvalue-based tempering for exploration
 """
 
-import copy
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, List, Optional, Tuple
 
 import numpy as np
 import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
-from torch.optim import AdamW
-from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.utils import RVBatch
 from falcon.core.logger import log, debug, info, warning, error
-from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
+from falcon.contrib.stepwise_estimator import (
+    LossBasedEstimator,
+    TrainingLoopConfig,
+    OptimizerConfig,
+)
 from falcon.contrib.torch_embedding import instantiate_embedding
 
 
@@ -48,15 +49,6 @@ class GaussianNetworkConfig:
 
 
 @dataclass
-class GaussianOptimizerConfig:
-    """Optimizer parameters."""
-
-    lr: float = 1e-2
-    lr_decay_factor: float = 0.1
-    scheduler_patience: int = 8
-
-
-@dataclass
 class GaussianInferenceConfig:
     """Inference and sampling parameters."""
 
@@ -66,13 +58,18 @@ class GaussianInferenceConfig:
     use_best_model_during_inference: bool = True
 
 
+def _default_optimizer_config():
+    """Default optimizer config for SNPE_gaussian (lr=1e-2)."""
+    return OptimizerConfig(lr=1e-2)
+
+
 @dataclass
 class GaussianConfig:
     """Top-level SNPE_gaussian configuration."""
 
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     network: GaussianNetworkConfig = field(default_factory=GaussianNetworkConfig)
-    optimizer: GaussianOptimizerConfig = field(default_factory=GaussianOptimizerConfig)
+    optimizer: OptimizerConfig = field(default_factory=_default_optimizer_config)
     inference: GaussianInferenceConfig = field(default_factory=GaussianInferenceConfig)
     device: Optional[str] = None
 
@@ -158,12 +155,10 @@ class GaussianPosterior(nn.Module):
     # ==================== Public API ====================
 
     def loss(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
-        """Training entry point: update statistics and return negative log likelihood.
+        """Compute negative log likelihood loss.
 
-        This method handles all training-time updates internally:
-        1. Updates input/output running statistics
-        2. Computes log probability
-        3. Updates residual covariance
+        NOTE: This method only computes the loss. Call update_stats() separately
+        after loss.backward() to update running statistics.
 
         Args:
             theta: Parameter samples of shape (batch, param_dim)
@@ -172,17 +167,21 @@ class GaussianPosterior(nn.Module):
         Returns:
             Scalar loss (negative mean log probability)
         """
-        # Update input/output statistics before forward pass
-        self._update_stats(theta, conditions)
-
-        # Compute log probability
+        # Compute log probability (no stats updates here to avoid in-place issues)
         log_prob = self.log_prob(theta, conditions)
-        loss = -log_prob.mean()
+        return -log_prob.mean()
 
-        # Update residual covariance after forward pass
+    def update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
+        """Update running statistics after backward pass.
+
+        Call this AFTER loss.backward() to avoid in-place modification errors.
+
+        Args:
+            theta: Parameter samples of shape (batch, param_dim)
+            conditions: Embedded conditions of shape (batch, condition_dim)
+        """
+        self._update_stats(theta, conditions)
         self._update_residual_cov(theta, conditions)
-
-        return loss
 
     def log_prob(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
         """Compute Gaussian log probability using eigendecomposition.
@@ -199,16 +198,19 @@ class GaussianPosterior(nn.Module):
         mean = self._forward_mean(conditions)
         residuals = theta - mean
 
+        # Detach eigendecomposition to avoid in-place modification errors
+        # (these buffers are updated after loss computation in training)
+        V = self._residual_eigvecs.detach()
+        d = self._residual_eigvals.detach()
+
         # log|Σ| = sum(log(d_i))
-        log_det = torch.log(self._residual_eigvals).sum()
+        log_det = torch.log(d).sum()
 
         # Mahalanobis via eigenbasis: sum_i (r_i^2 / d_i) where r_i = (V^T @ residuals)_i
-        V = self._residual_eigvecs
-        d = self._residual_eigvals
         r_proj = V.T @ residuals.T  # (param_dim, batch)
         mahal = (r_proj**2 / d.unsqueeze(1)).sum(dim=0)  # (batch,)
 
-        return -0.5 * (self.param_dim * np.log(2 * np.pi) + log_det.detach() + mahal)
+        return -0.5 * (self.param_dim * np.log(2 * np.pi) + log_det + mahal)
 
     def sample(self, conditions: torch.Tensor, gamma: float = 1.0) -> torch.Tensor:
         """Sample from tempered posterior.
@@ -273,17 +275,24 @@ class GaussianPosterior(nn.Module):
 
     def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
         """Predict mean using Cholesky-based whitening."""
+        # Detach buffers that are updated in-place during training
+        # to avoid "modified by inplace operation" errors during backward
+        input_mean = self._input_mean.detach()
+        input_cov_chol = self._input_cov_chol.detach()
+        output_mean = self._output_mean.detach()
+        output_cov_chol = self._output_cov_chol.detach()
+
         # Whiten inputs
-        centered = (conditions - self._input_mean).T
+        centered = (conditions - input_mean).T
         x_white = torch.linalg.solve_triangular(
-            self._input_cov_chol, centered, upper=False
+            input_cov_chol, centered, upper=False
         ).T
 
         # Apply MLP
         r = self.net(x_white)
 
         # De-whiten outputs
-        return self._output_mean + (self._output_cov_chol @ r.T).T
+        return output_mean + (output_cov_chol @ r.T).T
 
     def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update running statistics using lerp_() for EMA updates."""
@@ -392,11 +401,17 @@ class EmbeddedPosterior(nn.Module):
         s = self._embed(conditions)
         return self.posterior.sample_posterior(s)
 
+    def update_stats(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> None:
+        """Update running statistics with embedded conditions (call after backward)."""
+        with torch.no_grad():
+            s = self._embed(conditions)
+            self.posterior.update_stats(theta, s)
+
 
 # ==================== SNPE_gaussian Implementation ====================
 
 
-class SNPE_gaussian(StepwiseEstimator):
+class SNPE_gaussian(LossBasedEstimator):
     """Sequential Neural Posterior Estimation with Gaussian posterior.
 
     This estimator learns a full covariance Gaussian posterior q(theta|x)
@@ -430,30 +445,20 @@ class SNPE_gaussian(StepwiseEstimator):
         super().__init__(
             simulator_instance=simulator_instance,
             loop_config=config.loop,
+            optimizer_config=config.optimizer,
             theta_key=theta_key,
             condition_keys=condition_keys,
+            device=config.device,
         )
 
         self.config = config
-
-        # Device setup
-        self.device = self._setup_device(config.device)
 
         # Embedding network (created now, wrapped with posterior later)
         embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
         self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
-        # EmbeddedPosterior (initialized lazily)
-        self._model: Optional[EmbeddedPosterior] = None
-        self._best_model: Optional[EmbeddedPosterior] = None
+        # Store init parameters for save/load
         self._init_parameters = None
-
-        # Best loss tracking
-        self.best_val_loss = float("inf")
-
-        # Optimizer/scheduler (initialized lazily)
-        self._optimizer = None
-        self._scheduler = None
 
         # Extended history for tracking
         self.history.update({
@@ -461,24 +466,23 @@ class SNPE_gaussian(StepwiseEstimator):
             "theta_maxs": [],
         })
 
-    def _setup_device(self, device: Optional[str]) -> torch.device:
-        """Setup compute device."""
-        if device:
-            return torch.device(device)
-        dev = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        debug(f"Auto-detected device: {dev}")
-        return dev
+    # ==================== LossBasedEstimator Abstract Methods ====================
 
-    # ==================== Network Initialization ====================
-
-    def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
-        """Initialize EmbeddedPosterior and optimizer."""
+    def _build_model(self, batch) -> nn.Module:
+        """Build EmbeddedPosterior model from first batch."""
+        theta, conditions = self._extract_theta_conditions(batch)
         self._init_parameters = [theta, conditions]
-        debug("Initializing networks...")
+        return self._build_model_from_params(theta, conditions)
+
+    def _build_model_from_params(self, theta: torch.Tensor, conditions: Dict) -> nn.Module:
+        """Build model from theta and conditions tensors.
+
+        Used both during training (from batch) and loading (from stored params).
+        """
+        debug("Building model...")
         debug(f"GPU available: {torch.cuda.is_available()}")
 
         cfg_net = self.config.network
-        cfg_opt = self.config.optimizer
 
         # Embed conditions to get embedding dimension
         conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
@@ -502,35 +506,44 @@ class SNPE_gaussian(StepwiseEstimator):
         ).to(self.device)
 
         # Wrap embedding + posterior into EmbeddedPosterior
-        self._model = EmbeddedPosterior(self._embedding, posterior)
+        model = EmbeddedPosterior(self._embedding, posterior)
 
-        # Best-fit copy
-        best_embedding = copy.deepcopy(self._embedding)
-        best_posterior = GaussianPosterior(
-            param_dim=param_dim,
-            condition_dim=condition_dim,
-            hidden_dim=cfg_net.hidden_dim,
-            num_layers=cfg_net.num_layers,
-            momentum=cfg_net.momentum,
-            min_var=cfg_net.min_var,
-            eig_update_freq=cfg_net.eig_update_freq,
-        ).to(self.device)
-        best_posterior.load_state_dict(posterior.state_dict())
-        self._best_model = EmbeddedPosterior(best_embedding, best_posterior)
+        debug("Model built.")
+        return model
 
-        # Optimizer and scheduler
-        self._optimizer = AdamW(self._model.parameters(), lr=cfg_opt.lr)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg_opt.lr_decay_factor,
-            patience=cfg_opt.scheduler_patience,
-        )
+    def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute loss from batch.
 
-        self.networks_initialized = True
-        debug("Networks initialized.")
+        Returns:
+            Tuple of (loss_tensor, metrics_dict)
+        """
+        ids, theta, theta_logprob, conditions, theta_device, conditions_device = \
+            self._unpack_batch(batch, "train")
 
-    # ==================== Train/Val Steps ====================
+        # Track theta ranges
+        with torch.no_grad():
+            self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
+            self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
+
+        # Compute loss using EmbeddedPosterior.loss()
+        loss = self._model.loss(theta_device, conditions_device)
+
+        # Discard samples based on log-likelihood ratio
+        if self.config.inference.discard_samples:
+            discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
+            batch.discard(discard_mask)
+
+        return loss, {"loss": loss.item()}
+
+    # ==================== Batch Processing ====================
+
+    def _extract_theta_conditions(self, batch) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
+        """Extract theta and conditions from batch (without logging)."""
+        theta = torch.from_numpy(batch[self.theta_key])
+        conditions = {
+            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+        }
+        return theta, conditions
 
     def _unpack_batch(self, batch, phase: str):
         """Unpack batch data and convert to tensors.
@@ -563,25 +576,34 @@ class SNPE_gaussian(StepwiseEstimator):
         return ids, theta, theta_logprob, conditions, theta_device, conditions_device
 
     def train_step(self, batch) -> Dict[str, float]:
-        """SNPE_gaussian training step with gradient update and optional sample discarding."""
+        """SNPE_gaussian training step with gradient update and stats update.
+
+        Override base class to call update_stats() after backward, avoiding
+        in-place modification errors.
+        """
+        # Initialize on first batch
+        if not self.networks_initialized:
+            self._initialize_model(batch)
+
+        # Unpack batch
         ids, theta, theta_logprob, conditions, theta_device, conditions_device = \
             self._unpack_batch(batch, "train")
-
-        # Initialize networks on first batch
-        if not self.networks_initialized:
-            self._initialize_networks(theta, conditions)
 
         # Track theta ranges
         with torch.no_grad():
             self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
             self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
-        # Forward and backward pass using EmbeddedPosterior.loss()
+        # Forward pass and backward
         self._optimizer.zero_grad()
         self._model.train()
         loss = self._model.loss(theta_device, conditions_device)
         loss.backward()
         self._optimizer.step()
+
+        # Update running statistics AFTER backward to avoid in-place errors
+        with torch.no_grad():
+            self._model.update_stats(theta_device, conditions_device)
 
         # Discard samples based on log-likelihood ratio
         if self.config.inference.discard_samples:
@@ -591,7 +613,10 @@ class SNPE_gaussian(StepwiseEstimator):
         return {"loss": loss.item()}
 
     def val_step(self, batch) -> Dict[str, float]:
-        """SNPE_gaussian validation step without gradient computation."""
+        """SNPE_gaussian validation step without gradient computation.
+
+        Override base class to use log_prob directly instead of loss().
+        """
         _, theta, theta_logprob, conditions, theta_device, conditions_device = \
             self._unpack_batch(batch, "val")
 
@@ -602,20 +627,6 @@ class SNPE_gaussian(StepwiseEstimator):
             loss = -log_prob.mean()
 
         return {"loss": loss.item()}
-
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
-        """Update best weights and scheduler."""
-        val_loss = val_metrics.get("loss", float("inf"))
-
-        # Update best posterior
-        if val_loss < self.best_val_loss:
-            self.best_val_loss = val_loss
-            self._update_best_weights()
-            log({"checkpoint:posterior": epoch})
-
-        # LR scheduler step
-        self._scheduler.step(val_loss)
-        log({"lr": self._optimizer.param_groups[0]["lr"]})
 
     # ==================== Sampling Methods ====================
 
@@ -652,7 +663,7 @@ class SNPE_gaussian(StepwiseEstimator):
         # Expand conditions for num_samples
         conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
 
-        # Use best model if available and configured
+        # Use best model if configured
         model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
 
         with torch.no_grad():
@@ -689,7 +700,7 @@ class SNPE_gaussian(StepwiseEstimator):
         # Expand conditions for num_samples
         conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
 
-        # Use best model if available and configured
+        # Use best model if configured
         model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
 
         with torch.no_grad():
@@ -732,17 +743,31 @@ class SNPE_gaussian(StepwiseEstimator):
         """Load SNPE_gaussian state."""
         debug(f"Loading: {node_dir}")
         init_parameters = torch.load(node_dir / "init_parameters.pth")
-        self._initialize_networks(init_parameters[0], init_parameters[1])
+        theta, conditions = init_parameters[0], init_parameters[1]
 
+        # Build model from stored init parameters
+        self._init_parameters = [theta, conditions]
+        self._model = self._build_model_from_params(theta, conditions)
+        self._best_model = self._clone_model(self._model)
+
+        # Setup optimizer and scheduler (from LossBasedEstimator)
+        cfg = self.optimizer_config
+        from torch.optim import AdamW
+        from torch.optim.lr_scheduler import ReduceLROnPlateau
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
+        self._scheduler = ReduceLROnPlateau(
+            self._optimizer,
+            mode="min",
+            factor=cfg.lr_decay_factor,
+            patience=cfg.scheduler_patience,
+        )
+
+        self.networks_initialized = True
+
+        # Load best model weights
         self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))
 
     # ==================== Private Helpers ====================
-
-    def _update_best_weights(self) -> None:
-        """Copy current model weights to best-fit checkpoint."""
-        self._best_model.load_state_dict(
-            {k: v.clone() for k, v in self._model.state_dict().items()}
-        )
 
     def _compute_discard_mask(
         self, theta: torch.Tensor, theta_logprob: torch.Tensor, conditions: Dict

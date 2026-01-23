@@ -1,10 +1,16 @@
 """Stepwise estimator with epoch-based training loop."""
 
 import asyncio
+import copy
 import time
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from typing import Any, Dict, List, Optional, Tuple
+
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.base_estimator import BaseEstimator
 from falcon.core.logger import log, debug, info, warning, error
@@ -18,6 +24,15 @@ class TrainingLoopConfig:
     batch_size: int = 128
     early_stop_patience: int = 16
     reset_network_after_pause: bool = False
+
+
+@dataclass
+class OptimizerConfig:
+    """Optimizer and scheduler parameters."""
+
+    lr: float = 1e-3
+    lr_decay_factor: float = 0.1
+    scheduler_patience: int = 8
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -270,3 +285,165 @@ class StepwiseEstimator(BaseEstimator):
         """Terminate training loop."""
         self._terminated = True
         self._pause_event.set()
+
+
+# ==================== LossBasedEstimator ====================
+
+
+class LossBasedEstimator(StepwiseEstimator):
+    """Base class for estimators that train a model by minimizing a loss.
+
+    Provides concrete implementations of train_step, val_step, on_epoch_end
+    with proper model checkpointing and optimizer management.
+
+    Subclasses must implement:
+        - _build_model(batch) -> nn.Module: Build the model from first batch
+        - _compute_loss(batch) -> Tuple[Tensor, Dict]: Compute loss and metrics
+
+    Attributes:
+        _model: Current training model
+        _best_model: Best model checkpoint (by validation loss)
+        _best_loss: Best validation loss seen
+        _optimizer: Optimizer instance
+        _scheduler: LR scheduler instance
+    """
+
+    def __init__(
+        self,
+        simulator_instance,
+        loop_config: TrainingLoopConfig,
+        optimizer_config: OptimizerConfig,
+        theta_key: Optional[str] = None,
+        condition_keys: Optional[List[str]] = None,
+        device: Optional[str] = None,
+    ):
+        super().__init__(
+            simulator_instance=simulator_instance,
+            loop_config=loop_config,
+            theta_key=theta_key,
+            condition_keys=condition_keys,
+        )
+
+        self.optimizer_config = optimizer_config
+
+        # Device setup
+        if device:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            debug(f"Auto-detected device: {self.device}")
+
+        # Model (initialized lazily)
+        self._model: Optional[nn.Module] = None
+        self._best_model: Optional[nn.Module] = None
+        self._best_loss: float = float("inf")
+
+        # Optimizer/scheduler (initialized lazily)
+        self._optimizer: Optional[AdamW] = None
+        self._scheduler: Optional[ReduceLROnPlateau] = None
+
+    # ==================== Abstract Methods ====================
+
+    @abstractmethod
+    def _build_model(self, batch) -> nn.Module:
+        """Build and return the model.
+
+        Called once on first batch to determine dimensions.
+
+        Args:
+            batch: First training batch
+
+        Returns:
+            The model (nn.Module) to train
+        """
+        pass
+
+    @abstractmethod
+    def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute loss from batch.
+
+        Args:
+            batch: Batch object with data
+
+        Returns:
+            Tuple of (loss_tensor, metrics_dict).
+            metrics_dict must include "loss" key.
+        """
+        pass
+
+    # ==================== Model Cloning ====================
+
+    def _clone_model(self, model: nn.Module) -> nn.Module:
+        """Create independent copy of model with cloned tensors."""
+        cloned = copy.deepcopy(model)
+        cloned.load_state_dict(
+            {k: v.clone() for k, v in model.state_dict().items()}
+        )
+        return cloned
+
+    def _update_best_model(self) -> None:
+        """Update best model weights from current model."""
+        self._best_model.load_state_dict(
+            {k: v.clone() for k, v in self._model.state_dict().items()}
+        )
+
+    # ==================== Training Implementation ====================
+
+    def _initialize_model(self, batch) -> None:
+        """Initialize model, best model, optimizer, and scheduler."""
+        debug("Initializing model...")
+
+        # Build model
+        self._model = self._build_model(batch)
+
+        # Clone for best model
+        self._best_model = self._clone_model(self._model)
+
+        # Setup optimizer and scheduler
+        cfg = self.optimizer_config
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
+        self._scheduler = ReduceLROnPlateau(
+            self._optimizer,
+            mode="min",
+            factor=cfg.lr_decay_factor,
+            patience=cfg.scheduler_patience,
+        )
+
+        self.networks_initialized = True
+        debug("Model initialized.")
+
+    def train_step(self, batch) -> Dict[str, float]:
+        """Execute one training step with gradient update."""
+        # Initialize on first batch
+        if not self.networks_initialized:
+            self._initialize_model(batch)
+
+        # Gradient update
+        self._optimizer.zero_grad()
+        self._model.train()
+        loss, metrics = self._compute_loss(batch)
+        loss.backward()
+        self._optimizer.step()
+
+        return metrics
+
+    def val_step(self, batch) -> Dict[str, float]:
+        """Execute one validation step without gradients."""
+        with torch.no_grad():
+            self._model.eval()
+            _, metrics = self._compute_loss(batch)
+        return metrics
+
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+        """Update best model and LR scheduler."""
+        val_loss = val_metrics.get("loss", float("inf"))
+
+        # Update best model if improved
+        if val_loss < self._best_loss:
+            self._best_loss = val_loss
+            self._update_best_model()
+            log({"checkpoint": epoch})
+
+        # LR scheduler step
+        self._scheduler.step(val_loss)
+        log({"lr": self._optimizer.param_groups[0]["lr"]})
