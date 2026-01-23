@@ -363,10 +363,6 @@ class SNPE_gaussian(LossBasedEstimator):
 
         self.config = config
 
-        # Embedding network (created now, wrapped with posterior later)
-        embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
-        self._embedding = instantiate_embedding(embedding_config).to(self.device)
-
         # Store init parameters for save/load
         self._init_parameters = None
 
@@ -394,11 +390,15 @@ class SNPE_gaussian(LossBasedEstimator):
 
         cfg_net = self.config.network
 
+        # Create embedding network
+        embedding_config = OmegaConf.to_container(cfg_net.embedding, resolve=True)
+        embedding = instantiate_embedding(embedding_config).to(self.device)
+
         # Embed conditions to get embedding dimension
         conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-        self._embedding.eval()
+        embedding.eval()
         with torch.no_grad():
-            s = self._embedding(conditions_device)
+            s = embedding(conditions_device)
         theta_device = theta.to(self.device)
 
         param_dim = theta_device.shape[1]
@@ -416,7 +416,7 @@ class SNPE_gaussian(LossBasedEstimator):
         ).to(self.device)
 
         # Wrap embedding + posterior into EmbeddedPosterior
-        model = EmbeddedPosterior(self._embedding, posterior)
+        model = EmbeddedPosterior(embedding, posterior)
 
         debug("Model built.")
         return model
