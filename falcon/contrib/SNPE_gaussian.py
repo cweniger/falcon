@@ -111,6 +111,12 @@ class GaussianPosterior(nn.Module):
 
     where mu(conditions) is predicted by an MLP with whitening, and Sigma is the
     residual covariance matrix estimated from training data.
+
+    Public API:
+        - loss(theta, conditions): Training entry point, updates stats and returns loss
+        - log_prob(theta, conditions): Compute log probability (inference, no side effects)
+        - sample(conditions, gamma): Sample from tempered posterior
+        - sample_posterior(conditions): Sample from posterior
     """
 
     def __init__(
@@ -129,118 +135,76 @@ class GaussianPosterior(nn.Module):
         self.momentum = momentum
         self.min_var = min_var
         self.eig_update_freq = eig_update_freq
-        self.step_counter = 0
+        self._step_counter = 0
 
         # MLP for mean prediction
         self.net = build_mlp(condition_dim, hidden_dim, param_dim, num_layers)
 
         # Input statistics (conditions)
-        self.register_buffer("input_mean", torch.zeros(condition_dim))
-        self.register_buffer("input_cov", torch.eye(condition_dim))
-        self.register_buffer("input_cov_chol", torch.eye(condition_dim))
+        self.register_buffer("_input_mean", torch.zeros(condition_dim))
+        self.register_buffer("_input_cov", torch.eye(condition_dim))
+        self.register_buffer("_input_cov_chol", torch.eye(condition_dim))
 
         # Output statistics (theta)
-        self.register_buffer("output_mean", torch.zeros(param_dim))
-        self.register_buffer("output_cov", torch.eye(param_dim))
-        self.register_buffer("output_cov_chol", torch.eye(param_dim))
+        self.register_buffer("_output_mean", torch.zeros(param_dim))
+        self.register_buffer("_output_cov", torch.eye(param_dim))
+        self.register_buffer("_output_cov_chol", torch.eye(param_dim))
 
         # Residual covariance (prediction error)
-        self.register_buffer("residual_cov", torch.eye(param_dim))
-        self.register_buffer("residual_eigvals", torch.ones(param_dim))
-        self.register_buffer("residual_eigvecs", torch.eye(param_dim))
+        self.register_buffer("_residual_cov", torch.eye(param_dim))
+        self.register_buffer("_residual_eigvals", torch.ones(param_dim))
+        self.register_buffer("_residual_eigvecs", torch.eye(param_dim))
 
-    def _compute_cov(self, data: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
-        """Compute covariance matrix from data."""
-        centered = data - mean
-        n = data.shape[0]
-        cov = (centered.T @ centered) / max(n - 1, 1)
-        # Add minimum variance regularization
-        eye = torch.eye(data.shape[1], device=data.device, dtype=data.dtype)
-        cov = cov + self.min_var * eye
-        return cov
+    # ==================== Public API ====================
 
-    def _safe_cholesky(self, cov: torch.Tensor) -> torch.Tensor:
-        """Compute Cholesky decomposition with fallback for numerical stability."""
-        try:
-            return torch.linalg.cholesky(cov)
-        except RuntimeError:
-            # Add small regularization and retry
-            eye = torch.eye(cov.shape[0], device=cov.device, dtype=cov.dtype)
-            cov = cov + 1e-4 * eye
-            return torch.linalg.cholesky(cov)
+    def loss(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
+        """Training entry point: update statistics and return negative log likelihood.
 
-    def _update_eigendecomp(self) -> None:
-        """Update eigendecomposition of residual covariance."""
-        eigvals, eigvecs = torch.linalg.eigh(self.residual_cov)
-        # Clamp eigenvalues for numerical stability
-        eigvals = eigvals.clamp(min=self.min_var)
-        self.residual_eigvals.copy_(eigvals)
-        self.residual_eigvecs.copy_(eigvecs)
+        This method handles all training-time updates internally:
+        1. Updates input/output running statistics
+        2. Computes log probability
+        3. Updates residual covariance
 
-    def update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
-        """Update running statistics using lerp_() for EMA updates."""
-        with torch.no_grad():
-            # Update means
-            self.input_mean.lerp_(conditions.mean(dim=0), self.momentum)
-            self.output_mean.lerp_(theta.mean(dim=0), self.momentum)
+        Args:
+            theta: Parameter samples of shape (batch, param_dim)
+            conditions: Embedded conditions of shape (batch, condition_dim)
 
-            # Update covariances
-            batch_input_cov = self._compute_cov(conditions, self.input_mean)
-            batch_output_cov = self._compute_cov(theta, self.output_mean)
-            self.input_cov.lerp_(batch_input_cov, self.momentum)
-            self.output_cov.lerp_(batch_output_cov, self.momentum)
-
-            # Update Cholesky factors
-            self.input_cov_chol.copy_(self._safe_cholesky(self.input_cov))
-            self.output_cov_chol.copy_(self._safe_cholesky(self.output_cov))
-
-    def update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
-        """Update residual covariance and eigendecomposition."""
-        with torch.no_grad():
-            mean = self.forward_mean(conditions)
-            residuals = theta - mean
-
-            zero_mean = torch.zeros(self.param_dim, device=theta.device, dtype=theta.dtype)
-            batch_cov = self._compute_cov(residuals, zero_mean)
-            self.residual_cov.lerp_(batch_cov, self.momentum)
-
-            # Update eigendecomposition at specified frequency
-            self.step_counter += 1
-            if self.step_counter % self.eig_update_freq == 0:
-                self._update_eigendecomp()
-
-    def forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
-        """Predict mean using Cholesky-based whitening.
-
-        Whitening helps with optimization by normalizing the input/output scales.
+        Returns:
+            Scalar loss (negative mean log probability)
         """
-        # Whiten inputs
-        centered = (conditions - self.input_mean).T
-        x_white = torch.linalg.solve_triangular(
-            self.input_cov_chol, centered, upper=False
-        ).T
+        # Update input/output statistics before forward pass
+        self._update_stats(theta, conditions)
 
-        # Apply MLP
-        r = self.net(x_white)
+        # Compute log probability
+        log_prob = self.log_prob(theta, conditions)
+        loss = -log_prob.mean()
 
-        # De-whiten outputs
-        return self.output_mean + (self.output_cov_chol @ r.T).T
+        # Update residual covariance after forward pass
+        self._update_residual_cov(theta, conditions)
+
+        return loss
 
     def log_prob(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
         """Compute Gaussian log probability using eigendecomposition.
 
-        Returns per-sample log probabilities.
-        log_det is detached since covariance is updated separately via EMA.
+        Pure inference method with no side effects.
+
+        Args:
+            theta: Parameter samples of shape (batch, param_dim)
+            conditions: Embedded conditions of shape (batch, condition_dim)
+
+        Returns:
+            Per-sample log probabilities of shape (batch,)
         """
-        mean = self.forward_mean(conditions)
+        mean = self._forward_mean(conditions)
         residuals = theta - mean
 
         # log|Σ| = sum(log(d_i))
-        log_det = torch.log(self.residual_eigvals).sum()
+        log_det = torch.log(self._residual_eigvals).sum()
 
         # Mahalanobis via eigenbasis: sum_i (r_i^2 / d_i) where r_i = (V^T @ residuals)_i
-        V = self.residual_eigvecs
-        d = self.residual_eigvals
+        V = self._residual_eigvecs
+        d = self._residual_eigvals
         r_proj = V.T @ residuals.T  # (param_dim, batch)
         mahal = (r_proj**2 / d.unsqueeze(1)).sum(dim=0)  # (batch,)
 
@@ -262,9 +226,9 @@ class GaussianPosterior(nn.Module):
         Returns:
             Samples of shape (batch, param_dim)
         """
-        mean = self.forward_mean(conditions)
-        d = self.residual_eigvals  # posterior covariance eigenvalues
-        V = self.residual_eigvecs
+        mean = self._forward_mean(conditions)
+        d = self._residual_eigvals  # posterior covariance eigenvalues
+        V = self._residual_eigvecs
 
         a = gamma / (1 + gamma)
 
@@ -289,14 +253,144 @@ class GaussianPosterior(nn.Module):
         return mean_prop + (V @ (torch.sqrt(var_prop).unsqueeze(1) * eps.T)).T
 
     def sample_posterior(self, conditions: torch.Tensor) -> torch.Tensor:
-        """Sample from the posterior distribution (gamma -> infinity equivalent)."""
-        mean = self.forward_mean(conditions)
-        V = self.residual_eigvecs
-        d = self.residual_eigvals
+        """Sample from the posterior distribution (gamma -> infinity equivalent).
+
+        Args:
+            conditions: Condition tensor of shape (batch, condition_dim)
+
+        Returns:
+            Samples of shape (batch, param_dim)
+        """
+        mean = self._forward_mean(conditions)
+        V = self._residual_eigvecs
+        d = self._residual_eigvals
 
         # Sample from N(mean, residual_cov)
         eps = torch.randn_like(mean)
         return mean + (V @ (torch.sqrt(d).unsqueeze(1) * eps.T)).T
+
+    # ==================== Internal Methods ====================
+
+    def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
+        """Predict mean using Cholesky-based whitening."""
+        # Whiten inputs
+        centered = (conditions - self._input_mean).T
+        x_white = torch.linalg.solve_triangular(
+            self._input_cov_chol, centered, upper=False
+        ).T
+
+        # Apply MLP
+        r = self.net(x_white)
+
+        # De-whiten outputs
+        return self._output_mean + (self._output_cov_chol @ r.T).T
+
+    def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
+        """Update running statistics using lerp_() for EMA updates."""
+        with torch.no_grad():
+            # Update means
+            self._input_mean.lerp_(conditions.mean(dim=0), self.momentum)
+            self._output_mean.lerp_(theta.mean(dim=0), self.momentum)
+
+            # Update covariances
+            batch_input_cov = self._compute_cov(conditions, self._input_mean)
+            batch_output_cov = self._compute_cov(theta, self._output_mean)
+            self._input_cov.lerp_(batch_input_cov, self.momentum)
+            self._output_cov.lerp_(batch_output_cov, self.momentum)
+
+            # Update Cholesky factors
+            self._input_cov_chol.copy_(self._safe_cholesky(self._input_cov))
+            self._output_cov_chol.copy_(self._safe_cholesky(self._output_cov))
+
+    def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
+        """Update residual covariance and eigendecomposition."""
+        with torch.no_grad():
+            mean = self._forward_mean(conditions)
+            residuals = theta - mean
+
+            zero_mean = torch.zeros(self.param_dim, device=theta.device, dtype=theta.dtype)
+            batch_cov = self._compute_cov(residuals, zero_mean)
+            self._residual_cov.lerp_(batch_cov, self.momentum)
+
+            # Update eigendecomposition at specified frequency
+            self._step_counter += 1
+            if self._step_counter % self.eig_update_freq == 0:
+                self._update_eigendecomp()
+
+    def _compute_cov(self, data: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
+        """Compute covariance matrix from data."""
+        centered = data - mean
+        n = data.shape[0]
+        cov = (centered.T @ centered) / max(n - 1, 1)
+        # Add minimum variance regularization
+        eye = torch.eye(data.shape[1], device=data.device, dtype=data.dtype)
+        cov = cov + self.min_var * eye
+        return cov
+
+    def _safe_cholesky(self, cov: torch.Tensor) -> torch.Tensor:
+        """Compute Cholesky decomposition with fallback for numerical stability."""
+        try:
+            return torch.linalg.cholesky(cov)
+        except RuntimeError:
+            # Add small regularization and retry
+            eye = torch.eye(cov.shape[0], device=cov.device, dtype=cov.dtype)
+            cov = cov + 1e-4 * eye
+            return torch.linalg.cholesky(cov)
+
+    def _update_eigendecomp(self) -> None:
+        """Update eigendecomposition of residual covariance."""
+        eigvals, eigvecs = torch.linalg.eigh(self._residual_cov)
+        # Clamp eigenvalues for numerical stability
+        eigvals = eigvals.clamp(min=self.min_var)
+        self._residual_eigvals.copy_(eigvals)
+        self._residual_eigvecs.copy_(eigvecs)
+
+
+# ==================== EmbeddedPosterior Wrapper ====================
+
+
+class EmbeddedPosterior(nn.Module):
+    """Wraps a posterior with an embedding network.
+
+    This composition pattern bundles the embedding and posterior together,
+    providing a unified interface that accepts raw condition dicts and handles
+    the embedding internally.
+
+    Public API mirrors GaussianPosterior but accepts Dict[str, Tensor] conditions:
+        - loss(theta, conditions): Training entry point
+        - log_prob(theta, conditions): Compute log probability
+        - sample(conditions, gamma): Sample from tempered posterior
+        - sample_posterior(conditions): Sample from posterior
+    """
+
+    def __init__(self, embedding: nn.Module, posterior: GaussianPosterior):
+        super().__init__()
+        self.embedding = embedding
+        self.posterior = posterior
+
+    def _embed(self, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Run conditions through embedding network."""
+        return self.embedding(conditions)
+
+    def loss(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Training entry point with embedded conditions."""
+        s = self._embed(conditions)
+        return self.posterior.loss(theta, s)
+
+    def log_prob(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Compute log probability with embedded conditions."""
+        s = self._embed(conditions)
+        return self.posterior.log_prob(theta, s)
+
+    def sample(self, conditions: Dict[str, torch.Tensor], gamma: float = 1.0) -> torch.Tensor:
+        """Sample from tempered posterior with embedded conditions."""
+        s = self._embed(conditions)
+        return self.posterior.sample(s, gamma)
+
+    def sample_posterior(self, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
+        """Sample from posterior with embedded conditions."""
+        s = self._embed(conditions)
+        return self.posterior.sample_posterior(s)
 
 
 # ==================== SNPE_gaussian Implementation ====================
@@ -345,14 +439,13 @@ class SNPE_gaussian(StepwiseEstimator):
         # Device setup
         self.device = self._setup_device(config.device)
 
-        # Embedding network
+        # Embedding network (created now, wrapped with posterior later)
         embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
         self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
-        # Posterior network (initialized lazily)
-        self._posterior = None
-        self._best_posterior = None
-        self._best_embedding = None
+        # EmbeddedPosterior (initialized lazily)
+        self._model: Optional[EmbeddedPosterior] = None
+        self._best_model: Optional[EmbeddedPosterior] = None
         self._init_parameters = None
 
         # Best loss tracking
@@ -379,7 +472,7 @@ class SNPE_gaussian(StepwiseEstimator):
     # ==================== Network Initialization ====================
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
-        """Initialize posterior network and optimizer."""
+        """Initialize EmbeddedPosterior and optimizer."""
         self._init_parameters = [theta, conditions]
         debug("Initializing networks...")
         debug(f"GPU available: {torch.cuda.is_available()}")
@@ -389,14 +482,16 @@ class SNPE_gaussian(StepwiseEstimator):
 
         # Embed conditions to get embedding dimension
         conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-        s = self._embed(conditions_device, train=False).detach()
+        self._embedding.eval()
+        with torch.no_grad():
+            s = self._embedding(conditions_device)
         theta_device = theta.to(self.device)
 
         param_dim = theta_device.shape[1]
         condition_dim = s.shape[1]
 
         # Create posterior network
-        self._posterior = GaussianPosterior(
+        posterior = GaussianPosterior(
             param_dim=param_dim,
             condition_dim=condition_dim,
             hidden_dim=cfg_net.hidden_dim,
@@ -405,9 +500,13 @@ class SNPE_gaussian(StepwiseEstimator):
             min_var=cfg_net.min_var,
             eig_update_freq=cfg_net.eig_update_freq,
         ).to(self.device)
+
+        # Wrap embedding + posterior into EmbeddedPosterior
+        self._model = EmbeddedPosterior(self._embedding, posterior)
 
         # Best-fit copy
-        self._best_posterior = GaussianPosterior(
+        best_embedding = copy.deepcopy(self._embedding)
+        best_posterior = GaussianPosterior(
             param_dim=param_dim,
             condition_dim=condition_dim,
             hidden_dim=cfg_net.hidden_dim,
@@ -416,13 +515,11 @@ class SNPE_gaussian(StepwiseEstimator):
             min_var=cfg_net.min_var,
             eig_update_freq=cfg_net.eig_update_freq,
         ).to(self.device)
-        self._best_posterior.load_state_dict(self._posterior.state_dict())
-
-        self._best_embedding = copy.deepcopy(self._embedding)
+        best_posterior.load_state_dict(posterior.state_dict())
+        self._best_model = EmbeddedPosterior(best_embedding, best_posterior)
 
         # Optimizer and scheduler
-        parameters = list(self._posterior.net.parameters()) + list(self._embedding.parameters())
-        self._optimizer = AdamW(parameters, lr=cfg_opt.lr)
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg_opt.lr)
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
@@ -474,27 +571,17 @@ class SNPE_gaussian(StepwiseEstimator):
         if not self.networks_initialized:
             self._initialize_networks(theta, conditions)
 
-        # Embed conditions
-        s = self._embed(conditions_device, train=True)
-
         # Track theta ranges
         with torch.no_grad():
             self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
             self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
-        # Update running statistics
-        self._posterior.update_stats(theta_device, s.detach())
-
-        # Forward and backward pass
+        # Forward and backward pass using EmbeddedPosterior.loss()
         self._optimizer.zero_grad()
-        self._posterior.train()
-        log_prob = self._posterior.log_prob(theta_device, s)
-        loss = -log_prob.mean()
+        self._model.train()
+        loss = self._model.loss(theta_device, conditions_device)
         loss.backward()
         self._optimizer.step()
-
-        # Update residual covariance
-        self._posterior.update_residual_cov(theta_device, s.detach())
 
         # Discard samples based on log-likelihood ratio
         if self.config.inference.discard_samples:
@@ -508,13 +595,10 @@ class SNPE_gaussian(StepwiseEstimator):
         _, theta, theta_logprob, conditions, theta_device, conditions_device = \
             self._unpack_batch(batch, "val")
 
-        # Embed conditions (eval mode)
-        s = self._embed(conditions_device, train=False)
-
         # Compute loss without gradients
         with torch.no_grad():
-            self._posterior.eval()
-            log_prob = self._posterior.log_prob(theta_device, s)
+            self._model.eval()
+            log_prob = self._model.log_prob(theta_device, conditions_device)
             loss = -log_prob.mean()
 
         return {"loss": loss.item()}
@@ -565,21 +649,16 @@ class SNPE_gaussian(StepwiseEstimator):
             k: v.to(self.device, dtype=torch.float32) for k, v in zip(self.condition_keys, conditions_list)
         }
 
-        # Use best model if available and configured
-        use_best = cfg_inf.use_best_model_during_inference and self._best_posterior is not None
-        if use_best:
-            posterior = self._best_posterior
-            s = self._embed(conditions, train=False, use_best_fit=True)
-        else:
-            posterior = self._posterior
-            s = self._embed(conditions, train=False)
+        # Expand conditions for num_samples
+        conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
 
-        s = s.expand(num_samples, *s.shape[1:])
+        # Use best model if available and configured
+        model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
 
         with torch.no_grad():
-            posterior.eval()
-            samples = posterior.sample_posterior(s)
-            logprob = posterior.log_prob(samples, s)
+            model.eval()
+            samples = model.sample_posterior(conditions)
+            logprob = model.log_prob(samples, conditions)
 
         return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
 
@@ -607,21 +686,16 @@ class SNPE_gaussian(StepwiseEstimator):
             k: v.to(self.device, dtype=torch.float32) for k, v in zip(self.condition_keys, conditions_list)
         }
 
-        # Use best model if available and configured
-        use_best = cfg_inf.use_best_model_during_inference and self._best_posterior is not None
-        if use_best:
-            posterior = self._best_posterior
-            s = self._embed(conditions, train=False, use_best_fit=True)
-        else:
-            posterior = self._posterior
-            s = self._embed(conditions, train=False)
+        # Expand conditions for num_samples
+        conditions = {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
 
-        s = s.expand(num_samples, *s.shape[1:])
+        # Use best model if available and configured
+        model = self._best_model if cfg_inf.use_best_model_during_inference else self._model
 
         with torch.no_grad():
-            posterior.eval()
-            samples = posterior.sample(s, gamma=cfg_inf.gamma)
-            logprob = posterior.log_prob(samples, s)
+            model.eval()
+            samples = model.sample(conditions, gamma=cfg_inf.gamma)
+            logprob = model.log_prob(samples, conditions)
 
         log({
             "sample_proposal:mean": samples.mean().item(),
@@ -639,7 +713,8 @@ class SNPE_gaussian(StepwiseEstimator):
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
 
-        torch.save(self._best_posterior.state_dict(), node_dir / "posterior.pth")
+        # Save best model state
+        torch.save(self._best_model.state_dict(), node_dir / "model.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
 
         # Save history
@@ -653,41 +728,20 @@ class SNPE_gaussian(StepwiseEstimator):
         torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
         torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
 
-        if self._best_embedding is not None:
-            torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
-
     def load(self, node_dir: Path) -> None:
         """Load SNPE_gaussian state."""
         debug(f"Loading: {node_dir}")
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])
 
-        self._best_posterior.load_state_dict(
-            torch.load(node_dir / "posterior.pth")
-        )
-
-        if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
-            self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
+        self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))
 
     # ==================== Private Helpers ====================
 
-    def _embed(self, conditions: Dict, train: bool = True, use_best_fit: bool = False):
-        """Run conditions through embedding network."""
-        embedding = (
-            self._best_embedding
-            if use_best_fit and self._best_embedding is not None
-            else self._embedding
-        )
-        embedding.train() if train else embedding.eval()
-        return embedding(conditions)
-
     def _update_best_weights(self) -> None:
-        """Copy current network weights to best-fit checkpoint."""
-        self._best_posterior.load_state_dict(
-            {k: v.clone() for k, v in self._posterior.state_dict().items()}
-        )
-        self._best_embedding.load_state_dict(
-            {k: v.clone() for k, v in self._embedding.state_dict().items()}
+        """Copy current model weights to best-fit checkpoint."""
+        self._best_model.load_state_dict(
+            {k: v.clone() for k, v in self._model.state_dict().items()}
         )
 
     def _compute_discard_mask(
@@ -697,12 +751,10 @@ class SNPE_gaussian(StepwiseEstimator):
         cfg_inf = self.config.inference
 
         theta_device = theta.to(self.device, dtype=torch.float32)
-        s = self._embed(conditions, train=False, use_best_fit=True)
 
-        theta_device = theta_device.expand(len(theta), *theta_device.shape[1:]) if theta_device.shape[0] == 1 else theta_device
-        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
+        with torch.no_grad():
+            self._model.eval()
+            log_prob = self._model.log_prob(theta_device, conditions).cpu()
 
-        self._posterior.eval()
-        log_prob = self._posterior.log_prob(theta_device, s).cpu()
         log_ratio = log_prob - theta_logprob.cpu()
         return log_ratio < cfg_inf.log_ratio_threshold
