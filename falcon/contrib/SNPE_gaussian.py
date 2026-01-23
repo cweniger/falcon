@@ -363,8 +363,9 @@ class SNPE_gaussian(LossBasedEstimator):
 
         self.config = config
 
-        # Store init parameters for save/load
-        self._init_parameters = None
+        # Stored tensors from first batch (needed for model rebuild on load)
+        self._init_theta: Optional[torch.Tensor] = None
+        self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
 
         # Extended history for tracking
         self.history.update({
@@ -376,38 +377,28 @@ class SNPE_gaussian(LossBasedEstimator):
 
     def _build_model(self, batch) -> nn.Module:
         """Build EmbeddedPosterior model from first batch."""
-        theta, conditions = self._extract_theta_conditions(batch)
-        self._init_parameters = [theta, conditions]
-        return self._build_model_from_params(theta, conditions)
+        # Extract and store tensors for reload
+        self._init_theta = torch.from_numpy(batch[self.theta_key])
+        self._init_conditions = {k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch}
+        return self._create_model(self._init_theta, self._init_conditions)
 
-    def _build_model_from_params(self, theta: torch.Tensor, conditions: Dict) -> nn.Module:
-        """Build model from theta and conditions tensors.
-
-        Used both during training (from batch) and loading (from stored params).
-        """
+    def _create_model(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> nn.Module:
+        """Create EmbeddedPosterior from theta and conditions tensors."""
         debug("Building model...")
-        debug(f"GPU available: {torch.cuda.is_available()}")
-
         cfg_net = self.config.network
 
-        # Create embedding network
+        # Create embedding and infer condition_dim
         embedding_config = OmegaConf.to_container(cfg_net.embedding, resolve=True)
         embedding = instantiate_embedding(embedding_config).to(self.device)
-
-        # Embed conditions to get embedding dimension
-        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
         embedding.eval()
         with torch.no_grad():
-            s = embedding(conditions_device)
-        theta_device = theta.to(self.device)
+            conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+            embedded = embedding(conditions_device)
 
-        param_dim = theta_device.shape[1]
-        condition_dim = s.shape[1]
-
-        # Create posterior network
+        # Create posterior
         posterior = GaussianPosterior(
-            param_dim=param_dim,
-            condition_dim=condition_dim,
+            param_dim=theta.shape[1],
+            condition_dim=embedded.shape[1],
             hidden_dim=cfg_net.hidden_dim,
             num_layers=cfg_net.num_layers,
             momentum=cfg_net.momentum,
@@ -415,76 +406,41 @@ class SNPE_gaussian(LossBasedEstimator):
             eig_update_freq=cfg_net.eig_update_freq,
         ).to(self.device)
 
-        # Wrap embedding + posterior into EmbeddedPosterior
-        model = EmbeddedPosterior(embedding, posterior)
-
         debug("Model built.")
-        return model
+        return EmbeddedPosterior(embedding, posterior)
 
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute loss from batch.
+        """Compute loss from batch."""
+        # Extract and convert to tensors
+        theta = torch.from_numpy(batch[self.theta_key]).to(self.device, dtype=torch.float32)
+        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        conditions = {
+            k: torch.from_numpy(batch[k]).to(self.device, dtype=torch.float32)
+            for k in self.condition_keys if k in batch
+        }
 
-        Returns:
-            Tuple of (loss_tensor, metrics_dict)
-        """
-        ids, theta, theta_logprob, conditions, theta_device, conditions_device = \
-            self._unpack_batch(batch, "train")
+        # Record sample IDs for history
+        ts = time.time()
+        self.history["train_ids"].extend((ts, id) for id in batch._ids.tolist())
 
         # Track theta ranges
         with torch.no_grad():
             self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
             self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
-        # Compute loss using EmbeddedPosterior.loss()
-        # Stats are updated inside loss() before computing log_prob
-        loss = self._model.loss(theta_device, conditions_device)
+        # Compute loss (stats updated inside loss() before log_prob)
+        loss = self._model.loss(theta, conditions)
 
-        # Discard samples based on log-likelihood ratio
+        # Discard low-probability samples
         if self.config.inference.discard_samples:
-            discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
+            with torch.no_grad():
+                self._model.eval()
+                log_prob = self._model.log_prob(theta, conditions).cpu()
+            log_ratio = log_prob - theta_logprob
+            discard_mask = log_ratio < self.config.inference.log_ratio_threshold
             batch.discard(discard_mask)
 
         return loss, {"loss": loss.item()}
-
-    # ==================== Batch Processing ====================
-
-    def _extract_theta_conditions(self, batch) -> Tuple[torch.Tensor, Dict[str, torch.Tensor]]:
-        """Extract theta and conditions from batch (without logging)."""
-        theta = torch.from_numpy(batch[self.theta_key])
-        conditions = {
-            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
-        }
-        return theta, conditions
-
-    def _unpack_batch(self, batch, phase: str):
-        """Unpack batch data and convert to tensors.
-
-        Args:
-            batch: Batch object with theta, logprob, and conditions
-            phase: "train" or "val" for logging and history
-
-        Returns:
-            Tuple of (ids, theta, theta_logprob, conditions, theta_device, conditions_device)
-        """
-        ids = batch._ids
-        theta = torch.from_numpy(batch[self.theta_key])
-        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
-        conditions = {
-            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
-        }
-
-        # Record IDs for history
-        ts = time.time()
-        self.history[f"{phase}_ids"].extend((ts, id) for id in ids.tolist())
-
-        log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
-        log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
-
-        # Move to device and ensure float32 dtype
-        conditions_device = {k: v.to(self.device, dtype=torch.float32) for k, v in conditions.items()}
-        theta_device = theta.to(self.device, dtype=torch.float32)
-
-        return ids, theta, theta_logprob, conditions, theta_device, conditions_device
 
     # ==================== Sampling Methods ====================
 
@@ -544,40 +500,22 @@ class SNPE_gaussian(LossBasedEstimator):
     def save(self, node_dir: Path) -> None:
         """Save SNPE_gaussian state."""
         debug(f"Saving: {node_dir}")
-
-        # Save base class state (model weights, history)
         super().save(node_dir)
 
-        # Save extra state specific to SNPE_gaussian
-        torch.save(self._init_parameters, node_dir / "init_parameters.pth")
+        # Save init tensors for model rebuild
+        torch.save({"theta": self._init_theta, "conditions": self._init_conditions},
+                   node_dir / "init_tensors.pth")
         torch.save(self.history["theta_mins"], node_dir / "theta_mins_batches.pth")
         torch.save(self.history["theta_maxs"], node_dir / "theta_maxs_batches.pth")
 
     def _rebuild_model_for_load(self, node_dir: Path) -> nn.Module:
-        """Rebuild model from saved init parameters."""
-        init_parameters = torch.load(node_dir / "init_parameters.pth")
-        theta, conditions = init_parameters[0], init_parameters[1]
-        self._init_parameters = [theta, conditions]
-        return self._build_model_from_params(theta, conditions)
+        """Rebuild model from saved init tensors."""
+        data = torch.load(node_dir / "init_tensors.pth")
+        self._init_theta = data["theta"]
+        self._init_conditions = data["conditions"]
+        return self._create_model(self._init_theta, self._init_conditions)
 
     def load(self, node_dir: Path) -> None:
         """Load SNPE_gaussian state."""
         debug(f"Loading: {node_dir}")
         super().load(node_dir)
-
-    # ==================== Private Helpers ====================
-
-    def _compute_discard_mask(
-        self, theta: torch.Tensor, theta_logprob: torch.Tensor, conditions: Dict
-    ):
-        """Compute boolean mask of samples to discard based on log-likelihood ratio."""
-        cfg_inf = self.config.inference
-
-        theta_device = theta.to(self.device, dtype=torch.float32)
-
-        with torch.no_grad():
-            self._model.eval()
-            log_prob = self._model.log_prob(theta_device, conditions).cpu()
-
-        log_ratio = log_prob - theta_logprob.cpu()
-        return log_ratio < cfg_inf.log_ratio_threshold
