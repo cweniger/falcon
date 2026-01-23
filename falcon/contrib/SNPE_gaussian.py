@@ -488,73 +488,49 @@ class SNPE_gaussian(LossBasedEstimator):
 
     # ==================== Sampling Methods ====================
 
-    def sample_prior(self, num_samples: int, parent_conditions: Optional[List] = None) -> RVBatch:
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
         """Sample from the prior distribution."""
-        if parent_conditions:
+        if conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
         logprob = np.zeros(num_samples)
         return RVBatch(samples, logprob=logprob)
 
-    def _prepare_conditions(
-        self,
-        num_samples: int,
-        parent_conditions: Optional[List],
-        evidence_conditions: Optional[List],
-    ) -> Dict[str, torch.Tensor]:
-        """Prepare conditions dict for sampling."""
-        conditions_list = (parent_conditions or []) + (evidence_conditions or [])
-        assert conditions_list, "Conditions must be provided for sampling."
-
-        conditions = {
-            k: v.to(self.device, dtype=torch.float32)
-            for k, v in zip(self.condition_keys, conditions_list)
-        }
-        return {k: v.expand(num_samples, *v.shape[1:]) for k, v in conditions.items()}
-
-    def _sample(
-        self,
-        num_samples: int,
-        parent_conditions: Optional[List],
-        evidence_conditions: Optional[List],
-        gamma: Optional[float],
-    ) -> RVBatch:
+    def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> RVBatch:
         """Internal sampling method using best model.
 
         Falls back to sample_prior if best model not yet available.
+
+        Args:
+            num_samples: Number of samples to generate
+            conditions: Dict mapping node names to condition tensors
+            gamma: Tempering parameter (None for untempered posterior)
         """
         if self._best_model is None:
-            return self.sample_prior(num_samples, parent_conditions)
+            return self.sample_prior(num_samples)
 
-        conditions = self._prepare_conditions(num_samples, parent_conditions, evidence_conditions)
+        assert conditions, "Conditions must be provided for sampling."
+
+        # Move conditions to device and expand for num_samples
+        conditions_device = {
+            k: v.to(self.device, dtype=torch.float32).expand(num_samples, *v.shape[1:])
+            for k, v in conditions.items()
+        }
 
         with torch.no_grad():
             self._best_model.eval()
-            samples = self._best_model.sample(conditions, gamma=gamma)
-            logprob = self._best_model.log_prob(samples, conditions)
+            samples = self._best_model.sample(conditions_device, gamma=gamma)
+            logprob = self._best_model.log_prob(samples, conditions_device)
 
         return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
 
-    def sample_posterior(
-        self,
-        num_samples: int,
-        parent_conditions: Optional[List] = None,
-        evidence_conditions: Optional[List] = None,
-    ) -> RVBatch:
+    def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
         """Sample from the posterior distribution q(theta|x)."""
-        return self._sample(num_samples, parent_conditions, evidence_conditions, gamma=None)
+        return self._sample(num_samples, conditions, gamma=None)
 
-    def sample_proposal(
-        self,
-        num_samples: int,
-        parent_conditions: Optional[List] = None,
-        evidence_conditions: Optional[List] = None,
-    ) -> RVBatch:
+    def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
         """Sample from widened proposal distribution for adaptive resampling."""
-        result = self._sample(
-            num_samples, parent_conditions, evidence_conditions,
-            gamma=self.config.inference.gamma
-        )
+        result = self._sample(num_samples, conditions, gamma=self.config.inference.gamma)
         log({
             "sample_proposal:mean": result.value.mean(),
             "sample_proposal:std": result.value.std(),

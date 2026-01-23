@@ -163,9 +163,11 @@ class NodeWrapper:
 
     def sample(self, n_samples, incoming=None):
         if self.estimator_instance is not None:
-            samples = self.estimator_instance.sample_prior(
-                n_samples, parent_conditions=incoming
-            )
+            # Convert list to dict for new interface (prior typically has no conditions)
+            conditions = None
+            if incoming:
+                conditions = {k: v for k, v in zip(self.parents, incoming)}
+            samples = self.estimator_instance.sample_prior(n_samples, conditions=conditions)
             samples = as_rvbatch(samples)
             return samples
         if hasattr(self.simulator_instance, "simulate_batch"):
@@ -177,23 +179,13 @@ class NodeWrapper:
                 samples.append(self.simulator_instance.simulate(*params))
             return np.stack(samples)
 
-    def sample_posterior(
-        self, n_samples, parent_conditions=[], evidence_conditions=[]
-    ):
-        samples = self.estimator_instance.sample_posterior(
-            n_samples,
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
+    def sample_posterior(self, n_samples, conditions=None):
+        samples = self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
         samples = as_rvbatch(samples)
         return samples
 
-    def sample_proposal(self, n_samples, parent_conditions=[], evidence_conditions=[]):
-        samples = self.estimator_instance.sample_proposal(
-            n_samples,
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
+    def sample_proposal(self, n_samples, conditions=None):
+        samples = self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
         samples = as_rvbatch(samples)
         return samples
 
@@ -372,15 +364,16 @@ class DeployedGraph:
                     self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming)
                 )
             else:
-                parent_conditions = [trace[parent] for parent in self.graph.get_parents(name)]
-                evidence_conditions = [trace[parent] for parent in self.graph.get_evidence(name)]
+                # Build conditions dict from parents and evidence
+                conditions = {}
+                for parent in self.graph.get_parents(name):
+                    conditions[parent] = trace[parent]
+                for evidence in self.graph.get_evidence(name):
+                    conditions[evidence] = trace[evidence]
+
                 remote_method = getattr(self.wrapped_nodes_dict[name], sample_method)
                 rvbatch = ray.get(
-                    remote_method.remote(
-                        num_samples,
-                        parent_conditions=parent_conditions,
-                        evidence_conditions=evidence_conditions,
-                    )
+                    remote_method.remote(num_samples, conditions=conditions)
                 )
 
             rvbatch = as_rvbatch(rvbatch)
