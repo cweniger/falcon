@@ -1,6 +1,8 @@
 from .hypercubemappingprior import HypercubeMappingPrior
 from .norms import LazyOnlineNorm
 from .flow import Flow, NET_BUILDERS
+from .networks import build_mlp
+from .embedded_posterior import EmbeddedPosterior
 from .stepwise_estimator import (
     StepwiseEstimator,
     LossBasedEstimator,
@@ -20,5 +22,4 @@ from .SNPE_gaussian import (
     GaussianNetworkConfig,
     GaussianInferenceConfig,
     GaussianPosterior,
-    EmbeddedPosterior,
 )

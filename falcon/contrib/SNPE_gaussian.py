@@ -24,12 +24,14 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 
 from falcon.core.utils import RVBatch
-from falcon.core.logger import log, debug, info, warning, error
+from falcon.core.logger import log, debug
 from falcon.contrib.stepwise_estimator import (
     LossBasedEstimator,
     TrainingLoopConfig,
     OptimizerConfig,
 )
+from falcon.contrib.networks import build_mlp
+from falcon.contrib.embedded_posterior import EmbeddedPosterior
 from falcon.contrib.torch_embedding import instantiate_embedding
 
 
@@ -72,23 +74,6 @@ class GaussianConfig:
     optimizer: OptimizerConfig = field(default_factory=_default_optimizer_config)
     inference: GaussianInferenceConfig = field(default_factory=GaussianInferenceConfig)
     device: Optional[str] = None
-
-
-# ==================== Helper Functions ====================
-
-
-def build_mlp(
-    input_dim: int,
-    hidden_dim: int,
-    output_dim: int,
-    num_layers: int,
-) -> nn.Sequential:
-    """Build MLP with specified architecture."""
-    layers = [nn.Linear(input_dim, hidden_dim), nn.ReLU()]
-    for _ in range(num_layers - 1):
-        layers.extend([nn.Linear(hidden_dim, hidden_dim), nn.ReLU()])
-    layers.append(nn.Linear(hidden_dim, output_dim))
-    return nn.Sequential(*layers)
 
 
 # ==================== GaussianPosterior Module ====================
@@ -155,10 +140,10 @@ class GaussianPosterior(nn.Module):
     # ==================== Public API ====================
 
     def loss(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
-        """Compute negative log likelihood loss.
+        """Training entry point: update statistics and return negative log likelihood.
 
-        NOTE: This method only computes the loss. Call update_stats() separately
-        after loss.backward() to update running statistics.
+        Stats are updated BEFORE computing log_prob to avoid in-place modification
+        errors during backward pass. The buffers used in log_prob are detached.
 
         Args:
             theta: Parameter samples of shape (batch, param_dim)
@@ -167,21 +152,14 @@ class GaussianPosterior(nn.Module):
         Returns:
             Scalar loss (negative mean log probability)
         """
-        # Compute log probability (no stats updates here to avoid in-place issues)
-        log_prob = self.log_prob(theta, conditions)
-        return -log_prob.mean()
-
-    def update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
-        """Update running statistics after backward pass.
-
-        Call this AFTER loss.backward() to avoid in-place modification errors.
-
-        Args:
-            theta: Parameter samples of shape (batch, param_dim)
-            conditions: Embedded conditions of shape (batch, condition_dim)
-        """
+        # Update all statistics BEFORE forward pass
+        # This avoids in-place modification errors since buffers are detached in log_prob
         self._update_stats(theta, conditions)
         self._update_residual_cov(theta, conditions)
+
+        # Compute log probability (uses detached buffers)
+        log_prob = self.log_prob(theta, conditions)
+        return -log_prob.mean()
 
     def log_prob(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
         """Compute Gaussian log probability using eigendecomposition.
@@ -198,8 +176,7 @@ class GaussianPosterior(nn.Module):
         mean = self._forward_mean(conditions)
         residuals = theta - mean
 
-        # Detach eigendecomposition to avoid in-place modification errors
-        # (these buffers are updated after loss computation in training)
+        # Detach eigendecomposition buffers to avoid in-place modification errors
         V = self._residual_eigvecs.detach()
         d = self._residual_eigvals.detach()
 
@@ -275,8 +252,7 @@ class GaussianPosterior(nn.Module):
 
     def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
         """Predict mean using Cholesky-based whitening."""
-        # Detach buffers that are updated in-place during training
-        # to avoid "modified by inplace operation" errors during backward
+        # Detach buffers to avoid in-place modification errors during backward
         input_mean = self._input_mean.detach()
         input_cov_chol = self._input_cov_chol.detach()
         output_mean = self._output_mean.detach()
@@ -353,59 +329,6 @@ class GaussianPosterior(nn.Module):
         eigvals = eigvals.clamp(min=self.min_var)
         self._residual_eigvals.copy_(eigvals)
         self._residual_eigvecs.copy_(eigvecs)
-
-
-# ==================== EmbeddedPosterior Wrapper ====================
-
-
-class EmbeddedPosterior(nn.Module):
-    """Wraps a posterior with an embedding network.
-
-    This composition pattern bundles the embedding and posterior together,
-    providing a unified interface that accepts raw condition dicts and handles
-    the embedding internally.
-
-    Public API mirrors GaussianPosterior but accepts Dict[str, Tensor] conditions:
-        - loss(theta, conditions): Training entry point
-        - log_prob(theta, conditions): Compute log probability
-        - sample(conditions, gamma): Sample from tempered posterior
-        - sample_posterior(conditions): Sample from posterior
-    """
-
-    def __init__(self, embedding: nn.Module, posterior: GaussianPosterior):
-        super().__init__()
-        self.embedding = embedding
-        self.posterior = posterior
-
-    def _embed(self, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Run conditions through embedding network."""
-        return self.embedding(conditions)
-
-    def loss(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Training entry point with embedded conditions."""
-        s = self._embed(conditions)
-        return self.posterior.loss(theta, s)
-
-    def log_prob(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Compute log probability with embedded conditions."""
-        s = self._embed(conditions)
-        return self.posterior.log_prob(theta, s)
-
-    def sample(self, conditions: Dict[str, torch.Tensor], gamma: float = 1.0) -> torch.Tensor:
-        """Sample from tempered posterior with embedded conditions."""
-        s = self._embed(conditions)
-        return self.posterior.sample(s, gamma)
-
-    def sample_posterior(self, conditions: Dict[str, torch.Tensor]) -> torch.Tensor:
-        """Sample from posterior with embedded conditions."""
-        s = self._embed(conditions)
-        return self.posterior.sample_posterior(s)
-
-    def update_stats(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> None:
-        """Update running statistics with embedded conditions (call after backward)."""
-        with torch.no_grad():
-            s = self._embed(conditions)
-            self.posterior.update_stats(theta, s)
 
 
 # ==================== SNPE_gaussian Implementation ====================
@@ -526,6 +449,7 @@ class SNPE_gaussian(LossBasedEstimator):
             self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
         # Compute loss using EmbeddedPosterior.loss()
+        # Stats are updated inside loss() before computing log_prob
         loss = self._model.loss(theta_device, conditions_device)
 
         # Discard samples based on log-likelihood ratio
@@ -574,59 +498,6 @@ class SNPE_gaussian(LossBasedEstimator):
         theta_device = theta.to(self.device, dtype=torch.float32)
 
         return ids, theta, theta_logprob, conditions, theta_device, conditions_device
-
-    def train_step(self, batch) -> Dict[str, float]:
-        """SNPE_gaussian training step with gradient update and stats update.
-
-        Override base class to call update_stats() after backward, avoiding
-        in-place modification errors.
-        """
-        # Initialize on first batch
-        if not self.networks_initialized:
-            self._initialize_model(batch)
-
-        # Unpack batch
-        ids, theta, theta_logprob, conditions, theta_device, conditions_device = \
-            self._unpack_batch(batch, "train")
-
-        # Track theta ranges
-        with torch.no_grad():
-            self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
-            self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
-
-        # Forward pass and backward
-        self._optimizer.zero_grad()
-        self._model.train()
-        loss = self._model.loss(theta_device, conditions_device)
-        loss.backward()
-        self._optimizer.step()
-
-        # Update running statistics AFTER backward to avoid in-place errors
-        with torch.no_grad():
-            self._model.update_stats(theta_device, conditions_device)
-
-        # Discard samples based on log-likelihood ratio
-        if self.config.inference.discard_samples:
-            discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
-            batch.discard(discard_mask)
-
-        return {"loss": loss.item()}
-
-    def val_step(self, batch) -> Dict[str, float]:
-        """SNPE_gaussian validation step without gradient computation.
-
-        Override base class to use log_prob directly instead of loss().
-        """
-        _, theta, theta_logprob, conditions, theta_device, conditions_device = \
-            self._unpack_batch(batch, "val")
-
-        # Compute loss without gradients
-        with torch.no_grad():
-            self._model.eval()
-            log_prob = self._model.log_prob(theta_device, conditions_device)
-            loss = -log_prob.mean()
-
-        return {"loss": loss.item()}
 
     # ==================== Sampling Methods ====================
 
