@@ -34,6 +34,7 @@ class OptimizerConfig:
     """Optimizer and scheduler parameters."""
 
     lr: float = 1e-3
+    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
     lr_decay_factor: float = 0.1
     scheduler_patience: int = 8
 
@@ -462,7 +463,7 @@ class LossBasedEstimator(StepwiseEstimator):
 
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
-        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
@@ -599,7 +600,7 @@ class LossBasedEstimator(StepwiseEstimator):
 
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
-        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr)
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
