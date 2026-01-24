@@ -5,14 +5,17 @@ import copy
 import time
 from abc import abstractmethod
 from dataclasses import dataclass, field
-from typing import Any, Dict, List, Optional, Tuple
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
+import numpy as np
 import torch
 import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.base_estimator import BaseEstimator
+from falcon.core.utils import RVBatch
 from falcon.core.logger import log, debug, info, warning, error
 
 
@@ -33,6 +36,15 @@ class OptimizerConfig:
     lr: float = 1e-3
     lr_decay_factor: float = 0.1
     scheduler_patience: int = 8
+
+
+@dataclass
+class InferenceConfig:
+    """Inference and sampling parameters."""
+
+    gamma: float = 0.5
+    discard_samples: bool = False
+    log_ratio_threshold: float = -20.0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -291,28 +303,29 @@ class StepwiseEstimator(BaseEstimator):
 
 
 class LossBasedEstimator(StepwiseEstimator):
-    """Base class for estimators that train a model by minimizing a loss.
+    """Complete estimator that trains a posterior model by minimizing loss.
 
-    Provides concrete implementations of train_step, val_step, on_epoch_end
-    with proper model checkpointing and optimizer management.
+    This class provides a full implementation with:
+    - Model creation from posterior_cls + embedding
+    - Batch extraction and loss computation
+    - Sampling (prior, posterior, proposal)
+    - Save/load with init tensor storage
 
-    Subclasses must implement:
-        - _build_model(batch) -> nn.Module: Build the model from first batch
-        - _compute_loss(batch) -> Tuple[Tensor, Dict]: Compute loss and metrics
-
-    Attributes:
-        _model: Current training model
-        _best_model: Best model checkpoint (by validation loss)
-        _best_loss: Best validation loss seen
-        _optimizer: Optimizer instance
-        _scheduler: LR scheduler instance
+    The posterior must implement the Posterior contract:
+        - loss(theta, conditions) -> Tensor
+        - sample(conditions, gamma=None) -> Tensor
+        - log_prob(theta, conditions) -> Tensor
     """
 
     def __init__(
         self,
         simulator_instance,
+        posterior_cls: Type[nn.Module],
+        embedding_config: dict,
         loop_config: TrainingLoopConfig,
         optimizer_config: OptimizerConfig,
+        inference_config: InferenceConfig,
+        posterior_config: Optional[dict] = None,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
         device: Optional[str] = None,
@@ -324,7 +337,11 @@ class LossBasedEstimator(StepwiseEstimator):
             condition_keys=condition_keys,
         )
 
+        self.posterior_cls = posterior_cls
+        self.embedding_config = embedding_config
+        self.posterior_config = posterior_config or {}
         self.optimizer_config = optimizer_config
+        self.inference_config = inference_config
 
         # Device setup
         if device:
@@ -338,38 +355,82 @@ class LossBasedEstimator(StepwiseEstimator):
         self._best_model: Optional[nn.Module] = None
         self._best_loss: float = float("inf")
 
+        # Stored tensors from first batch (for model rebuild on load)
+        self._init_theta: Optional[torch.Tensor] = None
+        self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
+
         # Optimizer/scheduler (initialized lazily)
         self._optimizer: Optional[AdamW] = None
         self._scheduler: Optional[ReduceLROnPlateau] = None
 
-    # ==================== Abstract Methods ====================
+    # ==================== Model Creation ====================
 
-    @abstractmethod
     def _build_model(self, batch) -> nn.Module:
-        """Build and return the model.
+        """Build model from first batch."""
+        # Import here to avoid circular imports
+        from falcon.contrib.embedded_posterior import EmbeddedPosterior
+        from falcon.contrib.torch_embedding import instantiate_embedding
 
-        Called once on first batch to determine dimensions.
+        # Extract and store tensors for reload
+        self._init_theta = torch.from_numpy(batch[self.theta_key])
+        self._init_conditions = {
+            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+        }
+        return self._create_model(self._init_theta, self._init_conditions)
 
-        Args:
-            batch: First training batch
+    def _create_model(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> nn.Module:
+        """Create EmbeddedPosterior from theta and conditions tensors."""
+        from falcon.contrib.embedded_posterior import EmbeddedPosterior
+        from falcon.contrib.torch_embedding import instantiate_embedding
 
-        Returns:
-            The model (nn.Module) to train
-        """
-        pass
+        debug("Building model...")
 
-    @abstractmethod
+        # Create embedding and infer condition_dim
+        embedding = instantiate_embedding(self.embedding_config).to(self.device)
+        embedding.eval()
+        with torch.no_grad():
+            conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+            embedded = embedding(conditions_device)
+
+        # Create posterior with inferred dimensions
+        posterior = self.posterior_cls(
+            param_dim=theta.shape[1],
+            condition_dim=embedded.shape[1],
+            **self.posterior_config,
+        ).to(self.device)
+
+        debug("Model built.")
+        return EmbeddedPosterior(embedding, posterior)
+
+    # ==================== Loss Computation ====================
+
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
-        """Compute loss from batch.
+        """Compute loss from batch."""
+        # Extract and convert to tensors
+        theta = torch.from_numpy(batch[self.theta_key]).to(self.device, dtype=torch.float32)
+        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        conditions = {
+            k: torch.from_numpy(batch[k]).to(self.device, dtype=torch.float32)
+            for k in self.condition_keys if k in batch
+        }
 
-        Args:
-            batch: Batch object with data
+        # Record sample IDs for history
+        ts = time.time()
+        self.history["train_ids"].extend((ts, id) for id in batch._ids.tolist())
 
-        Returns:
-            Tuple of (loss_tensor, metrics_dict).
-            metrics_dict must include "loss" key.
-        """
-        pass
+        # Compute loss
+        loss = self._model.loss(theta, conditions)
+
+        # Discard low-probability samples
+        if self.inference_config.discard_samples:
+            with torch.no_grad():
+                self._model.eval()
+                log_prob = self._model.log_prob(theta, conditions).cpu()
+            log_ratio = log_prob - theta_logprob
+            discard_mask = log_ratio < self.inference_config.log_ratio_threshold
+            batch.discard(discard_mask)
+
+        return loss, {"loss": loss.item()}
 
     # ==================== Model Cloning ====================
 
@@ -414,11 +475,9 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def train_step(self, batch) -> Dict[str, float]:
         """Execute one training step with gradient update."""
-        # Initialize on first batch
         if not self.networks_initialized:
             self._initialize_model(batch)
 
-        # Gradient update
         self._optimizer.zero_grad()
         self._model.train()
         loss, metrics = self._compute_loss(batch)
@@ -438,13 +497,11 @@ class LossBasedEstimator(StepwiseEstimator):
         """Update best model and LR scheduler."""
         val_loss = val_metrics.get("loss", float("inf"))
 
-        # Update best model if improved
         if val_loss < self._best_loss:
             self._best_loss = val_loss
             self._update_best_model()
             log({"checkpoint": epoch})
 
-        # LR scheduler step
         self._scheduler.step(val_loss)
         log({"lr": self._optimizer.param_groups[0]["lr"]})
 
@@ -460,11 +517,54 @@ class LossBasedEstimator(StepwiseEstimator):
         """Check if a trained model is available for inference."""
         return self._best_model is not None
 
+    # ==================== Sampling Methods ====================
+
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from the prior distribution."""
+        if conditions:
+            raise ValueError("Conditions are not supported for sample_prior.")
+        samples = self.simulator_instance.simulate_batch(num_samples)
+        logprob = np.zeros(num_samples)
+        return RVBatch(samples, logprob=logprob)
+
+    def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> RVBatch:
+        """Internal sampling using inference model. Falls back to prior if not trained."""
+        if not self.has_trained_model:
+            return self.sample_prior(num_samples)
+
+        assert conditions, "Conditions must be provided for sampling."
+
+        conditions_device = {
+            k: v.to(self.device, dtype=torch.float32).expand(num_samples, *v.shape[1:])
+            for k, v in conditions.items()
+        }
+
+        model = self.inference_model
+        with torch.no_grad():
+            model.eval()
+            samples = model.sample(conditions_device, gamma=gamma)
+            logprob = model.log_prob(samples, conditions_device)
+
+        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
+
+    def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from the posterior distribution q(theta|x)."""
+        return self._sample(num_samples, conditions, gamma=None)
+
+    def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from widened proposal distribution for adaptive resampling."""
+        result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
+        log({
+            "sample_proposal:mean": result.value.mean(),
+            "sample_proposal:std": result.value.std(),
+            "sample_proposal:logprob": result.logprob.mean(),
+        })
+        return result
+
     # ==================== Save/Load ====================
 
     def save(self, node_dir) -> None:
-        """Save model state. Override to add extra state."""
-        from pathlib import Path
+        """Save model state."""
         node_dir = Path(node_dir)
 
         if not self.networks_initialized:
@@ -472,6 +572,10 @@ class LossBasedEstimator(StepwiseEstimator):
 
         # Save model weights
         torch.save(self._best_model.state_dict(), node_dir / "model.pth")
+
+        # Save init tensors for model rebuild
+        torch.save({"theta": self._init_theta, "conditions": self._init_conditions},
+                   node_dir / "init_tensors.pth")
 
         # Save history
         torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
@@ -482,23 +586,15 @@ class LossBasedEstimator(StepwiseEstimator):
         torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
         torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
 
-    def _rebuild_model_for_load(self, node_dir) -> nn.Module:
-        """Rebuild the model structure for loading weights.
-
-        Override in subclass to provide model reconstruction logic.
-        By default, raises NotImplementedError.
-        """
-        raise NotImplementedError(
-            "Subclass must implement _rebuild_model_for_load to restore model structure."
-        )
-
     def load(self, node_dir) -> None:
-        """Load model state. Override _rebuild_model_for_load to customize."""
-        from pathlib import Path
+        """Load model state."""
         node_dir = Path(node_dir)
 
-        # Rebuild model structure (subclass provides this)
-        self._model = self._rebuild_model_for_load(node_dir)
+        # Load init tensors and rebuild model
+        data = torch.load(node_dir / "init_tensors.pth")
+        self._init_theta = data["theta"]
+        self._init_conditions = data["conditions"]
+        self._model = self._create_model(self._init_theta, self._init_conditions)
         self._best_model = self._clone_model(self._model)
 
         # Setup optimizer and scheduler
@@ -513,5 +609,5 @@ class LossBasedEstimator(StepwiseEstimator):
 
         self.networks_initialized = True
 
-        # Load weights into best model
+        # Load weights
         self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))

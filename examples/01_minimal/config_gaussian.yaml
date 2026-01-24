@@ -73,9 +73,9 @@ graph:
         momentum: 0.01                # EMA momentum for running statistics
         min_var: 1.0e-6               # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency
-        embedding:
-          _target_: model.E
-          _input_: [x]
+      embedding:                      # Embedding is now at top level
+        _target_: model.E
+        _input_: [x]
       optimizer:
         lr: 0.01
         lr_decay_factor: 0.5

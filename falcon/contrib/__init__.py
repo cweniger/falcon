@@ -8,18 +8,18 @@ from .stepwise_estimator import (
     LossBasedEstimator,
     TrainingLoopConfig,
     OptimizerConfig,
+    InferenceConfig,
 )
 from .SNPE_A import (
     SNPE_A,
     SNPEConfig,
     NetworkConfig,
     OptimizerConfig as SNPEOptimizerConfig,
-    InferenceConfig,
+    InferenceConfig as SNPEInferenceConfig,
 )
 from .SNPE_gaussian import (
     SNPE_gaussian,
     GaussianConfig,
-    GaussianNetworkConfig,
-    GaussianInferenceConfig,
+    GaussianPosteriorConfig,
     GaussianPosterior,
 )
