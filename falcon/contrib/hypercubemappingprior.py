@@ -3,6 +3,8 @@ import math
 
 
 class HypercubeMappingPrior:
+    # TODO: Merge with ProductPrior. ProductPrior supports both hypercube and standard_normal
+    # latent spaces via mode parameter. Consider making hypercube map to [0,1] instead of [-2,2].
     """
     Maps a set of univariate priors between a hypercube domain and their target distributions.
 
