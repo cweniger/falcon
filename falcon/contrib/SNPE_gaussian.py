@@ -25,6 +25,7 @@ import torch.nn as nn
 from omegaconf import OmegaConf
 
 from falcon.contrib.networks import build_mlp
+from falcon.contrib.product_prior import TransformedPrior
 from falcon.contrib.stepwise_estimator import (
     LossBasedEstimator,
     TrainingLoopConfig,
@@ -261,6 +262,14 @@ def SNPE_gaussian(
             _target_: model.E
             _input_: [x]
     """
+    # Check simulator supports transformation interface
+    if not isinstance(simulator_instance, TransformedPrior):
+        raise TypeError(
+            f"SNPE_gaussian requires a TransformedPrior (e.g., ProductPrior), "
+            f"got {type(simulator_instance).__name__}. "
+            f"The simulator must support forward/inverse with mode='standard_normal'."
+        )
+
     # Merge with defaults
     schema = OmegaConf.structured(GaussianConfig)
     cfg = OmegaConf.merge(schema, config or {})

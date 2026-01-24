@@ -1,13 +1,53 @@
-"""Transformed prior with flexible latent space mapping.
+"""Priors with latent space transformations.
 
-Maps between target distributions and either hypercube or standard normal space.
+Provides:
+- TransformedPrior: Base class defining forward/inverse interface with mode parameter
+- ProductPrior: Product of independent marginal distributions
 """
 
 import torch
 import math
+from abc import ABC, abstractmethod
 
 
-class ProductPrior:
+class TransformedPrior(ABC):
+    """Base class for priors that support latent space transformations.
+
+    Subclasses must implement forward() and inverse() with a mode parameter:
+      - forward(z, mode): latent space -> parameter space
+      - inverse(x, mode): parameter space -> latent space
+
+    Modes:
+      - "hypercube": Maps to/from bounded hypercube. Use with SNPE_A.
+      - "standard_normal": Maps to/from N(0, I). Use with SNPE_gaussian.
+
+    This base class is used for type checking in estimators like SNPE_gaussian
+    that require the transformation interface.
+    """
+
+    @property
+    @abstractmethod
+    def param_dim(self) -> int:
+        """Dimension of the parameter space."""
+        pass
+
+    @abstractmethod
+    def forward(self, z, mode: str = "hypercube"):
+        """Transform from latent space to parameter space."""
+        pass
+
+    @abstractmethod
+    def inverse(self, x, mode: str = "hypercube"):
+        """Transform from parameter space to latent space."""
+        pass
+
+    @abstractmethod
+    def simulate_batch(self, batch_size: int):
+        """Sample from the prior distribution."""
+        pass
+
+
+class ProductPrior(TransformedPrior):
     """
     Maps between target distributions and a latent space (hypercube or standard normal).
 
@@ -51,8 +91,12 @@ class ProductPrior:
             hypercube_range: Range for hypercube mode (default: [-2, 2]).
         """
         self.priors = priors
-        self.param_dim = len(priors)
+        self._param_dim = len(priors)
         self.hypercube_range = hypercube_range
+
+    @property
+    def param_dim(self) -> int:
+        return self._param_dim
 
     # ==================== Public API ====================
 
