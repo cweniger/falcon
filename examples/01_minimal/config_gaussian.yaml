@@ -55,7 +55,7 @@ graph:
     evidence: [x]
 
     simulator:
-      _target_: falcon.contrib.TransformedPrior
+      _target_: falcon.contrib.ProductPrior
       priors:
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]

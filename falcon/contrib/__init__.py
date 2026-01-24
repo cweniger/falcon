@@ -1,5 +1,5 @@
 from .hypercubemappingprior import HypercubeMappingPrior
-from .transformed_prior import TransformedPrior
+from .product_prior import ProductPrior
 from .norms import LazyOnlineNorm
 from .flow import Flow, NET_BUILDERS
 from .networks import build_mlp

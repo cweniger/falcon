@@ -7,7 +7,7 @@ import torch
 import math
 
 
-class TransformedPrior:
+class ProductPrior:
     """
     Maps between target distributions and a latent space (hypercube or standard normal).
 
@@ -28,7 +28,7 @@ class TransformedPrior:
       - "triangular": Triangular distribution. Parameters: a (min), c (mode), b (max).
 
     Example:
-        prior = TransformedPrior([
+        prior = ProductPrior([
             ("uniform", -100.0, 100.0),
             ("normal", 0.0, 1.0),
         ])
@@ -44,7 +44,7 @@ class TransformedPrior:
 
     def __init__(self, priors=[], hypercube_range=[-2, 2]):
         """
-        Initialize TransformedPrior.
+        Initialize ProductPrior.
 
         Args:
             priors: List of tuples (dist_type, param1, param2, ...).
