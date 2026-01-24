@@ -330,7 +330,15 @@ class LossBasedEstimator(StepwiseEstimator):
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
         device: Optional[str] = None,
+        latent_mode: Optional[str] = None,
     ):
+        """
+        Args:
+            latent_mode: Transform theta to latent space for training/sampling.
+                None: work directly in theta space (default)
+                "standard_normal": transform to N(0,I) via simulator.inverse/forward
+                "hypercube": transform to hypercube via simulator.inverse/forward
+        """
         super().__init__(
             simulator_instance=simulator_instance,
             loop_config=loop_config,
@@ -343,6 +351,7 @@ class LossBasedEstimator(StepwiseEstimator):
         self.posterior_config = posterior_config or {}
         self.optimizer_config = optimizer_config
         self.inference_config = inference_config
+        self.latent_mode = latent_mode
 
         # Device setup
         if device:
@@ -415,11 +424,15 @@ class LossBasedEstimator(StepwiseEstimator):
             for k in self.condition_keys if k in batch
         }
 
+        # Transform theta to latent space if mode specified
+        if self.latent_mode is not None:
+            theta = self.simulator_instance.inverse(theta, mode=self.latent_mode)
+
         # Record sample IDs for history
         ts = time.time()
         self.history["train_ids"].extend((ts, id) for id in batch._ids.tolist())
 
-        # Compute loss
+        # Compute loss in latent space
         loss = self._model.loss(theta, conditions)
 
         # Discard low-probability samples
@@ -545,6 +558,10 @@ class LossBasedEstimator(StepwiseEstimator):
             model.eval()
             samples = model.sample(conditions_device, gamma=gamma)
             logprob = model.log_prob(samples, conditions_device)
+
+            # Transform samples from latent space back to theta space
+            if self.latent_mode is not None:
+                samples = self.simulator_instance.forward(samples, mode=self.latent_mode)
 
         return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
 

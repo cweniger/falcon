@@ -280,4 +280,5 @@ def SNPE_gaussian(
         theta_key=theta_key,
         condition_keys=condition_keys,
         device=cfg.device,
+        latent_mode="standard_normal",  # GaussianPosterior assumes N(0,I) prior
     )
