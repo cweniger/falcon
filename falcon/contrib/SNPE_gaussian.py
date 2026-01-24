@@ -5,8 +5,8 @@ This module provides:
 - SNPE_gaussian: Factory function creating a configured LossBasedEstimator
 
 The Gaussian posterior uses:
-- Cholesky-based whitening for input/output normalization
-- Eigendecomposition for efficient covariance operations and tempered sampling
+- Diagonal whitening for input/output normalization (stable under distribution shift)
+- Full covariance for residuals with eigendecomposition for efficient operations
 - EMA updates for running statistics
 
 Benefits over flow-based approaches:
@@ -102,17 +102,15 @@ class GaussianPosterior(nn.Module):
         # MLP for mean prediction
         self.net = build_mlp(condition_dim, hidden_dim, param_dim, num_layers)
 
-        # Input statistics (conditions)
+        # Input statistics (conditions) - diagonal whitening
         self.register_buffer("_input_mean", torch.zeros(condition_dim))
-        self.register_buffer("_input_cov", torch.eye(condition_dim))
-        self.register_buffer("_input_cov_chol", torch.eye(condition_dim))
+        self.register_buffer("_input_std", torch.ones(condition_dim))
 
-        # Output statistics (theta)
+        # Output statistics (theta) - diagonal whitening
         self.register_buffer("_output_mean", torch.zeros(param_dim))
-        self.register_buffer("_output_cov", torch.eye(param_dim))
-        self.register_buffer("_output_cov_chol", torch.eye(param_dim))
+        self.register_buffer("_output_std", torch.ones(param_dim))
 
-        # Residual covariance (prediction error)
+        # Residual covariance (prediction error) - full covariance
         self.register_buffer("_residual_cov", torch.eye(param_dim))
         self.register_buffer("_residual_eigvals", torch.ones(param_dim))
         self.register_buffer("_residual_eigvecs", torch.eye(param_dim))
@@ -171,16 +169,10 @@ class GaussianPosterior(nn.Module):
     # ==================== Internal Methods ====================
 
     def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
-        """Predict mean using Cholesky-based whitening."""
-        input_mean = self._input_mean.detach()
-        input_cov_chol = self._input_cov_chol.detach()
-        output_mean = self._output_mean.detach()
-        output_cov_chol = self._output_cov_chol.detach()
-
-        centered = (conditions - input_mean).T
-        x_white = torch.linalg.solve_triangular(input_cov_chol, centered, upper=False).T
-        r = self.net(x_white)
-        return output_mean + (output_cov_chol @ r.T).T
+        """Predict mean using diagonal whitening."""
+        x_norm = (conditions - self._input_mean.detach()) / self._input_std.detach()
+        r = self.net(x_norm)
+        return self._output_mean.detach() + self._output_std.detach() * r
 
     def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update running statistics using EMA."""
@@ -188,13 +180,10 @@ class GaussianPosterior(nn.Module):
             self._input_mean.lerp_(conditions.mean(dim=0), self.momentum)
             self._output_mean.lerp_(theta.mean(dim=0), self.momentum)
 
-            batch_input_cov = self._compute_cov(conditions, self._input_mean)
-            batch_output_cov = self._compute_cov(theta, self._output_mean)
-            self._input_cov.lerp_(batch_input_cov, self.momentum)
-            self._output_cov.lerp_(batch_output_cov, self.momentum)
-
-            self._input_cov_chol.copy_(self._safe_cholesky(self._input_cov))
-            self._output_cov_chol.copy_(self._safe_cholesky(self._output_cov))
+            batch_input_std = self._compute_std(conditions, self._input_mean)
+            batch_output_std = self._compute_std(theta, self._output_mean)
+            self._input_std.lerp_(batch_input_std, self.momentum)
+            self._output_std.lerp_(batch_output_std, self.momentum)
 
     def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update residual covariance and eigendecomposition."""
@@ -210,6 +199,13 @@ class GaussianPosterior(nn.Module):
             if self._step_counter % self.eig_update_freq == 0:
                 self._update_eigendecomp()
 
+    def _compute_std(self, data: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
+        """Compute per-dimension standard deviation."""
+        centered = data - mean
+        n = data.shape[0]
+        var = (centered ** 2).sum(dim=0) / max(n - 1, 1)
+        return torch.sqrt(var.clamp(min=self.min_var))
+
     def _compute_cov(self, data: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
         """Compute covariance matrix from data."""
         centered = data - mean
@@ -217,14 +213,6 @@ class GaussianPosterior(nn.Module):
         cov = (centered.T @ centered) / max(n - 1, 1)
         eye = torch.eye(data.shape[1], device=data.device, dtype=data.dtype)
         return cov + self.min_var * eye
-
-    def _safe_cholesky(self, cov: torch.Tensor) -> torch.Tensor:
-        """Compute Cholesky with fallback for numerical stability."""
-        try:
-            return torch.linalg.cholesky(cov)
-        except RuntimeError:
-            eye = torch.eye(cov.shape[0], device=cov.device, dtype=cov.dtype)
-            return torch.linalg.cholesky(cov + 1e-4 * eye)
 
     def _update_eigendecomp(self) -> None:
         """Update eigendecomposition of residual covariance."""
@@ -277,17 +265,9 @@ def SNPE_gaussian(
     schema = OmegaConf.structured(GaussianConfig)
     cfg = OmegaConf.merge(schema, config or {})
 
-    # Extract embedding config
+    # Extract configs as plain dicts
     embedding_config = OmegaConf.to_container(cfg.embedding, resolve=True)
-
-    # Extract posterior config
-    posterior_config = {
-        "hidden_dim": cfg.network.hidden_dim,
-        "num_layers": cfg.network.num_layers,
-        "momentum": cfg.network.momentum,
-        "min_var": cfg.network.min_var,
-        "eig_update_freq": cfg.network.eig_update_freq,
-    }
+    posterior_config = OmegaConf.to_container(cfg.network, resolve=True)
 
     return LossBasedEstimator(
         simulator_instance=simulator_instance,
