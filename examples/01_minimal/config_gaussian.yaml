@@ -1,13 +1,17 @@
 # =============================================================================
 # Falcon Example Configuration: 01_minimal (Gaussian Posterior)
 # -----------------------------------------------------------------------------
-# Same as config.yaml but using SNPE_gaussian instead of SNPE_A.
+# Demonstrates SNPE_gaussian with an exponential forward model:
+#   x = exp(z) + noise
 #
 # SNPE_gaussian uses a full covariance Gaussian posterior instead of
 # normalizing flows. Benefits:
 #   • Simpler and more interpretable
 #   • Covariance matrix shows parameter correlations directly
 #   • Eigenvalue-based tempered sampling for exploration
+#
+# Prior: z ~ N(0, I)
+# Ground truth: z = [-5, 0, 5] (5σ in tails), x = exp(z) ≈ [0.0067, 1.0, 148.4]
 #
 # Usage:
 #   falcon launch --config-name config_gaussian --run-dir outputs/gaussian_run
@@ -57,9 +61,9 @@ graph:
     simulator:
       _target_: falcon.contrib.ProductPrior
       priors:
-        - ['uniform', -100.0, 100.0]
-        - ['uniform', -100.0, 100.0]
-        - ['uniform', -100.0, 100.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
 
     estimator:
       _target_: falcon.contrib.SNPE_gaussian
@@ -91,9 +95,9 @@ graph:
   x:
     parents: [z]
     simulator:
-      _target_: model.Simulate
-      npar: 3
-    observed: "./data/mock_data.npz['x']"
+      _target_: model.ExpPlusNoise
+      sigma: 1.0e-6
+    observed: "./data/mock_data_exp.npz['x']"
 
 # -----------------------------------------------------------------------------
 # Sampling configuration

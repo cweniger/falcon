@@ -5,6 +5,7 @@ This file contains model-specific components that can be referenced via _target_
 
 import torch
 import falcon
+import numpy as np
 
 # Global configuration
 SIGMA = 0.1  # Hardcoded sigma value
@@ -28,6 +29,27 @@ class Simulate:
         falcon.log({"x_mean": x.mean().item()})
         falcon.log({"x_std": x.std().item()})
         return x.numpy()  # Return numpy array
+
+
+class ExpPlusNoise:
+    """Exponential simulator: x = exp(z) + noise.
+
+    Creates non-trivial correlations in the posterior when z has multiple dimensions.
+
+    Args:
+        sigma: Standard deviation of observation noise (default: 1e-6)
+    """
+
+    def __init__(self, sigma: float = 1e-6):
+        self.sigma = sigma
+
+    def simulate_batch(self, batch_size, z):
+        z = torch.tensor(z)
+        x = torch.exp(z) + torch.randn_like(z) * self.sigma
+        falcon.log({"x_mean": x.mean().item()})
+        falcon.log({"x_std": x.std().item()})
+        return x.numpy()
+
 
 
 class E(torch.nn.Module):
