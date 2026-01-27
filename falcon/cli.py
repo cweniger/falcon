@@ -326,7 +326,8 @@ def launch_mode(cfg: DictConfig) -> None:
         resample_interval=cfg.buffer.resample_interval,
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
-        dump_config=cfg.buffer.get("dump", None),
+        buffer_path=cfg.paths.buffer,
+        store_fraction=cfg.buffer.get("store_fraction", 0.0),
         log_config=logging_cfg,
     )
 

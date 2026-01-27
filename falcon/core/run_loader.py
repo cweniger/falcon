@@ -22,7 +22,7 @@ from omegaconf import OmegaConf, DictConfig
 
 from .graph import _parse_observation_path
 from .run_reader import RunReader
-from .samples_reader import SamplesReader
+from .samples_reader import SamplesReader, SampleSetReader
 
 
 class Run:
@@ -39,6 +39,7 @@ class Run:
         self.run_dir = Path(run_dir)
         self._config: Optional[DictConfig] = None
         self._samples: Optional[SamplesReader] = None
+        self._buffer: Optional[SampleSetReader] = None
         self._metrics: Optional[RunReader] = None
         self._observations: Optional[Dict[str, np.ndarray]] = None
 
@@ -59,6 +60,23 @@ class Run:
             samples_dir = self.run_dir / "samples_dir"
             self._samples = SamplesReader(samples_dir)
         return self._samples
+
+    @property
+    def buffer(self) -> SampleSetReader:
+        """Access training buffer samples stored during training.
+
+        Returns a SampleSetReader for the sim_dir (paths.buffer).
+        Samples are stored when buffer.store_fraction > 0.
+
+        Usage:
+            run.buffer[0]           # First stored sample
+            run.buffer['z']         # All z arrays
+            run.buffer.stacked['z'] # Stacked array
+        """
+        if self._buffer is None:
+            buffer_dir = self.run_dir / "sim_dir"
+            self._buffer = SampleSetReader(buffer_dir)
+        return self._buffer
 
     @property
     def metrics(self) -> RunReader:
