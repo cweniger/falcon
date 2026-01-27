@@ -1,11 +1,26 @@
 from .hypercubemappingprior import HypercubeMappingPrior
+from .product_prior import TransformedPrior, ProductPrior
 from .norms import LazyOnlineNorm
 from .flow import Flow, NET_BUILDERS
-from .stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
+from .networks import build_mlp
+from .embedded_posterior import EmbeddedPosterior
+from .stepwise_estimator import (
+    StepwiseEstimator,
+    LossBasedEstimator,
+    TrainingLoopConfig,
+    OptimizerConfig,
+    InferenceConfig,
+)
 from .SNPE_A import (
     SNPE_A,
     SNPEConfig,
     NetworkConfig,
-    OptimizerConfig,
-    InferenceConfig,
+    OptimizerConfig as SNPEOptimizerConfig,
+    InferenceConfig as SNPEInferenceConfig,
+)
+from .SNPE_gaussian import (
+    SNPE_gaussian,
+    GaussianConfig,
+    GaussianPosteriorConfig,
+    GaussianPosterior,
 )

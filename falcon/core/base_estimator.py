@@ -2,9 +2,14 @@
 
 from abc import ABC, abstractmethod
 from pathlib import Path
-from typing import List
+from typing import Dict, Optional
+
+import torch
 
 from falcon.core.utils import RVBatch
+
+# Type alias for conditions: maps node names to tensors
+Conditions = Dict[str, torch.Tensor]
 
 
 class BaseEstimator(ABC):
@@ -13,6 +18,8 @@ class BaseEstimator(ABC):
 
     All methods are abstract - no implementation details.
     Concrete implementations must provide all functionality.
+
+    Conditions are passed as Dict[str, Tensor] mapping node names to values.
     """
 
     @abstractmethod
@@ -27,14 +34,14 @@ class BaseEstimator(ABC):
 
     @abstractmethod
     def sample_prior(
-        self, num_samples: int, parent_conditions: List = []
+        self, num_samples: int, conditions: Optional[Conditions] = None
     ) -> RVBatch:
         """
         Sample from the prior distribution.
 
         Args:
             num_samples: Number of samples to generate
-            parent_conditions: Conditioning values from parent nodes
+            conditions: Conditioning values from parent nodes (usually None for prior)
 
         Returns:
             RVBatch with samples and log probabilities
@@ -43,18 +50,14 @@ class BaseEstimator(ABC):
 
     @abstractmethod
     def sample_posterior(
-        self,
-        num_samples: int,
-        parent_conditions: List = [],
-        evidence_conditions: List = [],
+        self, num_samples: int, conditions: Optional[Conditions] = None
     ) -> RVBatch:
         """
         Sample from the posterior distribution.
 
         Args:
             num_samples: Number of samples to generate
-            parent_conditions: Conditioning values from parent nodes
-            evidence_conditions: Observed evidence values
+            conditions: Dict mapping node names to condition tensors
 
         Returns:
             RVBatch with samples and log probabilities
@@ -63,18 +66,14 @@ class BaseEstimator(ABC):
 
     @abstractmethod
     def sample_proposal(
-        self,
-        num_samples: int,
-        parent_conditions: List = [],
-        evidence_conditions: List = [],
+        self, num_samples: int, conditions: Optional[Conditions] = None
     ) -> RVBatch:
         """
         Sample from the proposal distribution for adaptive resampling.
 
         Args:
             num_samples: Number of samples to generate
-            parent_conditions: Conditioning values from parent nodes
-            evidence_conditions: Observed evidence values
+            conditions: Dict mapping node names to condition tensors
 
         Returns:
             RVBatch with samples and log probabilities

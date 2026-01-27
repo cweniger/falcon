@@ -342,9 +342,9 @@ class SNPE_A(StepwiseEstimator):
 
     # ==================== Sampling Methods ====================
 
-    def sample_prior(self, num_samples: int, parent_conditions: Optional[List] = None) -> RVBatch:
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
         """Sample from the prior distribution."""
-        if parent_conditions:
+        if conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
         # Log probability for uniform prior over hypercube [-bound, bound]^d
@@ -355,54 +355,36 @@ class SNPE_A(StepwiseEstimator):
     def sample_posterior(
         self,
         num_samples: int,
-        parent_conditions: Optional[List] = None,
-        evidence_conditions: Optional[List] = None,
+        conditions: Optional[Dict] = None,
     ) -> RVBatch:
         """Sample from the posterior distribution q(theta|x)."""
         # Fall back to prior if networks not yet initialized (training hasn't started)
         if not self.networks_initialized:
-            return self.sample_prior(num_samples, parent_conditions)
+            return self.sample_prior(num_samples)
 
-        samples, logprob = self._importance_sample(
-            num_samples,
-            mode="posterior",
-            parent_conditions=parent_conditions or [],
-            evidence_conditions=evidence_conditions or [],
-        )
+        samples, logprob = self._importance_sample(num_samples, mode="posterior", conditions=conditions or {})
         return RVBatch(samples.numpy(), logprob=logprob.numpy())
 
     def sample_proposal(
         self,
         num_samples: int,
-        parent_conditions: Optional[List] = None,
-        evidence_conditions: Optional[List] = None,
+        conditions: Optional[Dict] = None,
     ) -> RVBatch:
         """Sample from the widened proposal distribution for adaptive resampling."""
         # Fall back to prior if networks not yet initialized (training hasn't started)
         if not self.networks_initialized:
-            return self.sample_prior(num_samples, parent_conditions)
+            return self.sample_prior(num_samples)
 
         cfg_inf = self.config.inference
-        parent_conditions = parent_conditions or []
-        evidence_conditions = evidence_conditions or []
+        conditions = conditions or {}
 
         if cfg_inf.sample_reference_posterior:
-            post_samples, _ = self._importance_sample(
-                cfg_inf.reference_samples,
-                mode="posterior",
-                parent_conditions=parent_conditions,
-                evidence_conditions=evidence_conditions,
-            )
+            post_samples, _ = self._importance_sample(cfg_inf.reference_samples, mode="posterior", conditions=conditions)
             mean, std = post_samples.mean(dim=0).cpu(), post_samples.std(dim=0).cpu()
             log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
             log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
 
-        samples, logprob = self._importance_sample(
-            num_samples,
-            mode="proposal",
-            parent_conditions=parent_conditions,
-            evidence_conditions=evidence_conditions,
-        )
+        samples, logprob = self._importance_sample(num_samples, mode="proposal", conditions=conditions)
         log({
             "sample_proposal:mean": samples.mean().item(),
             "sample_proposal:std": samples.std().item(),
@@ -414,18 +396,14 @@ class SNPE_A(StepwiseEstimator):
         self,
         num_samples: int,
         mode: str = "posterior",
-        parent_conditions: List = [],
-        evidence_conditions: List = [],
+        conditions: Dict = {},
     ):
         """Sample using importance sampling."""
         cfg_inf = self.config.inference
 
-        conditions_list = parent_conditions + evidence_conditions
-        assert conditions_list, "Conditions must be provided."
-        # Convert list to dict using condition_keys
-        conditions = {
-            k: v.to(self.device) for k, v in zip(self.condition_keys, conditions_list)
-        }
+        assert conditions, "Conditions must be provided."
+        # Move conditions to device
+        conditions = {k: v.to(self.device) for k, v in conditions.items()}
 
         # Use best models if available and configured, otherwise fall back to current
         use_best = cfg_inf.use_best_models_during_inference and self._best_conditional_flow is not None

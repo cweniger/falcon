@@ -296,7 +296,7 @@ def launch_mode(cfg: DictConfig) -> None:
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
 
-    # TODO: This is some hack right now
+    # Convert observations to tensors, adding batch dimension
     observations = {
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
@@ -326,7 +326,8 @@ def launch_mode(cfg: DictConfig) -> None:
         resample_interval=cfg.buffer.resample_interval,
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
-        dump_config=cfg.buffer.get("dump", None),
+        buffer_path=cfg.paths.buffer,
+        store_fraction=cfg.buffer.get("store_fraction", 0.0),
         log_config=logging_cfg,
     )
 
@@ -365,7 +366,7 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     # Instantiate model components directly from graph
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
 
-    # TODO: This is some hack right now
+    # Convert observations to tensors, adding batch dimension
     observations = {
         k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
     }
