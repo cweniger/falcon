@@ -120,9 +120,10 @@ class GaussianPosterior(nn.Module):
     # ==================== Posterior Contract ====================
 
     def loss(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
-        """Compute negative log likelihood loss, updating statistics."""
-        self._update_stats(theta, conditions)
-        self._update_residual_cov(theta, conditions)
+        """Compute negative log likelihood loss, updating statistics only during training."""
+        if self.training:
+            self._update_stats(theta, conditions)
+            self._update_residual_cov(theta, conditions)
         log_prob = self.log_prob(theta, conditions)
         return -log_prob.mean()
 
@@ -191,6 +192,7 @@ class GaussianPosterior(nn.Module):
             debug("conditions std: "+ str(self._input_std))
             debug("theta mean: "+ str(self._output_mean))
             debug("theta std: "+ str(self._output_std))
+            debug("residual_eigvals: " + str(self._residual_eigvals))
 
     def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update residual covariance and eigendecomposition."""
