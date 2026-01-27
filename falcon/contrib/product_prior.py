@@ -111,16 +111,28 @@ class ProductPrior(TransformedPrior):
         Returns:
             Tensor of shape (..., n_params) in target distribution space.
         """
-        # Convert latent space to [0, 1]
-        if mode == "hypercube":
-            u = self._hypercube_to_uniform(z)
-        elif mode == "standard_normal":
+        if mode == "standard_normal":
+            # Try direct transforms first (avoids CDF precision issues at tails)
+            transformed = []
+            use_direct = True
+            for i, prior in enumerate(self.priors):
+                dist_type, *params = prior
+                x_i = self._from_standard_normal(z[..., i], dist_type, *params)
+                if x_i is None:
+                    use_direct = False
+                    break
+                transformed.append(x_i)
+            if use_direct:
+                return torch.stack(transformed, dim=-1)
+            # Fall through to CDF approach if any distribution lacks direct transform
             u = self._normal_to_uniform(z)
+        elif mode == "hypercube":
+            u = self._hypercube_to_uniform(z)
         else:
             raise ValueError(f"Unknown mode: {mode}. Use 'hypercube' or 'standard_normal'.")
 
-        # Map [0, 1] to target distributions
-        epsilon = 1e-6
+        # Map [0, 1] to target distributions (CDF approach)
+        epsilon = 1e-10  # Supports ~6 sigma tails in float64
         u = torch.clamp(u, epsilon, 1.0 - epsilon)
 
         transformed = []
@@ -142,7 +154,22 @@ class ProductPrior(TransformedPrior):
         Returns:
             Tensor of shape (..., n_params) in latent space.
         """
-        # Map target distributions to [0, 1]
+        if mode == "standard_normal":
+            # Try direct transforms first (avoids CDF precision issues at tails)
+            transformed = []
+            use_direct = True
+            for i, prior in enumerate(self.priors):
+                dist_type, *params = prior
+                z_i = self._to_standard_normal(x[..., i], dist_type, *params)
+                if z_i is None:
+                    use_direct = False
+                    break
+                transformed.append(z_i)
+            if use_direct:
+                return torch.stack(transformed, dim=-1)
+            # Fall through to CDF approach if any distribution lacks direct transform
+
+        # Map target distributions to [0, 1] (CDF approach)
         uniform = []
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
@@ -152,7 +179,7 @@ class ProductPrior(TransformedPrior):
         u = torch.stack(uniform, dim=-1)
 
         # Clamp to avoid numerical issues at boundaries
-        epsilon = 1e-6
+        epsilon = 1e-10  # Supports ~6 sigma tails in float64
         u = torch.clamp(u, epsilon, 1.0 - epsilon)
 
         # Convert [0, 1] to latent space
@@ -203,6 +230,33 @@ class ProductPrior(TransformedPrior):
     def _uniform_to_normal(self, u):
         """[0, 1] -> Standard normal via probit (inverse CDF)."""
         return math.sqrt(2) * torch.erfinv(2 * u - 1)
+
+    # ==================== Direct Standard Normal Transforms ====================
+    # These avoid CDF precision issues for unbounded distributions
+
+    @staticmethod
+    def _to_standard_normal(x, dist_type, *params):
+        """Direct transform to standard normal. Returns None if not supported."""
+        if dist_type == "normal":
+            mean, std = params
+            return (x - mean) / std
+        elif dist_type == "lognormal":
+            mu, sigma = params
+            return (torch.log(x) - mu) / sigma
+        else:
+            return None  # Fall back to CDF approach
+
+    @staticmethod
+    def _from_standard_normal(z, dist_type, *params):
+        """Direct transform from standard normal. Returns None if not supported."""
+        if dist_type == "normal":
+            mean, std = params
+            return mean + std * z
+        elif dist_type == "lognormal":
+            mu, sigma = params
+            return torch.exp(mu + sigma * z)
+        else:
+            return None  # Fall back to CDF approach
 
     # ==================== Distribution Transforms ====================
 
