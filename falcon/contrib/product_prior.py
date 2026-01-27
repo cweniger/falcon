@@ -66,16 +66,21 @@ class ProductPrior(TransformedPrior):
       - "uvol": Uniform-in-volume. Parameters: low, high.
       - "normal": Normal distribution. Parameters: mean, std.
       - "triangular": Triangular distribution. Parameters: a (min), c (mode), b (max).
+      - "fixed": Fixed value (excluded from latent space). Parameters: value.
 
     Example:
         prior = ProductPrior([
             ("uniform", -100.0, 100.0),
+            ("fixed", 5.0),              # Fixed parameter, not in latent space
             ("normal", 0.0, 1.0),
         ])
 
+        # Latent space has dim=2 (only free params)
+        # Output space has dim=3 (includes fixed params)
+
         # For SNPE_gaussian (standard normal latent space)
-        z = prior.inverse(theta, mode="standard_normal")
-        theta = prior.forward(z, mode="standard_normal")
+        z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 3) -> z: (..., 2)
+        theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 3)
 
         # For SNPE_A (hypercube latent space)
         u = prior.inverse(theta, mode="hypercube")
@@ -91,12 +96,32 @@ class ProductPrior(TransformedPrior):
             hypercube_range: Range for hypercube mode (default: [-2, 2]).
         """
         self.priors = priors
-        self._param_dim = len(priors)
         self.hypercube_range = hypercube_range
+
+        # Separate fixed and free parameters
+        self._free_indices = []
+        self._fixed_indices = []
+        self._fixed_values = {}
+        for i, prior in enumerate(priors):
+            dist_type = prior[0]
+            if dist_type == "fixed":
+                self._fixed_indices.append(i)
+                self._fixed_values[i] = prior[1]
+            else:
+                self._free_indices.append(i)
+
+        self._param_dim = len(self._free_indices)  # Latent space dimension
+        self._full_param_dim = len(priors)  # Full output dimension
 
     @property
     def param_dim(self) -> int:
+        """Dimension of the latent space (free parameters only)."""
         return self._param_dim
+
+    @property
+    def full_param_dim(self) -> int:
+        """Dimension of the full parameter space (including fixed parameters)."""
+        return self._full_param_dim
 
     # ==================== Public API ====================
 
@@ -105,23 +130,36 @@ class ProductPrior(TransformedPrior):
         Map from latent space to target distribution.
 
         Args:
-            z: Tensor of shape (..., n_params) in latent space.
+            z: Tensor of shape (..., param_dim) in latent space (free params only).
             mode: "hypercube" or "standard_normal".
 
         Returns:
-            Tensor of shape (..., n_params) in target distribution space.
+            Tensor of shape (..., full_param_dim) in target distribution space.
         """
+        # Handle case with no free parameters
+        if self._param_dim == 0:
+            batch_shape = z.shape[:-1] if z.dim() > 1 else (1,)
+            result = torch.zeros(*batch_shape, self._full_param_dim, dtype=z.dtype, device=z.device)
+            for idx, val in self._fixed_values.items():
+                result[..., idx] = val
+            return result
+
         if mode == "standard_normal":
             # Try direct transforms first (avoids CDF precision issues at tails)
-            transformed = []
+            transformed = [None] * self._full_param_dim
             use_direct = True
+            z_idx = 0
             for i, prior in enumerate(self.priors):
                 dist_type, *params = prior
-                x_i = self._from_standard_normal(z[..., i], dist_type, *params)
-                if x_i is None:
-                    use_direct = False
-                    break
-                transformed.append(x_i)
+                if dist_type == "fixed":
+                    transformed[i] = torch.full(z.shape[:-1], params[0], dtype=z.dtype, device=z.device)
+                else:
+                    x_i = self._from_standard_normal(z[..., z_idx], dist_type, *params)
+                    if x_i is None:
+                        use_direct = False
+                        break
+                    transformed[i] = x_i
+                    z_idx += 1
             if use_direct:
                 return torch.stack(transformed, dim=-1)
             # Fall through to CDF approach if any distribution lacks direct transform
@@ -136,9 +174,14 @@ class ProductPrior(TransformedPrior):
         u = torch.clamp(u, epsilon, 1.0 - epsilon)
 
         transformed = []
+        u_idx = 0
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
-            x_i = self._forward_transform(u[..., i], dist_type, *params)
+            if dist_type == "fixed":
+                x_i = torch.full(u.shape[:-1], params[0], dtype=u.dtype, device=u.device)
+            else:
+                x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
+                u_idx += 1
             transformed.append(x_i)
 
         return torch.stack(transformed, dim=-1)
@@ -148,18 +191,25 @@ class ProductPrior(TransformedPrior):
         Map from target distribution to latent space.
 
         Args:
-            x: Tensor of shape (..., n_params) in target distribution space.
+            x: Tensor of shape (..., full_param_dim) in target distribution space.
             mode: "hypercube" or "standard_normal".
 
         Returns:
-            Tensor of shape (..., n_params) in latent space.
+            Tensor of shape (..., param_dim) in latent space (free params only).
         """
+        # Handle case with no free parameters
+        if self._param_dim == 0:
+            batch_shape = x.shape[:-1] if x.dim() > 1 else (1,)
+            return torch.zeros(*batch_shape, 0, dtype=x.dtype, device=x.device)
+
         if mode == "standard_normal":
             # Try direct transforms first (avoids CDF precision issues at tails)
             transformed = []
             use_direct = True
             for i, prior in enumerate(self.priors):
                 dist_type, *params = prior
+                if dist_type == "fixed":
+                    continue  # Skip fixed parameters
                 z_i = self._to_standard_normal(x[..., i], dist_type, *params)
                 if z_i is None:
                     use_direct = False
@@ -169,10 +219,12 @@ class ProductPrior(TransformedPrior):
                 return torch.stack(transformed, dim=-1)
             # Fall through to CDF approach if any distribution lacks direct transform
 
-        # Map target distributions to [0, 1] (CDF approach)
+        # Map target distributions to [0, 1] (CDF approach, free params only)
         uniform = []
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
+            if dist_type == "fixed":
+                continue  # Skip fixed parameters
             u_i = self._inverse_transform(x[..., i], dist_type, *params)
             uniform.append(u_i)
 
@@ -198,15 +250,20 @@ class ProductPrior(TransformedPrior):
             batch_size: Number of samples.
 
         Returns:
-            numpy array of shape (batch_size, n_params) in target distribution space.
+            numpy array of shape (batch_size, full_param_dim) in target distribution space.
         """
-        # Sample uniform and transform to target
-        u = torch.rand(batch_size, self.param_dim, dtype=torch.float64)
+        # Sample uniform for free parameters only
+        u = torch.rand(batch_size, self._param_dim, dtype=torch.float64)
 
         transformed = []
+        u_idx = 0
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
-            x_i = self._forward_transform(u[..., i], dist_type, *params)
+            if dist_type == "fixed":
+                x_i = torch.full((batch_size,), params[0], dtype=torch.float64)
+            else:
+                x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
+                u_idx += 1
             transformed.append(x_i)
 
         return torch.stack(transformed, dim=-1).numpy()
