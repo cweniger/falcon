@@ -395,11 +395,14 @@ class LossBasedEstimator(StepwiseEstimator):
 
         debug("Building model...")
 
+        # Infer dtype from theta (preserves numpy precision, e.g. float64)
+        dtype = theta.dtype
+
         # Create embedding and infer condition_dim
-        embedding = instantiate_embedding(self.embedding_config).to(self.device)
+        embedding = instantiate_embedding(self.embedding_config).to(self.device, dtype=dtype)
         embedding.eval()
         with torch.no_grad():
-            conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+            conditions_device = {k: v.to(self.device, dtype=dtype) for k, v in conditions.items()}
             embedded = embedding(conditions_device)
 
         # Create posterior with inferred dimensions
@@ -407,20 +410,20 @@ class LossBasedEstimator(StepwiseEstimator):
             param_dim=theta.shape[1],
             condition_dim=embedded.shape[1],
             **self.posterior_config,
-        ).to(self.device)
+        ).to(self.device, dtype=dtype)
 
-        debug("Model built.")
+        debug(f"Model built with dtype={dtype}.")
         return EmbeddedPosterior(embedding, posterior)
 
     # ==================== Loss Computation ====================
 
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute loss from batch."""
-        # Extract and convert to tensors
-        theta = torch.from_numpy(batch[self.theta_key]).to(self.device, dtype=torch.float32)
+        # Extract and convert to tensors (dtype inferred from numpy arrays)
+        theta = torch.from_numpy(batch[self.theta_key]).to(self.device)
         theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
         conditions = {
-            k: torch.from_numpy(batch[k]).to(self.device, dtype=torch.float32)
+            k: torch.from_numpy(batch[k]).to(self.device)
             for k in self.condition_keys if k in batch
         }
 
@@ -549,7 +552,7 @@ class LossBasedEstimator(StepwiseEstimator):
         assert conditions, "Conditions must be provided for sampling."
 
         conditions_device = {
-            k: v.to(self.device, dtype=torch.float32).expand(num_samples, *v.shape[1:])
+            k: v.to(self.device).expand(num_samples, *v.shape[1:])
             for k, v in conditions.items()
         }
 

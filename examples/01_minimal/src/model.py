@@ -68,3 +68,10 @@ class E(torch.nn.Module):
         x = self.norm(x).float()
         falcon.log({"norm_post": x.std().item()})
         return x
+
+
+class E_identity(torch.nn.Module):
+    """Pass-through embedding that returns input unchanged."""
+
+    def forward(self, x):
+        return x

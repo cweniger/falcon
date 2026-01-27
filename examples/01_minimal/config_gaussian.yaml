@@ -45,11 +45,12 @@ paths:
 # -----------------------------------------------------------------------------
 buffer:
   min_training_samples: 4096
-  max_training_samples: 32768
+  max_training_samples: 4096
   validation_window_size: 256
-  resample_batch_size: 128
+  resample_batch_size: 4096
   keep_resampling: true
-  resample_interval: 10
+  resample_interval: 5
+  store_fraction: 0.0
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
@@ -68,7 +69,7 @@ graph:
     estimator:
       _target_: falcon.contrib.SNPE_gaussian
       loop:
-        num_epochs: 300
+        num_epochs: 100
         batch_size: 128
         early_stop_patience: 32
       network:
@@ -78,7 +79,7 @@ graph:
         min_var: 1.0e-6               # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency
       embedding:                      # Embedding is now at top level
-        _target_: model.E
+        _target_: model.E_identity
         _input_: [x]
       optimizer:
         lr: 0.01
@@ -90,7 +91,7 @@ graph:
         log_ratio_threshold: -20.0
 
     ray:
-      num_gpus: 0
+      num_gpus: 1
 
   x:
     parents: [z]

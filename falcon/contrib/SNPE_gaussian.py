@@ -32,6 +32,7 @@ from falcon.contrib.stepwise_estimator import (
     OptimizerConfig,
     InferenceConfig,
 )
+from falcon.core.logger import log, debug, info, warning, error
 
 
 # ==================== Configuration Dataclasses ====================
@@ -44,7 +45,7 @@ class GaussianPosteriorConfig:
     hidden_dim: int = 128
     num_layers: int = 3
     momentum: float = 0.01
-    min_var: float = 1e-6
+    min_var: float = 1e-20
     eig_update_freq: int = 1
 
 
@@ -185,6 +186,11 @@ class GaussianPosterior(nn.Module):
             batch_output_std = self._compute_std(theta, self._output_mean)
             self._input_std.lerp_(batch_input_std, self.momentum)
             self._output_std.lerp_(batch_output_std, self.momentum)
+
+            debug("conditions mean: "+ str(self._input_mean))
+            debug("conditions std: "+ str(self._input_std))
+            debug("theta mean: "+ str(self._output_mean))
+            debug("theta std: "+ str(self._output_std))
 
     def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update residual covariance and eigendecomposition."""
