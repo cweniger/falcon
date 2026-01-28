@@ -1,5 +1,5 @@
 """
-Example model implementation for adaptive.py
+Example model implementation for 01_minimal.
 This file contains model-specific components that can be referenced via _target_
 """
 
@@ -31,27 +31,6 @@ class Simulate:
         return x.numpy()  # Return numpy array
 
 
-class ExpPlusNoise:
-    """Exponential simulator: x = exp(z) + noise.
-
-    Creates non-trivial correlations in the posterior when z has multiple dimensions.
-
-    Args:
-        sigma: Standard deviation of observation noise (default: 1e-6)
-    """
-
-    def __init__(self, sigma: float = 1e-6):
-        self.sigma = sigma
-
-    def simulate_batch(self, batch_size, z):
-        z = torch.tensor(z)
-        x = torch.exp(z) + torch.randn_like(z) * self.sigma
-        falcon.log({"x_mean": x.mean().item()})
-        falcon.log({"x_std": x.std().item()})
-        return x.numpy()
-
-
-
 class E(torch.nn.Module):
     """Embedding network with online normalization.
 
@@ -67,11 +46,4 @@ class E(torch.nn.Module):
         falcon.log({"norm_pre": x.std().item()})
         x = self.norm(x).float()
         falcon.log({"norm_post": x.std().item()})
-        return x
-
-
-class E_identity(torch.nn.Module):
-    """Pass-through embedding that returns input unchanged."""
-
-    def forward(self, x):
         return x

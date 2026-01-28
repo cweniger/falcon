@@ -1,21 +1,23 @@
 # =============================================================================
-# Falcon Example Configuration: 01_minimal (Gaussian Posterior)
+# Falcon Example Configuration: 04_gaussian
 # -----------------------------------------------------------------------------
 # Demonstrates SNPE_gaussian with an exponential forward model:
 #   x = exp(z) + noise
 #
 # SNPE_gaussian uses a full covariance Gaussian posterior instead of
 # normalizing flows. Benefits:
-#   • Simpler and more interpretable
-#   • Covariance matrix shows parameter correlations directly
-#   • Eigenvalue-based tempered sampling for exploration
+#   - Simpler and more interpretable
+#   - Covariance matrix shows parameter correlations directly
+#   - Eigenvalue-based tempered sampling for exploration
 #
 # Prior: z ~ N(0, I)
-# Ground truth: z = [-5, 0, 5] (5σ in tails), x = exp(z) ≈ [0.0067, 1.0, 148.4]
+# Ground truth: z = [-5, 0, 5] (5 sigma in tails), x = exp(z) = [0.0067, 1.0, 148.4]
 #
 # Usage:
-#   falcon launch --config-name config_gaussian --run-dir outputs/gaussian_run
-#   falcon sample posterior --run-dir outputs/gaussian_run
+#   cd examples/04_gaussian
+#   python data/gen_mock_data.py          # Generate mock observation data
+#   falcon launch --run-dir outputs/run   # Train the model
+#   falcon sample posterior --run-dir outputs/run  # Generate posterior samples
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -25,7 +27,7 @@ logging:
   wandb:
     enabled: false
     project: falcon_examples
-    group: 01_minimal_gaussian
+    group: 04_gaussian
     dir: ${run_dir}
   local:
     enabled: true
@@ -78,7 +80,7 @@ graph:
         momentum: 0.01                # EMA momentum for running statistics
         min_var: 1.0e-6               # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency
-      embedding:                      # Embedding is now at top level
+      embedding:
         _target_: model.E_identity
         _input_: [x]
       optimizer:
@@ -98,7 +100,7 @@ graph:
     simulator:
       _target_: model.ExpPlusNoise
       sigma: 1.0e-6
-    observed: "./data/mock_data_exp.npz['x']"
+    observed: "./data/mock_data.npz['x']"
 
 # -----------------------------------------------------------------------------
 # Sampling configuration
