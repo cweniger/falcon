@@ -187,6 +187,7 @@ class GaussianPosterior(nn.Module):
             batch_output_std = self._compute_std(theta, self._output_mean)
             self._input_std.lerp_(batch_input_std, self.momentum)
             self._output_std.lerp_(batch_output_std, self.momentum)
+            self._output_std.clamp_(max=1.0)  # posterior std can't exceed prior std (latent space is N(0,I))
 
             debug("conditions mean: "+ str(self._input_mean))
             debug("conditions std: "+ str(self._input_std))
