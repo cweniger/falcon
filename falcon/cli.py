@@ -15,6 +15,8 @@ import sys
 import os
 from pathlib import Path
 
+BANNER = "falcon \x1b[2m\u2581\u2582\u2585\u2587\u2588\u2586\u2583\u2582\u2581\u2581\x1b[0m"
+
 
 def render_git_graph_simple(graph):
     """Render a simplified git-log style ASCII graph visualization.
@@ -474,18 +476,28 @@ def sample_mode(cfg, sample_type: str) -> None:
 
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
-    """Monitor mode: Launch the TUI monitor for training runs."""
-    import subprocess
-    subprocess.run([
-        sys.executable, "-m", "falcon.monitor",
-        "--address", address,
-        "--refresh", str(refresh),
-    ])
+    """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
+    from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    if not init_ray_for_monitor(address):
+        sys.exit(1)
+    app = FalconMonitor(ray_address=address, refresh_interval=refresh)
+    app.run()
+
+
+def _get_version():
+    """Get package version string."""
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        return version("falcon")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
 
 
 def parse_args():
     """Parse falcon CLI arguments."""
     if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph", "monitor"]:
+        print(f"{BANNER} v{_get_version()}")
+        print()
         print("Usage:")
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
@@ -497,7 +509,7 @@ def parse_args():
         print("  --config-name FILE   Config file (default: config.yaml)")
         print("  --address ADDR       Ray cluster address (default: auto)")
         print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
-        sys.exit(1)
+        sys.exit(0)
 
     mode = sys.argv[1]
     args = sys.argv[2:]
@@ -556,6 +568,9 @@ def parse_args():
 def main():
     """Main CLI entry point."""
     mode, sample_type, config_name, run_dir, overrides, address, refresh = parse_args()
+
+    # Print startup banner
+    print(f"{BANNER} v{_get_version()}", flush=True)
 
     # Monitor mode doesn't need config loading
     if mode == "monitor":
