@@ -657,11 +657,11 @@ def main():
                     z_val = sample_from_model(best_model, y_obs, cfg.val_samples, cfg.gamma, device)
                 x_val = simulate(z_val, cfg.sigma_obs, n_bins)
 
-                # Evaluate the CURRENT model on these samples
+                # Evaluate the CURRENT model on these samples (for proposal update decision)
                 val_loss = -model.log_prob(z_val, x_val).mean().item()
 
-                # Compute residual covariance on validation samples
-                mean_val = model.forward_mean(x_val)
+                # Compute residual covariance using the BEST model
+                mean_val = best_model.forward_mean(x_val)
                 residuals_val = z_val - mean_val
                 n_val = residuals_val.shape[0]
                 val_cov = (residuals_val.T @ residuals_val) / max(n_val - 1, 1)

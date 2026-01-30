@@ -12,6 +12,7 @@ Embedding modes (--embedding):
   none    - no embedding, MLP takes raw n_bins input
   linear  - single linear layer: n_bins -> n_features
   fft     - real FFT, then learned gating to n_features
+  fft_norm - orthonormalized FFT with frequency cutoff, gated to n_features
   gated   - wide linear layer with learned sigmoid gates + L1 penalty
 
 Analytic posterior:
@@ -58,10 +59,12 @@ def get_config():
                         help='Disable input/output diagonal whitening')
     # Embedding
     parser.add_argument('--embedding', type=str, default='none',
-                        choices=['none', 'linear', 'fft', 'gated'],
-                        help='Embedding mode: none, linear, fft, or gated')
+                        choices=['none', 'linear', 'fft', 'fft_norm', 'gated'],
+                        help='Embedding mode: none, linear, fft, fft_norm, or gated')
     parser.add_argument('--n_features', type=int, default=20,
                         help='Embedding output dimension (input to MLP)')
+    parser.add_argument('--n_modes', type=int, default=0,
+                        help='fft_norm: number of frequency modes to keep (0 = all)')
     parser.add_argument('--gate_l1', type=float, default=0.01,
                         help='Gated: L1 penalty weight on gate activations')
     # Learning rates
@@ -182,6 +185,28 @@ class FFTEmbedding(nn.Module):
         return self.gate(fft_real)
 
 
+class FFTNormEmbedding(nn.Module):
+    """Orthonormalized FFT with frequency cutoff, gated to n_features.
+
+    Uses norm='ortho' so coefficients are O(1) regardless of n_bins.
+    Keeps only the first n_modes frequency modes (low-pass), stacks
+    real and imaginary parts, then linearly maps to n_features.
+    """
+
+    def __init__(self, n_bins, n_features, n_modes=0):
+        super().__init__()
+        max_modes = n_bins // 2 + 1
+        self.n_modes = min(n_modes, max_modes) if n_modes > 0 else max_modes
+        n_fft = 2 * self.n_modes
+        self.gate = nn.Linear(n_fft, n_features)
+
+    def forward(self, x):
+        fft_c = torch.fft.rfft(x, dim=-1, norm='ortho')
+        fft_c = fft_c[..., :self.n_modes]
+        fft_real = torch.cat([fft_c.real, fft_c.imag], dim=-1)
+        return self.gate(fft_real)
+
+
 class GatedEmbedding(nn.Module):
     """Wide linear layer with learned sigmoid gates.
 
@@ -206,7 +231,7 @@ class GatedEmbedding(nn.Module):
         return torch.sigmoid(self.gate_logits).sum()
 
 
-def build_embedding(mode, n_bins, n_features):
+def build_embedding(mode, n_bins, n_features, n_modes=0):
     """Build embedding network. Returns (module, output_dim).
 
     For PCA, output_dim is n_bins initially (updated after finalize).
@@ -218,6 +243,8 @@ def build_embedding(mode, n_bins, n_features):
         return LinearEmbedding(n_bins, n_features), n_features
     elif mode == 'fft':
         return FFTEmbedding(n_bins, n_features), n_features
+    elif mode == 'fft_norm':
+        return FFTNormEmbedding(n_bins, n_features, n_modes=n_modes), n_features
     elif mode == 'gated':
         return GatedEmbedding(n_bins, n_features), n_features
     else:
@@ -251,7 +278,7 @@ class NormalizedMLP(nn.Module):
 
     def __init__(self, obs_dim, hidden_dim=128, num_layers=3, activation='relu',
                  momentum=0.01, min_var=1e-20, eig_update_freq=1, zero_init=False,
-                 embedding_mode='none', n_features=20, no_whiten=False):
+                 embedding_mode='none', n_features=20, no_whiten=False, n_modes=0):
         super().__init__()
         self.ndim = D
         self.obs_dim = obs_dim
@@ -259,7 +286,7 @@ class NormalizedMLP(nn.Module):
         self.no_whiten = no_whiten
 
         # Embedding: obs_dim -> emb_dim
-        self.embedding, emb_dim = build_embedding(embedding_mode, obs_dim, n_features)
+        self.embedding, emb_dim = build_embedding(embedding_mode, obs_dim, n_features, n_modes=n_modes)
 
         # MLP: emb_dim -> D
         self.net = build_mlp(emb_dim, hidden_dim, D, num_layers, activation)
@@ -439,6 +466,7 @@ def main():
         embedding_mode=cfg.embedding,
         n_features=cfg.n_features,
         no_whiten=cfg.no_whiten,
+        n_modes=cfg.n_modes,
     ).double().to(device)
 
     gate_l1 = cfg.gate_l1 if cfg.embedding == 'gated' else 0.0
