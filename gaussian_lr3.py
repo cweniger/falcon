@@ -12,6 +12,7 @@ Embedding modes (--embedding):
   none    - no embedding, MLP takes raw n_bins input
   linear  - single linear layer: n_bins -> n_features
   fft     - real FFT, then learned gating to n_features
+  gated   - wide linear layer with learned sigmoid gates + L1 penalty
 
 Analytic posterior:
   Sigma_post = (Phi^T Phi / sigma^2 + I)^{-1}
@@ -53,12 +54,16 @@ def get_config():
     parser.add_argument('--momentum', type=float, default=0.01)
     parser.add_argument('--zero_init', action='store_true',
                         help='Initialize first MLP layer weights and bias to zero')
+    parser.add_argument('--no_whiten', action='store_true',
+                        help='Disable input/output diagonal whitening')
     # Embedding
     parser.add_argument('--embedding', type=str, default='none',
-                        choices=['none', 'linear', 'fft'],
-                        help='Embedding mode: none, linear, or fft')
+                        choices=['none', 'linear', 'fft', 'gated'],
+                        help='Embedding mode: none, linear, fft, or gated')
     parser.add_argument('--n_features', type=int, default=20,
                         help='Embedding output dimension (input to MLP)')
+    parser.add_argument('--gate_l1', type=float, default=0.01,
+                        help='Gated: L1 penalty weight on gate activations')
     # Learning rates
     parser.add_argument('--lr1', type=float, default=0.01)
     parser.add_argument('--lr2', type=float, default=0.001)
@@ -177,14 +182,44 @@ class FFTEmbedding(nn.Module):
         return self.gate(fft_real)
 
 
+class GatedEmbedding(nn.Module):
+    """Wide linear layer with learned sigmoid gates.
+
+    Projects n_bins -> n_features via a linear layer, then element-wise
+    multiplies by sigmoid(gate_logits). Gates are initialized to zero
+    (sigmoid(0) = 0.5). L1 penalty on gate activations encourages the
+    network to shut off unused dimensions.
+    """
+
+    def __init__(self, n_bins, n_features):
+        super().__init__()
+        self.linear = nn.Linear(n_bins, n_features)
+        self.gate_logits = nn.Parameter(torch.zeros(n_features))
+
+    def forward(self, x):
+        h = self.linear(x)
+        gates = torch.sigmoid(self.gate_logits)
+        return h * gates
+
+    def gate_l1(self):
+        """L1 penalty on gate activations (for adding to loss)."""
+        return torch.sigmoid(self.gate_logits).sum()
+
+
 def build_embedding(mode, n_bins, n_features):
-    """Build embedding network. Returns (module, output_dim)."""
+    """Build embedding network. Returns (module, output_dim).
+
+    For PCA, output_dim is n_bins initially (updated after finalize).
+    For others, output_dim is known at construction time.
+    """
     if mode == 'none':
         return nn.Identity(), n_bins
     elif mode == 'linear':
         return LinearEmbedding(n_bins, n_features), n_features
     elif mode == 'fft':
         return FFTEmbedding(n_bins, n_features), n_features
+    elif mode == 'gated':
+        return GatedEmbedding(n_bins, n_features), n_features
     else:
         raise ValueError(f"Unknown embedding mode: {mode}")
 
@@ -216,10 +251,12 @@ class NormalizedMLP(nn.Module):
 
     def __init__(self, obs_dim, hidden_dim=128, num_layers=3, activation='relu',
                  momentum=0.01, min_var=1e-20, eig_update_freq=1, zero_init=False,
-                 embedding_mode='none', n_features=20):
+                 embedding_mode='none', n_features=20, no_whiten=False):
         super().__init__()
         self.ndim = D
         self.obs_dim = obs_dim
+        self.embedding_mode = embedding_mode
+        self.no_whiten = no_whiten
 
         # Embedding: obs_dim -> emb_dim
         self.embedding, emb_dim = build_embedding(embedding_mode, obs_dim, n_features)
@@ -284,10 +321,19 @@ class NormalizedMLP(nn.Module):
 
     def forward_mean(self, x):
         """Predict mean: whiten -> embed -> MLP -> de-whiten."""
+        if self.no_whiten:
+            h = self.embedding(x)
+            return self.net(h)
         x_white = (x - self.input_mean) / self.input_std
         h = self.embedding(x_white)
         r = self.net(h)  # (batch, D)
         return self.output_mean + self.output_std * r
+
+    def gate_l1_loss(self):
+        """Return gate L1 penalty (0 if not using gated embedding)."""
+        if self.embedding_mode == 'gated':
+            return self.embedding.gate_l1()
+        return 0.0
 
     def get_covariance(self):
         """Get the full DxD covariance matrix."""
@@ -392,10 +438,15 @@ def main():
         zero_init=cfg.zero_init,
         embedding_mode=cfg.embedding,
         n_features=cfg.n_features,
+        no_whiten=cfg.no_whiten,
     ).double().to(device)
+
+    gate_l1 = cfg.gate_l1 if cfg.embedding == 'gated' else 0.0
 
     emb_desc = cfg.embedding if cfg.embedding != 'none' else 'none (raw input)'
     print(f"Embedding: {emb_desc}" + (f", n_features={cfg.n_features}" if cfg.embedding != 'none' else ''))
+    if cfg.embedding == 'gated':
+        print(f"  Gate L1 penalty: {gate_l1}")
     print(f"Diagonal normalization with eigenvalue-based tempered likelihood proposal")
     print(f"Eigendecomposition update frequency: {cfg.eig_update_freq}")
     print()
@@ -422,7 +473,7 @@ def main():
         x_batch = simulate(z_batch, cfg.sigma_obs, n_bins)
         model.update_stats(z_batch, x_batch)
         optimizer.zero_grad()
-        loss = -model.log_prob(z_batch, x_batch).mean()
+        loss = -model.log_prob(z_batch, x_batch).mean() + gate_l1 * model.gate_l1_loss()
         loss.backward()
         optimizer.step()
         model.update_covariance(z_batch, x_batch)
@@ -441,7 +492,7 @@ def main():
 
         model.update_stats(z_batch, x_batch)
         optimizer.zero_grad()
-        loss = -model.log_prob(z_batch, x_batch).mean()
+        loss = -model.log_prob(z_batch, x_batch).mean() + gate_l1 * model.gate_l1_loss()
         loss.backward()
         optimizer.step()
         model.update_covariance(z_batch, x_batch)
@@ -501,6 +552,12 @@ def main():
     print()
     print(f"  RMSE(sample_mean - analytic_mean): {sample_mean_error:.6f}")
     print(f"  Std ratio (sample/analytic): {sample_std_ratio.mean():.4f} +/- {sample_std_ratio.std():.4f}")
+
+    if cfg.embedding == 'gated':
+        gates = torch.sigmoid(model.embedding.gate_logits).detach().cpu().numpy()
+        active = (gates > 0.5).sum()
+        print(f"\nGated embedding: {active}/{len(gates)} gates active (>0.5)")
+        print(f"  Gate values (sorted): {np.sort(gates)[::-1].tolist()}")
 
     print(f"\nTime: {elapsed:.2f}s")
 
