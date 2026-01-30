@@ -117,3 +117,6 @@ runs/
 #*.npz
 
 *.out
+
+# MkDocs build output
+site/
