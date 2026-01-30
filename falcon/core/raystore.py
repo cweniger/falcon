@@ -229,6 +229,50 @@ class DatasetManagerActor:
     def release_samples(self, ids):
         self.ref_counts[ids] -= 1
 
+    def checkout_refs(self, status, keys, max_samples=0, already_cached_ids=None):
+        """Select samples by status, return refs for uncached samples only.
+
+        Increments ref_counts for new (uncached) sample IDs. The caller
+        resolves these from the object store, then calls release_refs().
+
+        Args:
+            status: SampleStatus or list of SampleStatus
+            keys: list of key names to retrieve
+            max_samples: 0 = all samples, >0 = random subset
+            already_cached_ids: np.array of IDs the caller already has cached.
+                Only refs for IDs NOT in this set are returned.
+
+        Returns:
+            dict with:
+                '_active_ids': np.array of all currently active sample IDs
+                '_new_ids': np.array of IDs that need to be fetched
+                key: [ObjectRef, ...] for _new_ids only
+        """
+        if isinstance(status, list):
+            ids = np.where(np.isin(self.status, status))[0]
+        else:
+            ids = np.where(self.status == status)[0]
+        if max_samples > 0 and len(ids) > max_samples:
+            ids = np.random.choice(ids, size=max_samples, replace=False)
+
+        if already_cached_ids is not None and len(already_cached_ids) > 0:
+            new_ids = ids[~np.isin(ids, already_cached_ids)]
+        else:
+            new_ids = ids
+
+        if len(new_ids) > 0:
+            self.ref_counts[new_ids] += 1
+
+        result = {'_active_ids': ids, '_new_ids': new_ids}
+        for key in keys:
+            result[key] = [self.ray_store[i][key] for i in new_ids]
+        return result
+
+    def release_refs(self, ids):
+        """Decrement ref_counts after caller has resolved data."""
+        if ids is not None and len(ids) > 0:
+            self.ref_counts[ids] -= 1
+
     def deactivate(self, ids):
         # Get subset of ids that are currently TRAINING, only these can be disfavoured
         ids = np.array(ids)
@@ -483,6 +527,70 @@ def batch_collate_fn(dataset_manager):
     return collate
 
 
+class CachedDataLoader:
+    """CPU-cached dataloader for fast training access.
+
+    Created once, holds samples as numpy arrays in a local dict.
+    sync() pulls current state from DatasetManager via decentralized
+    object store access. sample_batch() returns a Batch object.
+    """
+
+    def __init__(self, dataset_manager, keys, sample_status, max_cache_samples=0):
+        self.dataset_manager = dataset_manager
+        self.keys = keys
+        self.sample_status = sample_status
+        self.max_cache_samples = max_cache_samples
+        self.cache = {}  # sample_id -> {key: np.ndarray}
+        self.active_ids = np.array([], dtype=int)
+        self._id_list = []
+        self.count = 0
+
+    def sync(self):
+        """Incremental sync: only fetch new samples, evict stale ones."""
+        checkout = ray.get(
+            self.dataset_manager.checkout_refs.remote(
+                self.sample_status, self.keys, self.max_cache_samples,
+                already_cached_ids=self.active_ids,
+            )
+        )
+        active_ids = checkout['_active_ids']
+        new_ids = checkout['_new_ids']
+
+        if len(new_ids) > 0:
+            new_data = {}
+            for key in self.keys:
+                refs = checkout[key]
+                arrays = ray.get(refs)
+                new_data[key] = arrays
+
+            for i, sid in enumerate(new_ids):
+                self.cache[sid] = {key: new_data[key][i] for key in self.keys}
+
+            ray.get(self.dataset_manager.release_refs.remote(new_ids))
+
+        # Evict samples no longer active
+        active_set = set(active_ids.tolist())
+        stale = [sid for sid in self.cache if sid not in active_set]
+        for sid in stale:
+            del self.cache[sid]
+
+        self.active_ids = active_ids
+        self._id_list = list(active_set & set(self.cache.keys()))
+        self.count = len(self._id_list)
+
+    def sample_batch(self, batch_size):
+        """Random mini-batch as a Batch object."""
+        idx = np.random.randint(0, self.count, size=batch_size)
+        selected = [self._id_list[i] for i in idx]
+
+        ids = np.array(selected)
+        data = {
+            key: np.stack([self.cache[sid][key] for sid in selected])
+            for key in self.keys
+        }
+        return Batch(ids, data, self.dataset_manager)
+
+
 class BufferView:
     """View into the sample buffer for estimator training.
 
@@ -543,6 +651,22 @@ class BufferView:
         )
         collate_fn = batch_collate_fn(self._dataset_manager)
         return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
+
+    def cached_loader(self, keys, max_cache_samples=0):
+        """Create a CPU-cached training dataloader (created once, syncs periodically)."""
+        return CachedDataLoader(
+            self._dataset_manager, keys,
+            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
+            max_cache_samples=max_cache_samples,
+        )
+
+    def cached_val_loader(self, keys, max_cache_samples=0):
+        """Create a CPU-cached validation dataloader."""
+        return CachedDataLoader(
+            self._dataset_manager, keys,
+            sample_status=SampleStatus.VALIDATION,
+            max_cache_samples=max_cache_samples,
+        )
 
     def get_stats(self):
         """Get buffer statistics (total samples, etc.)."""

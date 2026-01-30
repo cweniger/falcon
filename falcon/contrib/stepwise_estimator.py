@@ -27,6 +27,8 @@ class TrainingLoopConfig:
     batch_size: int = 128
     early_stop_patience: int = 16
     reset_network_after_pause: bool = False
+    cache_sync_every: int = 0  # 0 = disable cached dataloader, N = sync every N epochs
+    max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
 
 
 @dataclass
@@ -169,9 +171,15 @@ class StepwiseEstimator(BaseEstimator):
             buffer: BufferView providing access to training/validation data
         """
         cfg = self.loop_config
-
-        # Setup dataloaders
         keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+
+        if cfg.cache_sync_every > 0:
+            await self._train_cached(buffer, cfg, keys)
+        else:
+            await self._train_original(buffer, cfg, keys)
+
+    async def _train_original(self, buffer, cfg, keys) -> None:
+        """Original epoch-based training with DataLoader."""
         dataloader_train = buffer.train_loader(keys, batch_size=cfg.batch_size)
         dataloader_val = buffer.val_loader(keys, batch_size=cfg.batch_size)
 
@@ -190,23 +198,19 @@ class StepwiseEstimator(BaseEstimator):
             for batch in dataloader_train:
                 metrics = self.train_step(batch)
 
-                # Accumulate metrics
                 for k, v in metrics.items():
                     train_metrics_sum[k] = train_metrics_sum.get(k, 0) + v
                 num_train_batches += 1
 
-                # Log step-level metrics
                 for k, v in metrics.items():
                     log({f"train:{k}": v})
 
-                # Async yield and pause check
                 await asyncio.sleep(0)
                 await self._pause_event.wait()
                 if self._break_flag:
                     self._break_flag = False
                     break
 
-            # Average training metrics
             train_metrics_avg = {
                 k: v / num_train_batches for k, v in train_metrics_sum.items()
             }
@@ -219,7 +223,6 @@ class StepwiseEstimator(BaseEstimator):
                 metrics = self.val_step(batch)
                 batch_size = len(batch)
 
-                # Accumulate (sum for later averaging)
                 for k, v in metrics.items():
                     val_metrics_sum[k] = val_metrics_sum.get(k, 0) + v * batch_size
                 num_val_samples += batch_size
@@ -230,19 +233,15 @@ class StepwiseEstimator(BaseEstimator):
                     self._break_flag = False
                     break
 
-            # Average validation metrics
             val_metrics_avg = {
                 k: v / num_val_samples for k, v in val_metrics_sum.items()
             }
 
-            # Log validation metrics
             for k, v in val_metrics_avg.items():
                 log({f"val:{k}": v})
 
-            # === End of epoch hook ===
             self.on_epoch_end(epoch, val_metrics_avg)
 
-            # === Early stopping ===
             val_loss = val_metrics_avg.get("loss", float("inf"))
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
@@ -250,7 +249,101 @@ class StepwiseEstimator(BaseEstimator):
             else:
                 epochs_no_improve += 1
 
-            # Record history
+            self._record_epoch_history(
+                epoch, train_metrics_avg, val_metrics_avg, t0, buffer
+            )
+
+            if epochs_no_improve >= cfg.early_stop_patience:
+                info("Early stopping triggered.")
+                break
+
+            await self._pause_event.wait()
+            if self._terminated:
+                break
+
+    async def _train_cached(self, buffer, cfg, keys) -> None:
+        """Epoch-based training with CPU-cached dataloader."""
+        train_cache = buffer.cached_loader(keys, max_cache_samples=cfg.max_cache_samples)
+        val_cache = buffer.cached_val_loader(keys, max_cache_samples=0)
+
+        train_cache.sync()
+        val_cache.sync()
+
+        best_val_loss = float("inf")
+        epochs_no_improve = 0
+        t0 = time.perf_counter()
+
+        for epoch in range(cfg.num_epochs):
+            info(f"Epoch {epoch+1}/{cfg.num_epochs}")
+            log({"epoch": epoch + 1})
+
+            # Periodic incremental sync
+            if epoch > 0 and epoch % cfg.cache_sync_every == 0:
+                train_cache.sync()
+                val_cache.sync()
+
+            # === Training phase ===
+            steps_per_epoch = max(1, train_cache.count // cfg.batch_size)
+            train_metrics_sum = {}
+            num_train_batches = 0
+
+            for step in range(steps_per_epoch):
+                batch = train_cache.sample_batch(cfg.batch_size)
+                metrics = self.train_step(batch)
+
+                for k, v in metrics.items():
+                    train_metrics_sum[k] = train_metrics_sum.get(k, 0) + v
+                num_train_batches += 1
+
+                for k, v in metrics.items():
+                    log({f"train:{k}": v})
+
+                await asyncio.sleep(0)
+                await self._pause_event.wait()
+                if self._break_flag:
+                    self._break_flag = False
+                    break
+
+            train_metrics_avg = {
+                k: v / num_train_batches for k, v in train_metrics_sum.items()
+            }
+
+            # === Validation phase ===
+            val_metrics_sum = {}
+            num_val_samples = 0
+            val_steps = max(1, val_cache.count // cfg.batch_size)
+
+            for step in range(val_steps):
+                batch = val_cache.sample_batch(cfg.batch_size)
+                metrics = self.val_step(batch)
+                bs = len(batch)
+
+                for k, v in metrics.items():
+                    val_metrics_sum[k] = val_metrics_sum.get(k, 0) + v * bs
+                num_val_samples += bs
+
+                await asyncio.sleep(0)
+                await self._pause_event.wait()
+                if self._break_flag:
+                    self._break_flag = False
+                    break
+
+            val_metrics_avg = {
+                k: v / num_val_samples for k, v in val_metrics_sum.items()
+            }
+
+            for k, v in val_metrics_avg.items():
+                log({f"val:{k}": v})
+
+            self.on_epoch_end(epoch, val_metrics_avg)
+
+            val_loss = val_metrics_avg.get("loss", float("inf"))
+            if val_loss < best_val_loss:
+                best_val_loss = val_loss
+                epochs_no_improve = 0
+            else:
+                epochs_no_improve += 1
+
             self._record_epoch_history(
                 epoch, train_metrics_avg, val_metrics_avg, t0, buffer
             )
