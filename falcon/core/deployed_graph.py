@@ -433,7 +433,10 @@ class DeployedGraph:
                 ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
 
         # Initial data generation
+        num_initial = ray.get(dataset_manager.num_initial_samples.remote())
+        info(f"Generating {num_initial} initial samples...")
         ray.get(dataset_manager.initialize_samples.remote(self))
+        info(f"Initial samples ready")
 
         info("")
         info("Starting analysis. Monitor with: falcon monitor")
