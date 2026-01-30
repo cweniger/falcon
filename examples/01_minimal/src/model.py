@@ -1,10 +1,11 @@
 """
-Example model implementation for adaptive.py
+Example model implementation for 01_minimal.
 This file contains model-specific components that can be referenced via _target_
 """
 
 import torch
 import falcon
+import numpy as np
 
 # Global configuration
 SIGMA = 0.1  # Hardcoded sigma value

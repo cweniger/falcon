@@ -1,12 +1,21 @@
 """Stepwise estimator with epoch-based training loop."""
 
 import asyncio
+import copy
 import time
 from abc import abstractmethod
-from dataclasses import dataclass
-from typing import Dict, List, Optional
+from dataclasses import dataclass, field
+from pathlib import Path
+from typing import Any, Callable, Dict, List, Optional, Tuple, Type
+
+import numpy as np
+import torch
+import torch.nn as nn
+from torch.optim import AdamW
+from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.base_estimator import BaseEstimator
+from falcon.core.utils import RVBatch
 from falcon.core.logger import log, debug, info, warning, error
 
 
@@ -18,6 +27,25 @@ class TrainingLoopConfig:
     batch_size: int = 128
     early_stop_patience: int = 16
     reset_network_after_pause: bool = False
+
+
+@dataclass
+class OptimizerConfig:
+    """Optimizer and scheduler parameters."""
+
+    lr: float = 1e-3
+    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
+    lr_decay_factor: float = 0.1
+    scheduler_patience: int = 8
+
+
+@dataclass
+class InferenceConfig:
+    """Inference and sampling parameters."""
+
+    gamma: float = 0.5
+    discard_samples: bool = False
+    log_ratio_threshold: float = -20.0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -270,3 +298,341 @@ class StepwiseEstimator(BaseEstimator):
         """Terminate training loop."""
         self._terminated = True
         self._pause_event.set()
+
+
+# ==================== LossBasedEstimator ====================
+
+
+class LossBasedEstimator(StepwiseEstimator):
+    """Complete estimator that trains a posterior model by minimizing loss.
+
+    This class provides a full implementation with:
+    - Model creation from posterior_cls + embedding
+    - Batch extraction and loss computation
+    - Sampling (prior, posterior, proposal)
+    - Save/load with init tensor storage
+
+    The posterior must implement the Posterior contract:
+        - loss(theta, conditions) -> Tensor
+        - sample(conditions, gamma=None) -> Tensor
+        - log_prob(theta, conditions) -> Tensor
+    """
+
+    def __init__(
+        self,
+        simulator_instance,
+        posterior_cls: Type[nn.Module],
+        embedding_config: dict,
+        loop_config: TrainingLoopConfig,
+        optimizer_config: OptimizerConfig,
+        inference_config: InferenceConfig,
+        posterior_config: Optional[dict] = None,
+        theta_key: Optional[str] = None,
+        condition_keys: Optional[List[str]] = None,
+        device: Optional[str] = None,
+        latent_mode: Optional[str] = None,
+    ):
+        """
+        Args:
+            latent_mode: Transform theta to latent space for training/sampling.
+                None: work directly in theta space (default)
+                "standard_normal": transform to N(0,I) via simulator.inverse/forward
+                "hypercube": transform to hypercube via simulator.inverse/forward
+        """
+        super().__init__(
+            simulator_instance=simulator_instance,
+            loop_config=loop_config,
+            theta_key=theta_key,
+            condition_keys=condition_keys,
+        )
+
+        self.posterior_cls = posterior_cls
+        self.embedding_config = embedding_config
+        self.posterior_config = posterior_config or {}
+        self.optimizer_config = optimizer_config
+        self.inference_config = inference_config
+        self.latent_mode = latent_mode
+
+        # Device setup
+        if device:
+            self.device = torch.device(device)
+        else:
+            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+            debug(f"Auto-detected device: {self.device}")
+
+        # Model (initialized lazily)
+        self._model: Optional[nn.Module] = None
+        self._best_model: Optional[nn.Module] = None
+        self._best_loss: float = float("inf")
+
+        # Stored tensors from first batch (for model rebuild on load)
+        self._init_theta: Optional[torch.Tensor] = None
+        self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
+
+        # Optimizer/scheduler (initialized lazily)
+        self._optimizer: Optional[AdamW] = None
+        self._scheduler: Optional[ReduceLROnPlateau] = None
+
+    # ==================== Model Creation ====================
+
+    def _build_model(self, batch) -> nn.Module:
+        """Build model from first batch."""
+        # Import here to avoid circular imports
+        from falcon.contrib.embedded_posterior import EmbeddedPosterior
+        from falcon.contrib.torch_embedding import instantiate_embedding
+
+        # Extract and store tensors for reload
+        self._init_theta = torch.from_numpy(batch[self.theta_key])
+        self._init_conditions = {
+            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+        }
+        return self._create_model(self._init_theta, self._init_conditions)
+
+    def _create_model(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> nn.Module:
+        """Create EmbeddedPosterior from theta and conditions tensors."""
+        from falcon.contrib.embedded_posterior import EmbeddedPosterior
+        from falcon.contrib.torch_embedding import instantiate_embedding
+
+        debug("Building model...")
+
+        # Infer dtype from theta (preserves numpy precision, e.g. float64)
+        dtype = theta.dtype
+
+        # Transform theta to latent space if mode specified (matches _compute_loss)
+        if self.latent_mode is not None:
+            theta = self.simulator_instance.inverse(theta, mode=self.latent_mode)
+
+        # Create embedding and infer condition_dim
+        embedding = instantiate_embedding(self.embedding_config).to(self.device, dtype=dtype)
+        embedding.eval()
+        with torch.no_grad():
+            conditions_device = {k: v.to(self.device, dtype=dtype) for k, v in conditions.items()}
+            embedded = embedding(conditions_device)
+
+        # Create posterior with inferred dimensions (uses latent dim if transformed)
+        posterior = self.posterior_cls(
+            param_dim=theta.shape[1],
+            condition_dim=embedded.shape[1],
+            **self.posterior_config,
+        ).to(self.device, dtype=dtype)
+
+        debug(f"Model built with param_dim={theta.shape[1]}, dtype={dtype}.")
+        return EmbeddedPosterior(embedding, posterior)
+
+    # ==================== Loss Computation ====================
+
+    def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
+        """Compute loss from batch."""
+        # Extract and convert to tensors (dtype inferred from numpy arrays)
+        theta = torch.from_numpy(batch[self.theta_key]).to(self.device)
+        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        conditions = {
+            k: torch.from_numpy(batch[k]).to(self.device)
+            for k in self.condition_keys if k in batch
+        }
+
+        # Transform theta to latent space if mode specified
+        if self.latent_mode is not None:
+            theta = self.simulator_instance.inverse(theta, mode=self.latent_mode)
+
+        # Record sample IDs for history
+        ts = time.time()
+        self.history["train_ids"].extend((ts, id) for id in batch._ids.tolist())
+
+        # Compute loss in latent space
+        loss = self._model.loss(theta, conditions)
+
+        # Discard low-probability samples
+        if self.inference_config.discard_samples:
+            with torch.no_grad():
+                self._model.eval()
+                log_prob = self._model.log_prob(theta, conditions).cpu()
+            log_ratio = log_prob - theta_logprob
+            discard_mask = log_ratio < self.inference_config.log_ratio_threshold
+            batch.discard(discard_mask)
+
+        return loss, {"loss": loss.item()}
+
+    # ==================== Model Cloning ====================
+
+    def _clone_model(self, model: nn.Module) -> nn.Module:
+        """Create independent copy of model with cloned tensors."""
+        cloned = copy.deepcopy(model)
+        cloned.load_state_dict(
+            {k: v.clone() for k, v in model.state_dict().items()}
+        )
+        return cloned
+
+    def _update_best_model(self) -> None:
+        """Update best model weights from current model."""
+        self._best_model.load_state_dict(
+            {k: v.clone() for k, v in self._model.state_dict().items()}
+        )
+
+    # ==================== Training Implementation ====================
+
+    def _initialize_model(self, batch) -> None:
+        """Initialize model, best model, optimizer, and scheduler."""
+        debug("Initializing model...")
+
+        # Build model
+        self._model = self._build_model(batch)
+
+        # Clone for best model
+        self._best_model = self._clone_model(self._model)
+
+        # Setup optimizer and scheduler
+        cfg = self.optimizer_config
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
+        self._scheduler = ReduceLROnPlateau(
+            self._optimizer,
+            mode="min",
+            factor=cfg.lr_decay_factor,
+            patience=cfg.scheduler_patience,
+        )
+
+        self.networks_initialized = True
+        debug("Model initialized.")
+
+    def train_step(self, batch) -> Dict[str, float]:
+        """Execute one training step with gradient update."""
+        if not self.networks_initialized:
+            self._initialize_model(batch)
+
+        self._optimizer.zero_grad()
+        self._model.train()
+        loss, metrics = self._compute_loss(batch)
+        loss.backward()
+        self._optimizer.step()
+
+        return metrics
+
+    def val_step(self, batch) -> Dict[str, float]:
+        """Execute one validation step without gradients."""
+        with torch.no_grad():
+            self._model.eval()
+            _, metrics = self._compute_loss(batch)
+        return metrics
+
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+        """Update best model and LR scheduler."""
+        val_loss = val_metrics.get("loss", float("inf"))
+
+        if val_loss < self._best_loss:
+            self._best_loss = val_loss
+            self._update_best_model()
+            log({"checkpoint": epoch})
+
+        self._scheduler.step(val_loss)
+        log({"lr": self._optimizer.param_groups[0]["lr"]})
+
+    # ==================== Inference Model Access ====================
+
+    @property
+    def inference_model(self) -> Optional[nn.Module]:
+        """Get the best model for inference. Returns None if not yet trained."""
+        return self._best_model
+
+    @property
+    def has_trained_model(self) -> bool:
+        """Check if a trained model is available for inference."""
+        return self._best_model is not None
+
+    # ==================== Sampling Methods ====================
+
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from the prior distribution."""
+        if conditions:
+            raise ValueError("Conditions are not supported for sample_prior.")
+        samples = self.simulator_instance.simulate_batch(num_samples)
+        logprob = np.zeros(num_samples)
+        return RVBatch(samples, logprob=logprob)
+
+    def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> RVBatch:
+        """Internal sampling using inference model. Falls back to prior if not trained."""
+        if not self.has_trained_model:
+            return self.sample_prior(num_samples)
+
+        assert conditions, "Conditions must be provided for sampling."
+
+        conditions_device = {
+            k: v.to(self.device).expand(num_samples, *v.shape[1:])
+            for k, v in conditions.items()
+        }
+
+        model = self.inference_model
+        with torch.no_grad():
+            model.eval()
+            samples = model.sample(conditions_device, gamma=gamma)
+            logprob = model.log_prob(samples, conditions_device)
+
+            # Transform samples from latent space back to theta space
+            if self.latent_mode is not None:
+                samples = self.simulator_instance.forward(samples, mode=self.latent_mode)
+
+        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
+
+    def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from the posterior distribution q(theta|x)."""
+        return self._sample(num_samples, conditions, gamma=None)
+
+    def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+        """Sample from widened proposal distribution for adaptive resampling."""
+        result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
+        log({
+            "sample_proposal:mean": result.value.mean(),
+            "sample_proposal:std": result.value.std(),
+            "sample_proposal:logprob": result.logprob.mean(),
+        })
+        return result
+
+    # ==================== Save/Load ====================
+
+    def save(self, node_dir) -> None:
+        """Save model state."""
+        node_dir = Path(node_dir)
+
+        if not self.networks_initialized:
+            raise RuntimeError("Cannot save: networks not initialized.")
+
+        # Save model weights
+        torch.save(self._best_model.state_dict(), node_dir / "model.pth")
+
+        # Save init tensors for model rebuild
+        torch.save({"theta": self._init_theta, "conditions": self._init_conditions},
+                   node_dir / "init_tensors.pth")
+
+        # Save history
+        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
+        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
+        torch.save(self.history["epochs"], node_dir / "epochs.pth")
+        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
+        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
+        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
+        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
+
+    def load(self, node_dir) -> None:
+        """Load model state."""
+        node_dir = Path(node_dir)
+
+        # Load init tensors and rebuild model
+        data = torch.load(node_dir / "init_tensors.pth")
+        self._init_theta = data["theta"]
+        self._init_conditions = data["conditions"]
+        self._model = self._create_model(self._init_theta, self._init_conditions)
+        self._best_model = self._clone_model(self._model)
+
+        # Setup optimizer and scheduler
+        cfg = self.optimizer_config
+        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
+        self._scheduler = ReduceLROnPlateau(
+            self._optimizer,
+            mode="min",
+            factor=cfg.lr_decay_factor,
+            patience=cfg.scheduler_patience,
+        )
+
+        self.networks_initialized = True
+
+        # Load weights
+        self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))

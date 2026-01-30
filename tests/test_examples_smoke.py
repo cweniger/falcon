@@ -29,6 +29,10 @@ EXAMPLE_CONFIGS = [
             "graph.z2.ray.num_gpus=0",
         ],
     ),
+    # 04_gaussian: SNPE_gaussian with exponential forward model (needs GPU override)
+    ("04_gaussian", "config.yaml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    # 05_linear_regression: SNPE_gaussian with linear regression (needs GPU override)
+    ("05_linear_regression", "config.yaml", ["graph.theta.estimator.loop.num_epochs=2", "graph.theta.ray.num_gpus=0"]),
 ]
 
 

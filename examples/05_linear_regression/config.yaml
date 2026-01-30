@@ -1,0 +1,118 @@
+# =============================================================================
+# Falcon Example Configuration: 05_linear_regression
+# -----------------------------------------------------------------------------
+# Linear regression with sinusoidal basis functions:
+#   y = Phi @ theta + noise
+#   Phi[i, k] = sin((k+1) * x_i), x in [0, 2*pi), 100 bins, 10 parameters
+#
+# Prior: theta ~ N(0, I)
+# Noise: N(0, sigma^2 * I), sigma = 0.1
+#
+# This example has an analytic posterior for validation:
+#   Sigma_post = (Phi^T Phi / sigma^2 + I)^{-1}
+#   mu_post    = Sigma_post @ Phi^T @ y / sigma^2
+#
+# Usage:
+#   cd examples/05_linear_regression
+#   python data/gen_mock_data.py
+#   falcon launch --run-dir outputs/run
+#   falcon sample posterior --run-dir outputs/run
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Logging configuration
+# -----------------------------------------------------------------------------
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 05_linear_regression
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+# -----------------------------------------------------------------------------
+# Directory configuration
+# -----------------------------------------------------------------------------
+paths:
+  import: "./src"
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
+
+# -----------------------------------------------------------------------------
+# Training buffer parameters
+# -----------------------------------------------------------------------------
+buffer:
+  min_training_samples: 4096
+  max_training_samples: 4096
+  validation_window_size: 256
+  resample_batch_size: 512
+  keep_resampling: true
+  resample_interval: 1
+  store_fraction: 0.0
+
+# -----------------------------------------------------------------------------
+# Graph definition using SNPE_gaussian estimator
+# -----------------------------------------------------------------------------
+graph:
+  theta:
+    evidence: [y]
+
+    simulator:
+      _target_: falcon.contrib.ProductPrior
+      priors:
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+
+    estimator:
+      _target_: falcon.contrib.SNPE_gaussian
+      loop:
+        num_epochs: 1000
+        batch_size: 128
+        early_stop_patience: 32
+      network:
+        hidden_dim: 128
+        num_layers: 3
+        momentum: 0.10
+        min_var: 1.0e-20
+        eig_update_freq: 1
+      embedding:
+        _target_: model.E_linear
+        _input_: [y]
+        n_bins: 100
+        n_out: 20
+      optimizer:
+        lr: 0.01
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 1.0
+        discard_samples: false
+        log_ratio_threshold: -20.0
+
+    ray:
+      num_gpus: 1
+
+  y:
+    parents: [theta]
+    simulator:
+      _target_: model.LinearSimulator
+      sigma: 0.1
+    observed: "./data/mock_data.npz['y']"
+
+# -----------------------------------------------------------------------------
+# Sampling configuration
+# -----------------------------------------------------------------------------
+sample:
+  posterior:
+    n: 1000

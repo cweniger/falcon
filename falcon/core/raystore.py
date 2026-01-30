@@ -2,7 +2,8 @@ import numpy as np
 import asyncio
 import sys
 from enum import IntEnum
-import joblib
+from datetime import datetime
+from pathlib import Path
 
 import ray
 from torch.utils.data import IterableDataset
@@ -117,7 +118,8 @@ class DatasetManagerActor:
         resample_interval=5,
         initial_samples_path=None,
         keep_resampling=True,
-        dump_config=None,
+        buffer_path=None,
+        store_fraction=0.0,
         log_config=None,
     ):
         self.max_training_samples = max_training_samples
@@ -127,7 +129,12 @@ class DatasetManagerActor:
         self.keep_resampling = keep_resampling
         self.resample_interval = resample_interval
         self.initial_samples_path = initial_samples_path
-        self.dump_config = dump_config
+        self.buffer_path = Path(buffer_path) if buffer_path else None
+        self.store_fraction = store_fraction
+
+        # NPZ storage state
+        self._sample_counter = 0
+        self._session_dir = None
 
         # Store
         self.ray_store = []
@@ -256,15 +263,36 @@ class DatasetManagerActor:
             "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
         }, prefix="buffer")
 
-        self.dump_store()
+        self.dump_store(data)
 
-    def dump_store(self):
-        # FIXME: Samples should be stored within single file, and reasonable directory
-        if self.dump_config and self.dump_config.enabled:
-            dump_path = self.dump_config.path.format(step=len(self.ray_store))
-            sample_data = self.ray_store[-1]
-            sample_data = {key: ray.get(value) for key, value in sample_data.items()}
-            joblib.dump(sample_data, dump_path)
+    def _save_sample(self, sample: dict):
+        """Save a single sample as NPZ file."""
+        if self._session_dir is None:
+            # Create session directory on first write
+            timestamp = datetime.now().strftime("%y%m%d-%H%M")
+            self._session_dir = self.buffer_path / timestamp
+            self._session_dir.mkdir(parents=True, exist_ok=True)
+
+        # Use counter for filename (0-indexed from session start)
+        sample_idx = self._sample_counter - 1  # counter already incremented
+        sample_path = self._session_dir / f"{sample_idx:06d}.npz"
+        np.savez(sample_path, **sample)
+
+    def dump_store(self, samples: list):
+        """Store samples to disk based on store_fraction.
+
+        Args:
+            samples: List of sample dicts to potentially store
+        """
+        if self.store_fraction <= 0 or self.buffer_path is None:
+            return
+
+        interval = max(1, int(1.0 / self.store_fraction))
+
+        for sample in samples:
+            self._sample_counter += 1
+            if self._sample_counter % interval == 0:
+                self._save_sample(sample)
 
     def garbage_collect_tombstones(self):
         """
@@ -529,7 +557,8 @@ def get_ray_dataset_manager(
     resample_interval=5,
     initial_samples_path=None,
     keep_resampling=True,
-    dump_config=None,
+    buffer_path=None,
+    store_fraction=0.0,
     log_config=None,
 ):
     dataset_manager_actor = DatasetManagerActor.remote(
@@ -540,7 +569,8 @@ def get_ray_dataset_manager(
         resample_interval=resample_interval,
         keep_resampling=keep_resampling,
         initial_samples_path=initial_samples_path,
-        dump_config=dump_config,
+        buffer_path=buffer_path,
+        store_fraction=store_fraction,
         log_config=log_config,
     )
     dataset_manager = DatasetManager(dataset_manager_actor)

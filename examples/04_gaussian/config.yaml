@@ -1,0 +1,110 @@
+# =============================================================================
+# Falcon Example Configuration: 04_gaussian
+# -----------------------------------------------------------------------------
+# Demonstrates SNPE_gaussian with an exponential forward model:
+#   x = exp(z) + noise
+#
+# SNPE_gaussian uses a full covariance Gaussian posterior instead of
+# normalizing flows. Benefits:
+#   - Simpler and more interpretable
+#   - Covariance matrix shows parameter correlations directly
+#   - Eigenvalue-based tempered sampling for exploration
+#
+# Prior: z ~ N(0, I)
+# Ground truth: z = [-5, 0, 5] (5 sigma in tails), x = exp(z) = [0.0067, 1.0, 148.4]
+#
+# Usage:
+#   cd examples/04_gaussian
+#   python data/gen_mock_data.py          # Generate mock observation data
+#   falcon launch --run-dir outputs/run   # Train the model
+#   falcon sample posterior --run-dir outputs/run  # Generate posterior samples
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Logging configuration
+# -----------------------------------------------------------------------------
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 04_gaussian
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+# -----------------------------------------------------------------------------
+# Directory configuration
+# -----------------------------------------------------------------------------
+paths:
+  import: "./src"
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
+
+# -----------------------------------------------------------------------------
+# Training buffer parameters
+# -----------------------------------------------------------------------------
+buffer:
+  min_training_samples: 4096
+  max_training_samples: 4096
+  validation_window_size: 256
+  resample_batch_size: 512
+  keep_resampling: true
+  resample_interval: 1
+  store_fraction: 0.0
+
+# -----------------------------------------------------------------------------
+# Graph definition using SNPE_gaussian estimator
+# -----------------------------------------------------------------------------
+graph:
+  z:
+    evidence: [x]
+
+    simulator:
+      _target_: falcon.contrib.ProductPrior
+      priors:
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+
+    estimator:
+      _target_: falcon.contrib.SNPE_gaussian
+      loop:
+        num_epochs: 1000
+        batch_size: 128
+        early_stop_patience: 32
+      network:
+        hidden_dim: 128               # MLP hidden layer dimension
+        num_layers: 3                 # Number of hidden layers
+        momentum: 0.10                # EMA momentum for running statistics
+        min_var: 1.0e-20               # Minimum variance for numerical stability
+        eig_update_freq: 1            # Eigendecomposition update frequency
+      embedding:
+        _target_: model.E_identity
+        _input_: [x]
+      optimizer:
+        lr: 0.01
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 1.0                   # Tempering for proposal sampling
+        discard_samples: false
+        log_ratio_threshold: -20.0
+
+    ray:
+      num_gpus: 1
+
+  x:
+    parents: [z]
+    simulator:
+      _target_: model.ExpPlusNoise
+      sigma: 1.0e-6
+    observed: "./data/mock_data.npz['x']"
+
+# -----------------------------------------------------------------------------
+# Sampling configuration
+# -----------------------------------------------------------------------------
+sample:
+  posterior:
+    n: 1000
