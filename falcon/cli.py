@@ -14,22 +14,6 @@ Run directory behavior:
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
-import numpy as np
-import torch
-import ray
-
-from omegaconf import OmegaConf, DictConfig
-
-import falcon
-from falcon.core.utils import load_observations
-from falcon.core.graph import create_graph_from_config
-from falcon.core.logger import Logger, set_logger, info
-from falcon.core.run_name import generate_run_dir
-
-
-# Register custom OmegaConf resolvers
-OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
 
 def render_git_graph_simple(graph):
@@ -165,8 +149,10 @@ def render_git_graph_simple(graph):
     return '\n'.join(l for l in lines if l.strip())
 
 
-def graph_mode(cfg: DictConfig) -> None:
+def graph_mode(cfg) -> None:
     """Graph mode: Display the graph structure."""
+    from falcon.core.graph import create_graph_from_config
+
     # Create graph from config (no Ray needed)
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
 
@@ -180,7 +166,7 @@ def graph_mode(cfg: DictConfig) -> None:
     print(f"Nodes: {len(graph.node_list)} | Observed: {', '.join(observed)} | Estimators: {', '.join(with_estimator)}")
 
 
-def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None) -> DictConfig:
+def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None):
     """Load config with run_dir injection and resume support.
 
     Args:
@@ -191,6 +177,13 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     Returns:
         Resolved config with run_dir injected
     """
+    from datetime import datetime
+    from omegaconf import OmegaConf
+    from falcon.core.run_name import generate_run_dir
+
+    # Register custom OmegaConf resolvers
+    OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
+
     # 1. Default run_dir if not specified
     if run_dir is None:
         run_dir = generate_run_dir()
@@ -242,8 +235,15 @@ class TeeOutput:
         self.log.close()
 
 
-def launch_mode(cfg: DictConfig) -> None:
+def launch_mode(cfg) -> None:
     """Launch mode: Full training and inference pipeline."""
+    import torch
+    import ray
+    from omegaconf import OmegaConf
+    import falcon
+    from falcon.core.graph import create_graph_from_config
+    from falcon.core.logger import Logger, set_logger, info
+
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
 
@@ -343,12 +343,21 @@ def launch_mode(cfg: DictConfig) -> None:
     driver_logger.shutdown()
 
 
-def sample_mode(cfg: DictConfig, sample_type: str) -> None:
+def sample_mode(cfg, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies.
 
     Samples are saved as individual NPZ files in:
         {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
     """
+    from datetime import datetime
+    import numpy as np
+    import torch
+    import ray
+    from omegaconf import OmegaConf
+    import falcon
+    from falcon.core.graph import create_graph_from_config
+    from falcon.core.logger import Logger, set_logger, info
+
     # Setup logging config
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
