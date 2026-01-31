@@ -6,8 +6,6 @@ from datetime import datetime
 from pathlib import Path
 
 import ray
-from torch.utils.data import IterableDataset
-
 from falcon.core.logger import Logger, set_logger, log, error
 
 
@@ -218,18 +216,6 @@ class DatasetManagerActor:
             ids_to_tombstone = ids_training[: -self.max_training_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-    def get_samples_by_status(self, status):
-        if isinstance(status, list):
-            status_ids = np.where(np.isin(self.status, status))[0]
-        else:
-            status_ids = np.where(self.status == status)[0]
-        status_samples = [self.ray_store[i] for i in status_ids]
-        self.ref_counts[status_ids] += 1
-        return status_samples, status_ids
-
-    def release_samples(self, ids):
-        self.ref_counts[ids] -= 1
-
     def checkout_refs(self, status, keys, max_samples=0, already_cached_ids=None):
         """Select samples by status, return refs for uncached samples only.
 
@@ -356,36 +342,6 @@ class DatasetManagerActor:
                 self.status[i] = SampleStatus.DELETED
                 self.ray_store[i] = None
 
-    def get_train_dataset_view(self, keys, filter=None):
-        dataset_train = DatasetView(
-            keys,
-            filter=filter,
-            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
-        )
-        return dataset_train
-
-    def get_val_dataset_view(self, keys, filter=None):
-        dataset_val = DatasetView(
-            keys, filter=filter, sample_status=SampleStatus.VALIDATION
-        )
-        return dataset_val
-
-    def get_train_batch_dataset_view(self, keys, filter=None):
-        """Get training dataset view that yields dictionaries for Batch collation."""
-        dataset_train = BatchDatasetView(
-            keys,
-            filter=filter,
-            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
-        )
-        return dataset_train
-
-    def get_val_batch_dataset_view(self, keys, filter=None):
-        """Get validation dataset view that yields dictionaries for Batch collation."""
-        dataset_val = BatchDatasetView(
-            keys, filter=filter, sample_status=SampleStatus.VALIDATION
-        )
-        return dataset_val
-
     def load_initial_samples(self):
         """Load pre-existing samples from disk. Returns number loaded."""
         if self.initial_samples_path is not None:
@@ -398,126 +354,6 @@ class DatasetManagerActor:
     # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
         pass
-
-
-class DatasetView(IterableDataset):
-    """Dataset view that yields samples from the Ray store.
-
-    Supports two output formats:
-    - "dict": yields (index, {key: value, ...}) - for Batch collation
-    - "tuple": yields (index, value1, value2, ...) - legacy format
-
-    Args:
-        keylist: List of keys to retrieve from each sample
-        filter: Optional function to transform samples
-        sample_status: Status of samples to retrieve (TRAINING, VALIDATION, etc.)
-        output_format: "dict" (default) or "tuple"
-    """
-
-    def __init__(
-        self,
-        keylist,
-        filter=None,
-        sample_status=SampleStatus.TRAINING,
-        output_format="dict",
-    ):
-        self.dataset_manager = ray.get_actor("DatasetManager")
-        self.keylist = keylist
-        self.filter = filter
-        self.sample_status = sample_status
-        self.output_format = output_format
-
-    def _log_dataset_size(self, size):
-        """Log dataset size based on sample status."""
-        # Determine prefix based on sample status
-        if self.sample_status == SampleStatus.VALIDATION:
-            prefix = "dataset:validation"
-        elif isinstance(self.sample_status, list):
-            prefix = "dataset:training"
-        else:
-            prefix = "dataset"
-        log({"active_size": size}, prefix=prefix)
-
-    def __iter__(self):
-        active_samples, active_ids = ray.get(
-            self.dataset_manager.get_samples_by_status.remote(self.sample_status)
-        )
-
-        perm = np.random.permutation(len(active_samples))
-        self._log_dataset_size(len(perm))
-
-        for i in perm:
-            try:
-                sample_dict = {
-                    key: ray.get(active_samples[i][key]) for key in self.keylist
-                }
-            except Exception as e:
-                error(f"Dataset retrieval error: {e}")
-                continue
-
-            if self.filter is not None:
-                sample_dict = self.filter(sample_dict)
-
-            index = active_ids[i]
-            if self.output_format == "tuple":
-                yield (index, *[sample_dict[k] for k in self.keylist])
-            else:
-                yield (index, sample_dict)
-
-        ray.get(self.dataset_manager.release_samples.remote(active_ids))
-
-
-# Backwards compatibility alias
-BatchDatasetView = DatasetView
-
-
-def batch_collate_fn(dataset_manager):
-    """Create a collate function that produces Batch objects.
-
-    Args:
-        dataset_manager: Ray actor for dataset management (for discard functionality)
-
-    Returns:
-        Collate function for use with PyTorch DataLoader
-
-    Example:
-        dataset = BatchDatasetView(keys, sample_status=SampleStatus.TRAINING)
-        dataloader = DataLoader(
-            dataset,
-            batch_size=128,
-            collate_fn=batch_collate_fn(dataset_manager)
-        )
-        for batch in dataloader:
-            theta = batch['z']
-            batch.discard(mask)
-    """
-
-    def collate(samples):
-        """Collate samples into a Batch object with numpy arrays.
-
-        Returns numpy arrays for framework-agnostic data transport.
-        Estimators convert to their framework (PyTorch, JAX, etc.) as needed.
-        """
-        # samples is list of (index, {key: value}) tuples
-        ids = np.array([s[0] for s in samples])
-
-        # Stack values for each key as numpy arrays
-        data = {}
-        keys = samples[0][1].keys()
-        for key in keys:
-            values = [s[1][key] for s in samples]
-            if isinstance(values[0], np.ndarray):
-                data[key] = np.stack(values)
-            elif hasattr(values[0], 'numpy'):
-                # torch tensor - convert to numpy
-                data[key] = np.stack([v.numpy() for v in values])
-            else:
-                # Scalar or other - convert to numpy array
-                data[key] = np.array(values)
-
-        return Batch(ids, data, dataset_manager)
-
-    return collate
 
 
 class CachedDataLoader:
@@ -587,14 +423,17 @@ class CachedDataLoader:
 class BufferView:
     """View into the sample buffer for estimator training.
 
-    Passed to estimator.train() - estimator requests dataloaders with specific keys.
+    Passed to estimator.train() - estimator requests cached dataloaders with specific keys.
 
     Example:
         async def train(self, buffer: BufferView):
             keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
-            train_loader = buffer.train_loader(keys, batch_size=self.batch_size)
-            val_loader = buffer.val_loader(keys, batch_size=self.batch_size)
-            for batch in train_loader:
+            train_cache = buffer.cached_loader(keys)
+            val_cache = buffer.cached_val_loader(keys)
+            train_cache.sync()
+            val_cache.sync()
+            for step in range(steps_per_epoch):
+                batch = train_cache.sample_batch(batch_size)
                 theta = batch[self.theta_key]
                 ...
     """
@@ -606,44 +445,6 @@ class BufferView:
             dataset_manager: Ray actor for dataset management
         """
         self._dataset_manager = dataset_manager
-
-    def train_loader(self, keys: list, batch_size: int = 128, **kwargs):
-        """Create training dataloader with specified keys.
-
-        Args:
-            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
-            batch_size: Batch size for dataloader
-            **kwargs: Additional arguments passed to DataLoader
-
-        Returns:
-            DataLoader yielding Batch objects with numpy arrays
-        """
-        from torch.utils.data import DataLoader
-
-        dataset = ray.get(
-            self._dataset_manager.get_train_batch_dataset_view.remote(keys, filter=None)
-        )
-        collate_fn = batch_collate_fn(self._dataset_manager)
-        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
-
-    def val_loader(self, keys: list, batch_size: int = 128, **kwargs):
-        """Create validation dataloader with specified keys.
-
-        Args:
-            keys: List of keys to include in batches (e.g., ['z', 'z.logprob', 'x'])
-            batch_size: Batch size for dataloader
-            **kwargs: Additional arguments passed to DataLoader
-
-        Returns:
-            DataLoader yielding Batch objects with numpy arrays
-        """
-        from torch.utils.data import DataLoader
-
-        dataset = ray.get(
-            self._dataset_manager.get_val_batch_dataset_view.remote(keys, filter=None)
-        )
-        collate_fn = batch_collate_fn(self._dataset_manager)
-        return DataLoader(dataset, batch_size=batch_size, collate_fn=collate_fn, **kwargs)
 
     def cached_loader(self, keys, max_cache_samples=0):
         """Create a CPU-cached training dataloader (created once, syncs periodically)."""
