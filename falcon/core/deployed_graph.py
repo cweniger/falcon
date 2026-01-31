@@ -86,6 +86,11 @@ class MultiplexNodeWrapper:
         return []
 
 
+# TODO: NodeWrapper is async solely because train() needs to yield for pause/resume.
+# This makes every ray.get inside the actor (e.g. CachedDataLoader) block the event
+# loop and trigger warnings. Consider splitting into separate training and sampling
+# actors — sampling reads best_model which is independent of training state, so it
+# doesn't actually need to pause training. Weight sync on validation improvement only.
 @ray.remote
 class NodeWrapper:
     def __init__(self, node, graph, model_path=None, log_config=None):
