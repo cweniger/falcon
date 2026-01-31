@@ -432,11 +432,18 @@ class DeployedGraph:
             if graph_path is not None:
                 ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
 
-        # Initial data generation
+        # Initial data generation: load from disk first, then generate remaining
+        # on the driver (consistent with resample loop, avoids ray.get in async actor)
         num_initial = ray.get(dataset_manager.num_initial_samples.remote())
-        info(f"Generating {num_initial} initial samples...")
-        ray.get(dataset_manager.initialize_samples.remote(self))
-        info(f"Initial samples ready")
+        num_loaded = ray.get(dataset_manager.load_initial_samples.remote())
+        num_to_generate = num_initial - num_loaded
+        if num_to_generate > 0:
+            info(f"Generating {num_to_generate} initial samples...")
+            samples_batched = self.sample(num_to_generate)
+            n = samples_batched[list(samples_batched.keys())[0]].shape[0]
+            samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
+            ray.get(dataset_manager.append.remote(samples))
+        info(f"Initial samples ready ({num_loaded} loaded, {num_to_generate} generated)")
 
         info("")
         info("Starting analysis. Monitor with: falcon monitor")

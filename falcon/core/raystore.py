@@ -92,8 +92,9 @@ class DatasetManager:
     def __init__(self, dataset_manager_actor):
         self.dataset_manager_actor = dataset_manager_actor
 
-    def initialize_samples(self, deployed_graph):
-        ray.get(self.dataset_manager_actor.initialize_samples.remote(deployed_graph))
+    def load_initial_samples(self):
+        """Load pre-existing samples from disk. Returns number loaded."""
+        return ray.get(self.dataset_manager_actor.load_initial_samples.remote())
 
 
 class SampleStatus(IntEnum):
@@ -385,22 +386,14 @@ class DatasetManagerActor:
         )
         return dataset_val
 
-    def initialize_samples(self, deployed_graph):
-        num_initial_samples = self.num_initial_samples()
+    def load_initial_samples(self):
+        """Load pre-existing samples from disk. Returns number loaded."""
         if self.initial_samples_path is not None:
-            # Load initial samples from the specified path (already list of dicts)
             initial_samples = joblib.load(self.initial_samples_path)
-            num_loaded_samples = len(initial_samples)
-            if num_loaded_samples > 0:
+            if len(initial_samples) > 0:
                 self.append(initial_samples)
-        else:
-            num_loaded_samples = 0
-        if num_initial_samples > num_loaded_samples:
-            # deployed_graph.sample() returns dict-of-arrays, convert to list-of-dicts
-            samples_batched = deployed_graph.sample(num_initial_samples - num_loaded_samples)
-            n = samples_batched[list(samples_batched.keys())[0]].shape[0]
-            samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
-            self.append(samples)
+            return len(initial_samples)
+        return 0
 
     # TODO: Currently not used anywhere, add tests?
     def shutdown(self):
