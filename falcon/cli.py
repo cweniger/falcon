@@ -270,8 +270,10 @@ def launch_mode(cfg) -> None:
 
     # Initialize Ray
     ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
-    ray_init_args.setdefault("log_to_driver", False)
+    # Forward actor stdout/stderr to driver when console.level is set,
+    # so node log messages and crash output reach the terminal.
+    console_level = logging_cfg.get("console", {}).get("level", None)
+    ray_init_args.setdefault("log_to_driver", console_level is not None)
     # Use a fixed namespace so falcon monitor can discover actors
     ray_init_args.setdefault("namespace", "falcon")
     # Suppress Ray startup banner
@@ -368,8 +370,9 @@ def sample_mode(cfg, sample_type: str) -> None:
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
     set_logger(driver_logger)
     ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
-    ray_init_args.setdefault("log_to_driver", False)
+    # Forward actor stdout/stderr to driver when console.level is set
+    console_level = logging_cfg.get("console", {}).get("level", None)
+    ray_init_args.setdefault("log_to_driver", console_level is not None)
     # Use a fixed namespace for consistency
     ray_init_args.setdefault("namespace", "falcon")
     ray.init(**ray_init_args)
