@@ -17,7 +17,7 @@ import numpy as np
 import falcon
 
 
-def design_matrix(n_bins=100, n_params=10):
+def design_matrix(n_bins=20000, n_params=10):
     """Build design matrix Phi[i, k] = sin((k+1) * x_i)."""
     x = np.linspace(0, 2 * np.pi, n_bins, endpoint=False)
     Phi = np.column_stack([np.sin((k + 1) * x) for k in range(n_params)])
@@ -33,7 +33,7 @@ class LinearSimulator:
         n_params: Number of parameters (default: 10)
     """
 
-    def __init__(self, sigma: float = 1.0, n_bins: int = 20000, n_params: int = 10):
+    def __init__(self, sigma: float = 0.1, n_bins: int = 20000, n_params: int = 10):
         self.sigma = sigma
         Phi, _ = design_matrix(n_bins, n_params)
         self.Phi = torch.tensor(Phi)
