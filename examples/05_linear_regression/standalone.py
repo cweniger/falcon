@@ -55,8 +55,8 @@ def get_config():
     # Training
     parser.add_argument('--num_steps', type=int, default=10000)
     parser.add_argument('--batch_size', type=int, default=128)
-    parser.add_argument('--num_warmup', type=int, default=1000)
-    parser.add_argument('--gamma', type=float, default=1.0)
+    parser.add_argument('--num_warmup', type=int, default=1)
+    parser.add_argument('--gamma', type=float, default=0.2)
     parser.add_argument('--seed', type=int, default=42)
     parser.add_argument('--device', type=str, default='cuda')
     parser.add_argument('--print_every', type=int, default=100)
@@ -65,7 +65,7 @@ def get_config():
     # Buffer
     parser.add_argument('--buffer_size', type=int, default=4096,
                         help='Number of (theta, y) pairs in the simulation buffer')
-    parser.add_argument('--replacement_fraction', type=float, default=1.0,
+    parser.add_argument('--replacement_fraction', type=float, default=0.1,
                         help='Fraction of batch_size samples replaced per step. '
                              '1.0 = replace batch_size samples/step (each sample used ~once). '
                              '1/batch_size = replace 1 sample/step (heavy reuse).')
@@ -81,7 +81,7 @@ def get_config():
     parser.add_argument('--hidden_dim', type=int, default=128)
     parser.add_argument('--num_layers', type=int, default=3)
     parser.add_argument('--activation', type=str, default='relu', choices=['relu', 'tanh', 'gelu'])
-    parser.add_argument('--momentum', type=float, default=0.01)
+    parser.add_argument('--momentum', type=float, default=0.1)
     parser.add_argument('--zero_init', action='store_true',
                         help='Initialize first MLP layer weights and bias to zero')
     parser.add_argument('--no_whiten', action='store_true',
@@ -90,9 +90,9 @@ def get_config():
     parser.add_argument('--embedding', type=str, default='fft_norm',
                         choices=['none', 'linear', 'fft', 'fft_norm', 'gated'],
                         help='Embedding mode: none, linear, fft, fft_norm, or gated')
-    parser.add_argument('--n_features', type=int, default=20,
+    parser.add_argument('--n_features', type=int, default=128,
                         help='Embedding output dimension (input to MLP)')
-    parser.add_argument('--n_modes', type=int, default=0,
+    parser.add_argument('--n_modes', type=int, default=128,
                         help='fft_norm: number of frequency modes to keep (0 = all)')
     parser.add_argument('--gate_l1', type=float, default=0.01,
                         help='Gated: L1 penalty weight on gate activations')
@@ -100,8 +100,8 @@ def get_config():
     parser.add_argument('--lr1', type=float, default=0.01)
     parser.add_argument('--lr2', type=float, default=0.001)
     # Optimizer
-    parser.add_argument('--beta1', type=float, default=0.5)
-    parser.add_argument('--beta2', type=float, default=0.5)
+    parser.add_argument('--beta1', type=float, default=0.9)
+    parser.add_argument('--beta2', type=float, default=0.9)
     parser.add_argument('--weight_decay', type=float, default=0.0)
     # Covariance
     parser.add_argument('--min_var', type=float, default=1e-20,
