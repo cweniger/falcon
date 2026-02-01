@@ -582,8 +582,8 @@ def main():
     y_obs = torch.tensor(y_obs_np, device=device, dtype=torch.float64).unsqueeze(0)  # (1, M)
 
     # Print header
-    print(f"{'Step':>6} {'SimTot':>10} {'TrLoss':>12} {'ValLoss':>12} {'BestVL':>12} {'mean_var_r':>12} {'mean_std_r':>12} {'Prop':>5}")
-    print("-" * 88)
+    print(f"{'Step':>6} {'SimTot':>10} {'TrLoss':>12} {'ValLoss':>12} {'BestVL':>12} {'mean_var_r':>12} {'mean_std_r':>12} {'theta_std':>12} {'eigv_mean':>12} {'Prop':>5}")
+    print("-" * 112)
 
     t0 = time.perf_counter()
 
@@ -695,13 +695,18 @@ def main():
                     steps_since_improvement = 0
                     updated = " R"  # reverted
 
+            theta_std = model.output_std.mean().item()
+            eigvals_mean = model.residual_eigvals.mean().item()
+
             prop_str = f"{proposal_updates}"
             print(f"{step:>6} {total_sims:>10} {train_loss:>12.2e} {val_loss:>12.2e} {best_val_loss:>12.2e} "
-                  f"{mean_var_ratio:>12.3f} {mean_std_ratio:>12.3f} {prop_str:>5}{updated}")
+                  f"{mean_var_ratio:>12.3f} {mean_std_ratio:>12.3f} {theta_std:>12.3e} {eigvals_mean:>12.3e} {prop_str:>5}{updated}")
 
         elif step % cfg.print_every == 0:
+            theta_std = model.output_std.mean().item()
+            eigvals_mean = model.residual_eigvals.mean().item()
             # Print training loss only (no validation)
-            print(f"{step:>6} {total_sims:>10} {train_loss:>12.2e} {'':>12} {'':>12} {'':>12} {'':>12} {'':>5}")
+            print(f"{step:>6} {total_sims:>10} {train_loss:>12.2e} {'':>12} {'':>12} {'':>12} {'':>12} {theta_std:>12.3e} {eigvals_mean:>12.3e} {'':>5}")
 
     elapsed = time.perf_counter() - t0
 

@@ -50,7 +50,7 @@ buffer:
   min_training_samples: 4096
   max_training_samples: 4096
   validation_window_size: 256
-  resample_batch_size: 2048
+  resample_batch_size: 1024
   keep_resampling: true
   resample_interval: 1
   store_fraction: 0.0
@@ -90,7 +90,8 @@ graph:
         min_var: 1.0e-20
         eig_update_freq: 1
       embedding:
-        _target_: model.E_fft_norm
+        _target_: model.E_fft_whiten
+        #_target_: model.E_fft_norm
         _input_: [y]
         n_bins: 20000
         n_features: 128
