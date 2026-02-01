@@ -189,11 +189,6 @@ class GaussianPosterior(nn.Module):
             self._output_std.lerp_(batch_output_std, self.momentum)
             self._output_std.clamp_(max=1.0)  # posterior std can't exceed prior std (latent space is N(0,I))
 
-            debug("conditions mean: "+ str(self._input_mean))
-            debug("conditions std: "+ str(self._input_std))
-            debug("theta mean: "+ str(self._output_mean))
-            debug("theta std: "+ str(self._output_std))
-            debug("residual_eigvals: " + str(self._residual_eigvals))
 
     def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update residual covariance and eigendecomposition."""
@@ -208,6 +203,8 @@ class GaussianPosterior(nn.Module):
             self._step_counter += 1
             if self._step_counter % self.eig_update_freq == 0:
                 self._update_eigendecomp()
+                log({"theta_std": self._output_std.mean().item()})
+                log({"residual_eigvals_mean": self._residual_eigvals.mean().item()})
 
     def _compute_std(self, data: torch.Tensor, mean: torch.Tensor) -> torch.Tensor:
         """Compute per-dimension standard deviation."""

@@ -146,7 +146,7 @@ class StepwiseEstimator(BaseEstimator):
         pass
 
     @abstractmethod
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
         """
         Hook called at end of each epoch.
 
@@ -158,6 +158,9 @@ class StepwiseEstimator(BaseEstimator):
         Args:
             epoch: Current epoch number (0-indexed)
             val_metrics: Validation metrics from this epoch
+
+        Returns:
+            Optional dict of extra metrics to include in epoch summary line.
         """
         pass
 
@@ -186,10 +189,10 @@ class StepwiseEstimator(BaseEstimator):
 
         best_val_loss = float("inf")
         epochs_no_improve = 0
+        total_steps = 0
         t0 = time.perf_counter()
 
         for epoch in range(cfg.num_epochs):
-            info(f"Epoch {epoch+1}/{cfg.num_epochs}")
             log({"epoch": epoch + 1})
 
             # Periodic incremental sync
@@ -209,6 +212,7 @@ class StepwiseEstimator(BaseEstimator):
                 for k, v in metrics.items():
                     train_metrics_sum[k] = train_metrics_sum.get(k, 0) + v
                 num_train_batches += 1
+                total_steps += 1
 
                 for k, v in metrics.items():
                     log({f"train:{k}": v})
@@ -250,9 +254,34 @@ class StepwiseEstimator(BaseEstimator):
             for k, v in val_metrics_avg.items():
                 log({f"val:{k}": v})
 
-            self.on_epoch_end(epoch, val_metrics_avg)
+            extra_metrics = self.on_epoch_end(epoch, val_metrics_avg)
 
+            # Log step/sample counts
+            log({"total_steps": total_steps})
+            try:
+                n_sims = buffer.get_stats()["total_length"]
+                log({"n_samples": n_sims})
+            except Exception:
+                n_sims = None
+
+            # Print epoch summary
+            train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
+            summary = (
+                f"Epoch {epoch+1}/{cfg.num_epochs}"
+                f" | steps={total_steps}"
+            )
+            if n_sims is not None:
+                summary += f" | n_sims={n_sims}"
+            summary += (
+                f" | train_loss={train_loss:.3e}"
+                f" | val_loss={val_loss:.3e}"
+            )
+            if extra_metrics:
+                for k, v in extra_metrics.items():
+                    summary += f" | {k}={v:.3e}"
+            info(summary)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 epochs_no_improve = 0
@@ -522,8 +551,8 @@ class LossBasedEstimator(StepwiseEstimator):
             _, metrics = self._compute_loss(batch)
         return metrics
 
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
-        """Update best model and LR scheduler."""
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
+        """Update best model and LR scheduler. Returns extra metrics for summary."""
         val_loss = val_metrics.get("loss", float("inf"))
 
         if val_loss < self._best_loss:
@@ -532,7 +561,21 @@ class LossBasedEstimator(StepwiseEstimator):
             log({"checkpoint": epoch})
 
         self._scheduler.step(val_loss)
-        log({"lr": self._optimizer.param_groups[0]["lr"]})
+        lr = self._optimizer.param_groups[0]["lr"]
+        log({"lr": lr})
+
+        # Extract posterior statistics if available
+        extra = {"lr": lr}
+        try:
+            posterior = self._model.posterior
+            if hasattr(posterior, "_output_std"):
+                extra["theta_std"] = posterior._output_std.mean().item()
+            if hasattr(posterior, "_residual_eigvals"):
+                extra["eigvals_mean"] = posterior._residual_eigvals.mean().item()
+        except AttributeError:
+            pass
+
+        return extra
 
     # ==================== Inference Model Access ====================
 

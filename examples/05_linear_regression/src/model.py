@@ -31,19 +31,22 @@ class LinearSimulator:
         sigma: Standard deviation of observation noise per bin (default: 0.1)
         n_bins: Number of data bins (default: 100)
         n_params: Number of parameters (default: 10)
+        device: Auto-detected (uses CUDA if available). GPU accelerates the
+            large matrix multiply for high n_bins.
     """
 
     def __init__(self, sigma: float = 0.1, n_bins: int = 20000, n_params: int = 10):
         self.sigma = sigma
+        self.device = torch.device('cuda' if torch.cuda.is_available() else 'cpu')
         Phi, _ = design_matrix(n_bins, n_params)
-        self.Phi = torch.tensor(Phi)
+        self.Phi = torch.tensor(Phi, device=self.device)
 
     def simulate_batch(self, batch_size, theta):
-        theta = torch.tensor(theta)
+        theta = torch.tensor(theta, device=self.device)
         Phi = self.Phi.to(dtype=theta.dtype)
-        y = theta @ Phi.T + torch.randn(batch_size, Phi.shape[0], dtype=theta.dtype) * self.sigma
+        y = theta @ Phi.T + torch.randn(batch_size, Phi.shape[0], device=self.device, dtype=theta.dtype) * self.sigma
         falcon.log({"y_mean": y.mean().item(), "y_std": y.std().item()})
-        return y.numpy()
+        return y.cpu().numpy()
 
 
 class E_fft_norm(nn.Module):

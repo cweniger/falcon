@@ -319,7 +319,7 @@ class SNPE_A(StepwiseEstimator):
 
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
         """Update best weights and scheduler."""
         val_loss = val_metrics.get("loss", float("inf"))
         val_aux_loss = val_metrics.get("loss_aux", float("inf"))
@@ -338,7 +338,10 @@ class SNPE_A(StepwiseEstimator):
 
         # LR scheduler step
         self._scheduler.step(val_loss)
-        log({"lr": self._optimizer.param_groups[0]["lr"]})
+        lr = self._optimizer.param_groups[0]["lr"]
+        log({"lr": lr})
+
+        return {"lr": lr}
 
     # ==================== Sampling Methods ====================
 

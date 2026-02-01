@@ -50,7 +50,7 @@ buffer:
   min_training_samples: 4096
   max_training_samples: 4096
   validation_window_size: 256
-  resample_batch_size: 1024
+  resample_batch_size: 2048
   keep_resampling: true
   resample_interval: 1
   store_fraction: 0.0
@@ -96,7 +96,7 @@ graph:
         n_features: 128
         n_modes: 128
       optimizer:
-        lr: 0.01
+        lr: 0.001
         betas: [0.9, 0.9]
         lr_decay_factor: 0.5
         scheduler_patience: 16
@@ -106,7 +106,7 @@ graph:
         log_ratio_threshold: -20.0
 
     ray:
-      num_gpus: 1
+      num_gpus: 0.5
 
   y:
     parents: [theta]
@@ -114,6 +114,8 @@ graph:
       _target_: model.LinearSimulator
       sigma: 0.1
     observed: "./data/mock_data.npz['y']"
+    ray:
+      num_gpus: 0.5
 
 # -----------------------------------------------------------------------------
 # Sampling configuration
