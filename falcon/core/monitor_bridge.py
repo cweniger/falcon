@@ -53,7 +53,7 @@ class MonitorBridge:
         """
         self.dataset_manager = actor_handle
 
-    def get_status(self) -> dict:
+    async def get_status(self) -> dict:
         """
         Get aggregated status from all nodes and buffer.
 
@@ -63,17 +63,19 @@ class MonitorBridge:
         Returns:
             dict with run_dir, started_at, nodes status, and buffer stats
         """
+        import asyncio
+
         # Query all nodes in parallel
         node_status_futures = {
             name: actor.get_status.remote()
             for name, actor in self.node_actors.items()
         }
 
-        # Get buffer stats
+        # Get buffer stats (await instead of ray.get to avoid blocking the event loop)
         buffer_stats = {}
         if self.dataset_manager:
             try:
-                buffer_stats = ray.get(
+                buffer_stats = await asyncio.wait_for(
                     self.dataset_manager.get_store_stats.remote(),
                     timeout=2.0
                 )
@@ -84,7 +86,7 @@ class MonitorBridge:
         nodes = {}
         for name, future in node_status_futures.items():
             try:
-                nodes[name] = ray.get(future, timeout=2.0)
+                nodes[name] = await asyncio.wait_for(future, timeout=2.0)
             except Exception as e:
                 nodes[name] = {"status": "error", "error": str(e)}
 

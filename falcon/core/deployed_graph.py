@@ -86,6 +86,11 @@ class MultiplexNodeWrapper:
         return []
 
 
+# TODO: NodeWrapper is async solely because train() needs to yield for pause/resume.
+# This makes every ray.get inside the actor (e.g. CachedDataLoader) block the event
+# loop and trigger warnings. Consider splitting into separate training and sampling
+# actors — sampling reads best_model which is independent of training state, so it
+# doesn't actually need to pause training. Weight sync on validation improvement only.
 @ray.remote
 class NodeWrapper:
     def __init__(self, node, graph, model_path=None, log_config=None):
@@ -142,7 +147,11 @@ class NodeWrapper:
         debug(f"Condition keys: {self.evidence + self.scaffolds}")
 
         # Create BufferView - estimator controls what keys it needs
-        buffer = BufferView(dataset_manager)
+        # Use estimator's device for cache if cache_on_device is enabled
+        cache_device = None
+        if hasattr(self.estimator_instance, 'cache_on_device') and self.estimator_instance.cache_on_device:
+            cache_device = str(getattr(self.estimator_instance, 'device', 'cpu'))
+        buffer = BufferView(dataset_manager, cache_device=cache_device)
 
         await self.estimator_instance.train(buffer)
         self._status = "done"
@@ -432,8 +441,23 @@ class DeployedGraph:
             if graph_path is not None:
                 ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
 
-        # Initial data generation
-        ray.get(dataset_manager.initialize_samples.remote(self))
+        # Initial data generation: load from disk first, then generate remaining
+        # on the driver (consistent with resample loop, avoids ray.get in async actor)
+        num_initial = ray.get(dataset_manager.num_initial_samples.remote())
+        num_loaded = ray.get(dataset_manager.load_initial_samples.remote())
+        chunk_size = ray.get(dataset_manager.get_simulate_chunk_size.remote())
+        num_to_generate = num_initial - num_loaded
+        if num_to_generate > 0:
+            info(f"Generating {num_to_generate} initial samples...")
+            remaining = num_to_generate
+            while remaining > 0:
+                this_n = min(remaining, chunk_size) if chunk_size > 0 else remaining
+                samples_batched = self.sample(this_n)
+                n = samples_batched[list(samples_batched.keys())[0]].shape[0]
+                samples = [{k: v[i] for k, v in samples_batched.items()} for i in range(n)]
+                ray.get(dataset_manager.append.remote(samples))
+                remaining -= this_n
+        info(f"Initial samples ready ({num_loaded} loaded, {num_to_generate} generated)")
 
         info("")
         info("Starting analysis. Monitor with: falcon monitor")
@@ -466,7 +490,7 @@ class DeployedGraph:
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
             self.pause()
             while num_new_samples > 0:
-                this_n = min(num_new_samples, 512)
+                this_n = min(num_new_samples, chunk_size) if chunk_size > 0 else num_new_samples
                 new_samples = self.sample_proposal(this_n, observations)
                 for key in observations.keys():  # Remove observations from new samples
                     del new_samples[key]

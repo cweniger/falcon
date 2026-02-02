@@ -2,9 +2,9 @@
 """Generate mock data for the linear regression example.
 
 Model: y = Phi @ theta + noise
-  - Phi[i, k] = sin((k+1) * x_i), 100 bins, 10 parameters
+  - Phi[i, k] = sin((k+1) * x_i), 20000 bins, 10 parameters
   - Prior: theta ~ N(0, I)
-  - Noise: N(0, sigma^2 * I)
+  - Noise: N(0, sigma^2 * I), sigma = 0.1
 
 Also computes the analytic posterior for comparison.
 
@@ -25,7 +25,7 @@ sys.path.insert(0, "../src")
 from model import design_matrix
 
 # Configuration
-N_BINS = 100
+N_BINS = 1000000
 N_PARAMS = 10
 SIGMA = 0.1
 

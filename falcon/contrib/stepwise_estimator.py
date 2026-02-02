@@ -27,6 +27,9 @@ class TrainingLoopConfig:
     batch_size: int = 128
     early_stop_patience: int = 16
     reset_network_after_pause: bool = False
+    cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
+    max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
+    cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
 
 
 @dataclass
@@ -81,6 +84,7 @@ class StepwiseEstimator(BaseEstimator):
         self.simulator_instance = simulator_instance
         self.loop_config = loop_config
         self.param_dim = simulator_instance.param_dim
+        self.cache_on_device = loop_config.cache_on_device
 
         # Key configuration for Batch access
         self.theta_key = theta_key
@@ -105,6 +109,15 @@ class StepwiseEstimator(BaseEstimator):
             "n_samples": [],
             "elapsed_min": [],
         }
+
+    # ==================== Utilities ====================
+
+    @staticmethod
+    def _to_tensor(x, device=None):
+        """Convert numpy array or torch tensor to the target device."""
+        if isinstance(x, torch.Tensor):
+            return x if device is None else x.to(device)
+        return torch.from_numpy(x) if device is None else torch.from_numpy(x).to(device)
 
     # ==================== Abstract Methods ====================
 
@@ -144,7 +157,7 @@ class StepwiseEstimator(BaseEstimator):
         pass
 
     @abstractmethod
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
         """
         Hook called at end of each epoch.
 
@@ -156,6 +169,9 @@ class StepwiseEstimator(BaseEstimator):
         Args:
             epoch: Current epoch number (0-indexed)
             val_metrics: Validation metrics from this epoch
+
+        Returns:
+            Optional dict of extra metrics to include in epoch summary line.
         """
         pass
 
@@ -169,44 +185,55 @@ class StepwiseEstimator(BaseEstimator):
             buffer: BufferView providing access to training/validation data
         """
         cfg = self.loop_config
-
-        # Setup dataloaders
         keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
-        dataloader_train = buffer.train_loader(keys, batch_size=cfg.batch_size)
-        dataloader_val = buffer.val_loader(keys, batch_size=cfg.batch_size)
+        await self._train(buffer, cfg, keys)
+
+    async def _train(self, buffer, cfg, keys) -> None:
+        """Epoch-based training with CPU-cached dataloader."""
+        sync_every = cfg.cache_sync_every if cfg.cache_sync_every > 0 else 1
+
+        train_cache = buffer.cached_loader(keys, max_cache_samples=cfg.max_cache_samples)
+        val_cache = buffer.cached_val_loader(keys, max_cache_samples=0)
+
+        train_cache.sync()
+        val_cache.sync()
 
         best_val_loss = float("inf")
         epochs_no_improve = 0
+        total_steps = 0
         t0 = time.perf_counter()
 
         for epoch in range(cfg.num_epochs):
-            info(f"Epoch {epoch+1}/{cfg.num_epochs}")
             log({"epoch": epoch + 1})
 
+            # Periodic incremental sync
+            if epoch > 0 and epoch % sync_every == 0:
+                train_cache.sync()
+                val_cache.sync()
+
             # === Training phase ===
+            steps_per_epoch = max(1, train_cache.count // cfg.batch_size)
             train_metrics_sum = {}
             num_train_batches = 0
 
-            for batch in dataloader_train:
+            for step in range(steps_per_epoch):
+                batch = train_cache.sample_batch(cfg.batch_size)
                 metrics = self.train_step(batch)
 
-                # Accumulate metrics
                 for k, v in metrics.items():
                     train_metrics_sum[k] = train_metrics_sum.get(k, 0) + v
                 num_train_batches += 1
+                total_steps += 1
 
-                # Log step-level metrics
                 for k, v in metrics.items():
                     log({f"train:{k}": v})
 
-                # Async yield and pause check
                 await asyncio.sleep(0)
                 await self._pause_event.wait()
                 if self._break_flag:
                     self._break_flag = False
                     break
 
-            # Average training metrics
             train_metrics_avg = {
                 k: v / num_train_batches for k, v in train_metrics_sum.items()
             }
@@ -214,15 +241,16 @@ class StepwiseEstimator(BaseEstimator):
             # === Validation phase ===
             val_metrics_sum = {}
             num_val_samples = 0
+            val_steps = max(1, val_cache.count // cfg.batch_size)
 
-            for batch in dataloader_val:
+            for step in range(val_steps):
+                batch = val_cache.sample_batch(cfg.batch_size)
                 metrics = self.val_step(batch)
-                batch_size = len(batch)
+                bs = len(batch)
 
-                # Accumulate (sum for later averaging)
                 for k, v in metrics.items():
-                    val_metrics_sum[k] = val_metrics_sum.get(k, 0) + v * batch_size
-                num_val_samples += batch_size
+                    val_metrics_sum[k] = val_metrics_sum.get(k, 0) + v * bs
+                num_val_samples += bs
 
                 await asyncio.sleep(0)
                 await self._pause_event.wait()
@@ -230,27 +258,47 @@ class StepwiseEstimator(BaseEstimator):
                     self._break_flag = False
                     break
 
-            # Average validation metrics
             val_metrics_avg = {
                 k: v / num_val_samples for k, v in val_metrics_sum.items()
             }
 
-            # Log validation metrics
             for k, v in val_metrics_avg.items():
                 log({f"val:{k}": v})
 
-            # === End of epoch hook ===
-            self.on_epoch_end(epoch, val_metrics_avg)
+            extra_metrics = self.on_epoch_end(epoch, val_metrics_avg)
 
-            # === Early stopping ===
+            # Log step/sample counts
+            log({"total_steps": total_steps})
+            try:
+                n_sims = buffer.get_stats()["total_length"]
+                log({"n_samples": n_sims})
+            except Exception:
+                n_sims = None
+
+            # Print epoch summary
+            train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
+            summary = (
+                f"Epoch {epoch+1}/{cfg.num_epochs}"
+                f" | steps={total_steps}"
+            )
+            if n_sims is not None:
+                summary += f" | n_sims={n_sims}"
+            summary += (
+                f" | train_loss={train_loss:.3e}"
+                f" | val_loss={val_loss:.3e}"
+            )
+            if extra_metrics:
+                for k, v in extra_metrics.items():
+                    summary += f" | {k}={v:.3e}"
+            info(summary)
+
             if val_loss < best_val_loss:
                 best_val_loss = val_loss
                 epochs_no_improve = 0
             else:
                 epochs_no_improve += 1
 
-            # Record history
             self._record_epoch_history(
                 epoch, train_metrics_avg, val_metrics_avg, t0, buffer
             )
@@ -382,9 +430,9 @@ class LossBasedEstimator(StepwiseEstimator):
         from falcon.contrib.torch_embedding import instantiate_embedding
 
         # Extract and store tensors for reload
-        self._init_theta = torch.from_numpy(batch[self.theta_key])
+        self._init_theta = self._to_tensor(batch[self.theta_key])
         self._init_conditions = {
-            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+            k: self._to_tensor(batch[k]) for k in self.condition_keys if k in batch
         }
         return self._create_model(self._init_theta, self._init_conditions)
 
@@ -423,11 +471,10 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute loss from batch."""
-        # Extract and convert to tensors (dtype inferred from numpy arrays)
-        theta = torch.from_numpy(batch[self.theta_key]).to(self.device)
-        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        theta = self._to_tensor(batch[self.theta_key], self.device)
+        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.logprob"])
         conditions = {
-            k: torch.from_numpy(batch[k]).to(self.device)
+            k: self._to_tensor(batch[k], self.device)
             for k in self.condition_keys if k in batch
         }
 
@@ -514,8 +561,8 @@ class LossBasedEstimator(StepwiseEstimator):
             _, metrics = self._compute_loss(batch)
         return metrics
 
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> None:
-        """Update best model and LR scheduler."""
+    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
+        """Update best model and LR scheduler. Returns extra metrics for summary."""
         val_loss = val_metrics.get("loss", float("inf"))
 
         if val_loss < self._best_loss:
@@ -524,7 +571,21 @@ class LossBasedEstimator(StepwiseEstimator):
             log({"checkpoint": epoch})
 
         self._scheduler.step(val_loss)
-        log({"lr": self._optimizer.param_groups[0]["lr"]})
+        lr = self._optimizer.param_groups[0]["lr"]
+        log({"lr": lr})
+
+        # Extract posterior statistics if available
+        extra = {"lr": lr}
+        try:
+            posterior = self._model.posterior
+            if hasattr(posterior, "_output_std"):
+                extra["theta_std"] = posterior._output_std.mean().item()
+            if hasattr(posterior, "_residual_eigvals"):
+                extra["eigvals_mean"] = posterior._residual_eigvals.mean().item()
+        except AttributeError:
+            pass
+
+        return extra
 
     # ==================== Inference Model Access ====================
 

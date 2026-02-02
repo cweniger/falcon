@@ -14,22 +14,8 @@ Run directory behavior:
 import sys
 import os
 from pathlib import Path
-from datetime import datetime
-import numpy as np
-import torch
-import ray
 
-from omegaconf import OmegaConf, DictConfig
-
-import falcon
-from falcon.core.utils import load_observations
-from falcon.core.graph import create_graph_from_config
-from falcon.core.logger import Logger, set_logger, info
-from falcon.core.run_name import generate_run_dir
-
-
-# Register custom OmegaConf resolvers
-OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
+BANNER = "falcon \x1b[2m\u2581\u2582\u2585\u2587\u2588\u2586\u2583\u2582\u2581\u2581\x1b[0m"
 
 
 def render_git_graph_simple(graph):
@@ -165,8 +151,10 @@ def render_git_graph_simple(graph):
     return '\n'.join(l for l in lines if l.strip())
 
 
-def graph_mode(cfg: DictConfig) -> None:
+def graph_mode(cfg) -> None:
     """Graph mode: Display the graph structure."""
+    from falcon.core.graph import create_graph_from_config
+
     # Create graph from config (no Ray needed)
     graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
 
@@ -180,7 +168,7 @@ def graph_mode(cfg: DictConfig) -> None:
     print(f"Nodes: {len(graph.node_list)} | Observed: {', '.join(observed)} | Estimators: {', '.join(with_estimator)}")
 
 
-def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None) -> DictConfig:
+def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None):
     """Load config with run_dir injection and resume support.
 
     Args:
@@ -191,6 +179,13 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     Returns:
         Resolved config with run_dir injected
     """
+    from datetime import datetime
+    from omegaconf import OmegaConf
+    from falcon.core.run_name import generate_run_dir
+
+    # Register custom OmegaConf resolvers
+    OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
+
     # 1. Default run_dir if not specified
     if run_dir is None:
         run_dir = generate_run_dir()
@@ -242,8 +237,15 @@ class TeeOutput:
         self.log.close()
 
 
-def launch_mode(cfg: DictConfig) -> None:
+def launch_mode(cfg) -> None:
     """Launch mode: Full training and inference pipeline."""
+    import torch
+    import ray
+    from omegaconf import OmegaConf
+    import falcon
+    from falcon.core.graph import create_graph_from_config
+    from falcon.core.logger import Logger, set_logger, info
+
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
 
@@ -268,8 +270,10 @@ def launch_mode(cfg: DictConfig) -> None:
 
     # Initialize Ray
     ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
-    ray_init_args.setdefault("log_to_driver", False)
+    # Forward actor stdout/stderr to driver when console.level is set,
+    # so node log messages and crash output reach the terminal.
+    console_level = logging_cfg.get("console", {}).get("level", None)
+    ray_init_args.setdefault("log_to_driver", console_level is not None)
     # Use a fixed namespace so falcon monitor can discover actors
     ray_init_args.setdefault("namespace", "falcon")
     # Suppress Ray startup banner
@@ -324,6 +328,7 @@ def launch_mode(cfg: DictConfig) -> None:
         validation_window_size=cfg.buffer.validation_window_size,
         resample_batch_size=cfg.buffer.resample_batch_size,
         resample_interval=cfg.buffer.resample_interval,
+        simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
         buffer_path=cfg.paths.buffer,
@@ -343,12 +348,21 @@ def launch_mode(cfg: DictConfig) -> None:
     driver_logger.shutdown()
 
 
-def sample_mode(cfg: DictConfig, sample_type: str) -> None:
+def sample_mode(cfg, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies.
 
     Samples are saved as individual NPZ files in:
         {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
     """
+    from datetime import datetime
+    import numpy as np
+    import torch
+    import ray
+    from omegaconf import OmegaConf
+    import falcon
+    from falcon.core.graph import create_graph_from_config
+    from falcon.core.logger import Logger, set_logger, info
+
     # Setup logging config
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
@@ -357,8 +371,9 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
     set_logger(driver_logger)
     ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Suppress worker stdout/stderr forwarding to driver (use output.log instead)
-    ray_init_args.setdefault("log_to_driver", False)
+    # Forward actor stdout/stderr to driver when console.level is set
+    console_level = logging_cfg.get("console", {}).get("level", None)
+    ray_init_args.setdefault("log_to_driver", console_level is not None)
     # Use a fixed namespace for consistency
     ray_init_args.setdefault("namespace", "falcon")
     ray.init(**ray_init_args)
@@ -465,18 +480,28 @@ def sample_mode(cfg: DictConfig, sample_type: str) -> None:
 
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
-    """Monitor mode: Launch the TUI monitor for training runs."""
-    import subprocess
-    subprocess.run([
-        sys.executable, "-m", "falcon.monitor",
-        "--address", address,
-        "--refresh", str(refresh),
-    ])
+    """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
+    from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    if not init_ray_for_monitor(address):
+        sys.exit(1)
+    app = FalconMonitor(ray_address=address, refresh_interval=refresh)
+    app.run()
+
+
+def _get_version():
+    """Get package version string."""
+    from importlib.metadata import version, PackageNotFoundError
+    try:
+        return version("falcon")
+    except PackageNotFoundError:
+        return "0.0.0+unknown"
 
 
 def parse_args():
     """Parse falcon CLI arguments."""
     if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph", "monitor"]:
+        print(f"{BANNER} v{_get_version()}")
+        print()
         print("Usage:")
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
@@ -488,7 +513,7 @@ def parse_args():
         print("  --config-name FILE   Config file (default: config.yaml)")
         print("  --address ADDR       Ray cluster address (default: auto)")
         print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
-        sys.exit(1)
+        sys.exit(0)
 
     mode = sys.argv[1]
     args = sys.argv[2:]
@@ -547,6 +572,9 @@ def parse_args():
 def main():
     """Main CLI entry point."""
     mode, sample_type, config_name, run_dir, overrides, address, refresh = parse_args()
+
+    # Print startup banner
+    print(f"{BANNER} v{_get_version()}", flush=True)
 
     # Monitor mode doesn't need config loading
     if mode == "monitor":

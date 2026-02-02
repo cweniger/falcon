@@ -167,17 +167,19 @@ class Logger:
                 handler.setLevel(self.LEVELS.get(level_str, logging.DEBUG))
                 self._logger.addHandler(handler)
 
-        # Console handler (for driver or if configured)
-        if name == "driver" or config.get("console", {}).get("enabled", False):
-            console = logging.StreamHandler()
+        # Console handler: always on for driver, opt-in for nodes via console.level.
+        # Setting console.level (e.g. DEBUG, INFO) implicitly enables console output;
+        # absent/null means disabled for nodes. Uses stdout so that Ray's
+        # log_to_driver doesn't feed it back into the driver's stderr _StreamCapture.
+        console_level = config.get("console", {}).get("level", None)
+        if name == "driver" or console_level is not None:
+            console = logging.StreamHandler(sys.stdout)
             console.setFormatter(logging.Formatter(
                 '%(asctime)s [%(levelname)s] %(message)s',
                 datefmt='%Y-%m-%dT%H:%M:%S'
             ))
-            console.setLevel(self.LEVELS.get(
-                config.get("console", {}).get("level", "INFO"),
-                logging.INFO
-            ))
+            level = self.LEVELS.get(console_level, logging.INFO) if console_level else logging.INFO
+            console.setLevel(level)
             self._logger.addHandler(console)
 
         # Capture exceptions, stderr, and warnings
