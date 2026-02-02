@@ -110,6 +110,15 @@ class StepwiseEstimator(BaseEstimator):
             "elapsed_min": [],
         }
 
+    # ==================== Utilities ====================
+
+    @staticmethod
+    def _to_tensor(x, device=None):
+        """Convert numpy array or torch tensor to the target device."""
+        if isinstance(x, torch.Tensor):
+            return x if device is None else x.to(device)
+        return torch.from_numpy(x) if device is None else torch.from_numpy(x).to(device)
+
     # ==================== Abstract Methods ====================
 
     @abstractmethod
@@ -459,13 +468,6 @@ class LossBasedEstimator(StepwiseEstimator):
         return EmbeddedPosterior(embedding, posterior)
 
     # ==================== Loss Computation ====================
-
-    @staticmethod
-    def _to_tensor(x, device=None):
-        """Convert numpy array or torch tensor to the target device."""
-        if isinstance(x, torch.Tensor):
-            return x if device is None else x.to(device)
-        return torch.from_numpy(x) if device is None else torch.from_numpy(x).to(device)
 
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute loss from batch."""
