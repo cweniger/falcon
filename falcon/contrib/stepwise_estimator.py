@@ -29,6 +29,7 @@ class TrainingLoopConfig:
     reset_network_after_pause: bool = False
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
     max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
+    cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
 
 
 @dataclass
@@ -83,6 +84,7 @@ class StepwiseEstimator(BaseEstimator):
         self.simulator_instance = simulator_instance
         self.loop_config = loop_config
         self.param_dim = simulator_instance.param_dim
+        self.cache_on_device = loop_config.cache_on_device
 
         # Key configuration for Batch access
         self.theta_key = theta_key
@@ -419,9 +421,9 @@ class LossBasedEstimator(StepwiseEstimator):
         from falcon.contrib.torch_embedding import instantiate_embedding
 
         # Extract and store tensors for reload
-        self._init_theta = torch.from_numpy(batch[self.theta_key])
+        self._init_theta = self._to_tensor(batch[self.theta_key])
         self._init_conditions = {
-            k: torch.from_numpy(batch[k]) for k in self.condition_keys if k in batch
+            k: self._to_tensor(batch[k]) for k in self.condition_keys if k in batch
         }
         return self._create_model(self._init_theta, self._init_conditions)
 
@@ -458,13 +460,19 @@ class LossBasedEstimator(StepwiseEstimator):
 
     # ==================== Loss Computation ====================
 
+    @staticmethod
+    def _to_tensor(x, device=None):
+        """Convert numpy array or torch tensor to the target device."""
+        if isinstance(x, torch.Tensor):
+            return x if device is None else x.to(device)
+        return torch.from_numpy(x) if device is None else torch.from_numpy(x).to(device)
+
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute loss from batch."""
-        # Extract and convert to tensors (dtype inferred from numpy arrays)
-        theta = torch.from_numpy(batch[self.theta_key]).to(self.device)
-        theta_logprob = torch.from_numpy(batch[f"{self.theta_key}.logprob"])
+        theta = self._to_tensor(batch[self.theta_key], self.device)
+        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.logprob"])
         conditions = {
-            k: torch.from_numpy(batch[k]).to(self.device)
+            k: self._to_tensor(batch[k], self.device)
             for k in self.condition_keys if k in batch
         }
 
