@@ -51,8 +51,9 @@ buffer:
   max_training_samples: 4096
   validation_window_size: 256
   resample_batch_size: 1024
+  simulate_chunk_size: 128
   keep_resampling: true
-  resample_interval: 1
+  resample_interval: 3200
   store_fraction: 0.0
 
 # -----------------------------------------------------------------------------
@@ -83,6 +84,7 @@ graph:
         batch_size: 128
         early_stop_patience: 32
         cache_sync_every: 1
+        cache_on_device: false
       network:
         hidden_dim: 128
         num_layers: 3
@@ -93,7 +95,7 @@ graph:
         _target_: model.E_fft_whiten
         #_target_: model.E_fft_norm
         _input_: [y]
-        n_bins: 20000
+        n_bins: 1000000
         n_features: 128
         n_modes: 128
       optimizer:
@@ -114,6 +116,7 @@ graph:
     simulator:
       _target_: model.LinearSimulator
       sigma: 0.1
+      n_bins: 1000000
     observed: "./data/mock_data.npz['y']"
     ray:
       num_gpus: 0.5

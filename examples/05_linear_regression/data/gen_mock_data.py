@@ -25,7 +25,7 @@ sys.path.insert(0, "../src")
 from model import design_matrix
 
 # Configuration
-N_BINS = 20000
+N_BINS = 1000000
 N_PARAMS = 10
 SIGMA = 0.1
 
