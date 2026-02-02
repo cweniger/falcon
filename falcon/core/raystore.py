@@ -392,9 +392,9 @@ class CachedDataLoader:
         self._free_rows = []    # reusable row indices from evicted samples
 
     def _to_tensor(self, arr):
-        """Convert numpy array to torch tensor on the configured device."""
+        """Convert numpy scalar/array to torch tensor on the configured device."""
         import torch
-        return torch.from_numpy(arr).to(self.device)
+        return torch.as_tensor(np.asarray(arr)).to(self.device)
 
     def sync(self):
         """Incremental sync: fetch new samples, evict stale, update stacked tensors."""
