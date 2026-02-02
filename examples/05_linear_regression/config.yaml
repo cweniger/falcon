@@ -53,7 +53,7 @@ buffer:
   resample_batch_size: 1024
   simulate_chunk_size: 128
   keep_resampling: true
-  resample_interval: 3200
+  resample_interval: 5
   store_fraction: 0.0
 
 # -----------------------------------------------------------------------------
