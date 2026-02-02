@@ -123,8 +123,10 @@ estimator:
   loop:
     num_epochs: 300
     batch_size: 128
-    val_fraction: 0.1
-    patience: 50
+    early_stop_patience: 50
+    cache_sync_every: 0
+    max_cache_samples: 0
+    cache_on_device: false
 
   network:
     net_type: nsf          # nsf, maf, zuko_nice, etc.

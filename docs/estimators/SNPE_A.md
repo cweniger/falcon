@@ -43,6 +43,9 @@ Controls the training process.
 | `batch_size` | int | 128 | Training batch size |
 | `early_stop_patience` | int | 32 | Epochs without improvement before stopping |
 | `reset_network_after_pause` | bool | false | Reset network weights when training resumes after pause |
+| `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
+| `max_cache_samples` | int | 0 | Maximum samples to cache (0 = cache all available) |
+| `cache_on_device` | bool | false | Keep cached training data on the estimator's device (e.g. GPU) |
 
 ```yaml
 loop:
@@ -50,7 +53,18 @@ loop:
   batch_size: 128
   early_stop_patience: 32
   reset_network_after_pause: false
+  cache_sync_every: 0
+  max_cache_samples: 0
+  cache_on_device: false
 ```
+
+#### Data Caching
+
+Training data is loaded into a local cache that is periodically synced with the shared simulation buffer. This avoids repeated remote data fetches and allows fast random-access batching.
+
+- **`cache_sync_every`**: Controls how often the cache pulls new samples from the buffer. A value of `0` (default) syncs every epoch. Higher values reduce sync overhead at the cost of slightly stale data, which can be useful when simulations are slow.
+- **`max_cache_samples`**: Caps the number of samples held in the cache. Set to `0` to cache everything. A positive value randomly subsamples, which helps limit GPU memory usage for very large buffers.
+- **`cache_on_device`**: When `true`, cached tensors are moved to the estimator's device (typically GPU) once during sync rather than per-batch. This eliminates CPU-to-GPU transfer overhead during training but increases device memory usage.
 
 ### Network Architecture (`network`)
 
@@ -201,6 +215,8 @@ graph:
         num_epochs: 300
         batch_size: 128
         early_stop_patience: 32
+        cache_sync_every: 0
+        max_cache_samples: 0
 
       network:
         net_type: nsf
@@ -297,3 +313,5 @@ SNPE_A logs the following metrics during training:
 4. **Use GPU** (`ray.num_gpus: 1`) for faster training with large embeddings
 5. **Lower `gamma`** for single-observation inference, higher for amortization
 6. **Adjust `early_stop_patience`** based on expected convergence time
+7. **Set `cache_on_device: true`** when GPU memory permits, to eliminate per-batch CPU→GPU transfers
+8. **Increase `cache_sync_every`** (e.g. 5–10) when simulations are slow and training data changes infrequently
