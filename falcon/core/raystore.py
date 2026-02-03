@@ -257,7 +257,15 @@ class DatasetManagerActor:
 
         result = {'_active_ids': ids, '_new_ids': new_ids}
         for key in keys:
-            result[key] = [self.ray_store[i][key] for i in new_ids]
+            refs = []
+            for i in new_ids:
+                try:
+                    refs.append(self.ray_store[i][key])
+                except KeyError as e:
+                    # Provide more info in the error message
+                    sample_keys = list(self.ray_store[i].keys()) if self.ray_store[i] else []
+                    raise KeyError(f"Key '{key}' not found in sample {i}. Available keys: {sample_keys}. Total samples: {len(self.ray_store)}") from e
+            result[key] = refs
         return result
 
     def release_refs(self, ids):
@@ -300,6 +308,48 @@ class DatasetManagerActor:
         }, prefix="buffer")
 
         self.dump_store(data)
+
+    def append_refs(self, sample_refs: list):
+        """Append samples that are already ObjectRefs.
+
+        Args:
+            sample_refs: List of dicts, each dict has {key: ObjectRef}
+        """
+        num_new_samples = len(sample_refs)
+
+        # Store refs directly - no ray.put() needed
+        self.ray_store.extend(sample_refs)
+
+        self.status = np.append(
+            self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
+        )
+        self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
+
+        self.rotate_sample_buffer()
+
+        # Log buffer statistics
+        log({
+            "n_total": len(self.ray_store),
+            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
+            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
+            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
+            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
+        }, prefix="buffer")
+
+        # Disk dump: fetch values lazily if needed
+        if self.store_fraction > 0 and self.buffer_path is not None:
+            self._dump_refs(sample_refs)
+
+    def _dump_refs(self, sample_refs: list):
+        """Fetch and dump samples to disk."""
+        interval = max(1, int(1.0 / self.store_fraction))
+
+        for ref_dict in sample_refs:
+            self._sample_counter += 1
+            if self._sample_counter % interval == 0:
+                sample = {k: ray.get(v) for k, v in ref_dict.items()}
+                self._save_sample(sample)
 
     def _save_sample(self, sample: dict):
         """Save a single sample as NPZ file."""
