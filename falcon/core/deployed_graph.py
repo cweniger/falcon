@@ -10,7 +10,7 @@ from omegaconf import ListConfig
 
 from falcon.core.logger import Logger, set_logger, debug, info, warning, error, log
 from falcon.core.raystore import BufferView
-from .utils import LazyLoader, as_rvbatch
+from .utils import LazyLoader, RVBatch
 
 
 @ray.remote
@@ -234,7 +234,8 @@ class NodeWrapper:
     def _simulate(self, n_samples, incoming=None):
         """Internal method that calls the actual simulator/estimator.
 
-        Returns batched samples (RVBatch or ndarray).
+        Returns:
+            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
         """
         # Default to empty list for simulator paths
         if incoming is None:
@@ -245,17 +246,19 @@ class NodeWrapper:
             conditions = None
             if incoming:
                 conditions = {k: v for k, v in zip(self.parents, incoming)}
-            samples = self.estimator_instance.sample_prior(n_samples, conditions=conditions)
-            samples = as_rvbatch(samples)
-            return samples
+            result = self.estimator_instance.sample_prior(n_samples, conditions=conditions)
+            # Normalize to (value, logprob) tuple
+            if isinstance(result, RVBatch):
+                return result.value, result.logprob
+            return result, None
         if hasattr(self.simulator_instance, "simulate_batch"):
-            return self.simulator_instance.simulate_batch(n_samples, *incoming)
+            return self.simulator_instance.simulate_batch(n_samples, *incoming), None
         else:
             samples = []
             for i in range(n_samples):
                 params = [v[i] for v in incoming]
                 samples.append(self.simulator_instance.simulate(*params))
-            return np.stack(samples)
+            return np.stack(samples), None
 
     def sample(self, n_samples, incoming=None):
         """Sample and return ObjectRefs. Handles chunking internally.
@@ -276,48 +279,47 @@ class NodeWrapper:
             end = min(start + chunk_size, n_samples)
             chunk_incoming = [v[start:end] for v in incoming] if incoming is not None else None
 
-            # Call simulator (uses simulate_batch if available)
-            samples_batched = self._simulate(end - start, chunk_incoming)
-
-            # Handle RVBatch wrapper
-            if hasattr(samples_batched, 'value'):
-                value, logprob = samples_batched.value, samples_batched.logprob
-            else:
-                value, logprob = samples_batched, None
+            # Call simulator - returns (value, logprob) tuple
+            value, logprob = self._simulate(end - start, chunk_incoming)
 
             # Convert chunk to refs
-            n = value.shape[0] if isinstance(value, np.ndarray) else len(next(iter(value.values())))
-            for i in range(n):
-                sample_dict = {}
-                if isinstance(value, np.ndarray):
-                    sample_dict[self.name] = ray.put(value[i])
-                else:
-                    # value is a dict, store the i-th slice as a dict under self.name
-                    sample_i = {k: v[i] for k, v in value.items()}
-                    sample_dict[self.name] = ray.put(sample_i)
-                if logprob is not None:
-                    sample_dict[f"{self.name}.logprob"] = ray.put(logprob[i])
-                result.append(sample_dict)
+            result.extend(self._batch_to_refs(value, logprob))
 
         return result
 
     def _sample_posterior(self, n_samples, conditions=None):
-        """Internal method for posterior sampling. Returns RVBatch."""
-        samples = self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
-        samples = as_rvbatch(samples)
-        return samples
+        """Internal method for posterior sampling.
+
+        Returns:
+            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
+        """
+        result = self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
+        if isinstance(result, RVBatch):
+            return result.value, result.logprob
+        return result, None
 
     def _sample_proposal(self, n_samples, conditions=None):
-        """Internal method for proposal sampling. Returns RVBatch."""
-        samples = self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
-        samples = as_rvbatch(samples)
-        return samples
+        """Internal method for proposal sampling.
 
-    def _convert_rvbatch_to_refs(self, rvbatch, chunk_start, chunk_end):
-        """Convert RVBatch to list of dicts with ObjectRefs."""
+        Returns:
+            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
+        """
+        result = self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
+        if isinstance(result, RVBatch):
+            return result.value, result.logprob
+        return result, None
+
+    def _batch_to_refs(self, value, logprob):
+        """Convert batched (value, logprob) to list of dicts with ObjectRefs.
+
+        Args:
+            value: Batched values (ndarray or dict of ndarrays)
+            logprob: Batched logprobs (ndarray) or None
+
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample
+        """
         result = []
-        value, logprob = rvbatch.value, rvbatch.logprob
-
         n = value.shape[0] if isinstance(value, np.ndarray) else len(next(iter(value.values())))
         for i in range(n):
             sample_dict = {}
@@ -353,8 +355,8 @@ class NodeWrapper:
             if conditions:
                 chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
 
-            rvbatch = self._sample_posterior(end - start, conditions=chunk_conditions)
-            result.extend(self._convert_rvbatch_to_refs(rvbatch, start, end))
+            value, logprob = self._sample_posterior(end - start, conditions=chunk_conditions)
+            result.extend(self._batch_to_refs(value, logprob))
 
         return result
 
@@ -379,8 +381,8 @@ class NodeWrapper:
             if conditions:
                 chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
 
-            rvbatch = self._sample_proposal(end - start, conditions=chunk_conditions)
-            result.extend(self._convert_rvbatch_to_refs(rvbatch, start, end))
+            value, logprob = self._sample_proposal(end - start, conditions=chunk_conditions)
+            result.extend(self._batch_to_refs(value, logprob))
 
         return result
 
