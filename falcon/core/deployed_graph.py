@@ -707,25 +707,19 @@ class DeployedGraph:
             )
             time.sleep(resample_interval)
             num_new_samples = ray.get(dataset_manager.num_resims.remote())
-            self.pause()
             if num_new_samples > 0:
-                # Sample from proposal (returns refs)
+                # sample_proposal interleaves with training via async yield points —
+                # no pause needed. Forward simulation runs on separate actors concurrently.
                 proposal_refs = self.sample_proposal(num_new_samples, observations)
-                # Extract value refs directly (no array resolution needed)
                 condition_refs = self._extract_value_refs(proposal_refs)
-                # Remove observations from conditions
                 for key in observations:
                     condition_refs.pop(key, None)
-                # Forward sample with proposal values as conditions (ref-only, no double serialization)
                 sample_refs = self._execute_graph(
                     num_new_samples, self.graph.sorted_node_names, condition_refs, "sample"
                 )
-                # Merge proposal refs (theta.value, theta.log_prob) into sample refs (x.value)
                 for i, prop_ref in enumerate(proposal_refs):
                     sample_refs[i].update(prop_ref)
-                # Append refs directly to buffer
                 ray.get(dataset_manager.append_refs.remote(sample_refs))
-            self.resume()
 
             # Periodic status update (every ~60 seconds)
             now = time.time()
