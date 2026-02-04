@@ -5,6 +5,7 @@ import torch
 import os
 import sys
 from pathlib import Path
+from concurrent.futures import ThreadPoolExecutor
 import numpy as np
 from omegaconf import ListConfig
 
@@ -195,25 +196,42 @@ class NodeWrapper:
     def _resolve_refs(self, condition_refs):
         """Convert refs to arrays. Single batched ray.get.
 
+        Detects broadcast refs (all identical) and resolves once with
+        np.broadcast_to instead of fetching N copies.
+
         Args:
             condition_refs: Dict[str, List[ObjectRef]] or None
 
         Returns:
-            Dict[str, ndarray] with stacked arrays, or empty dict
+            Dict[str, ndarray] with stacked/broadcast arrays, or empty dict
         """
         if not condition_refs:
             return {}
-        # Flatten all refs into one list for a single ray.get call
+        # Flatten refs, detecting broadcast (all-same-ref) lists
         all_refs = []
         slices = {}
         for name, refs in condition_refs.items():
-            slices[name] = (len(all_refs), len(all_refs) + len(refs))
-            all_refs.extend(refs)
+            if len(set(refs)) == 1:  # all same ref → broadcast
+                slices[name] = ('broadcast', len(all_refs), len(refs))
+                all_refs.append(refs[0])
+            else:
+                slices[name] = ('full', len(all_refs), len(all_refs) + len(refs))
+                all_refs.extend(refs)
         all_values = ray.get(all_refs)  # ONE call resolves everything
-        return {name: np.stack(all_values[start:end]) for name, (start, end) in slices.items()}
+        result = {}
+        for name, (mode, start, end_or_n) in slices.items():
+            if mode == 'broadcast':
+                val = all_values[start]
+                result[name] = np.broadcast_to(val, (end_or_n,) + val.shape)
+            else:
+                result[name] = np.stack(all_values[start:end_or_n])
+        return result
 
     def _batch_to_refs(self, output):
         """Convert output dict to list of per-sample ref dicts.
+
+        Uses ThreadPoolExecutor to parallelize ray.put calls (GIL released
+        during serialization).
 
         Args:
             output: {'value': arr[N,...], 'log_prob': arr[N], ...}
@@ -224,14 +242,17 @@ class NodeWrapper:
         """
         value = output['value']
         n = value.shape[0] if isinstance(value, np.ndarray) else len(next(iter(value.values())))
-        # Phase 1: fire all ray.put calls (non-blocking, all return immediately)
+        # Phase 1: fire all ray.put calls in parallel via thread pool
         ref_columns = {}
-        for key, arr in output.items():
-            full_key = f"{self.name}.{key}"
-            if isinstance(arr, np.ndarray):
-                ref_columns[full_key] = [ray.put(arr[i]) for i in range(n)]
-            else:  # dict-valued (CompositeNode)
-                ref_columns[full_key] = [ray.put({k: v[i] for k, v in arr.items()}) for i in range(n)]
+        with ThreadPoolExecutor(max_workers=4) as pool:
+            for key, arr in output.items():
+                full_key = f"{self.name}.{key}"
+                if isinstance(arr, np.ndarray):
+                    ref_columns[full_key] = list(pool.map(ray.put, [arr[i] for i in range(n)]))
+                else:  # dict-valued (CompositeNode)
+                    ref_columns[full_key] = list(pool.map(
+                        ray.put, [{k: v[i] for k, v in arr.items()} for i in range(n)]
+                    ))
         # Phase 2: assemble per-sample dicts
         return [{k: refs[i] for k, refs in ref_columns.items()} for i in range(n)]
 
