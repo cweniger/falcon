@@ -196,14 +196,16 @@ class NodeWrapper:
     def _resolve_refs(self, condition_refs):
         """Convert refs to arrays. Single batched ray.get.
 
-        Detects broadcast refs (all identical) and resolves once with
-        np.broadcast_to instead of fetching N copies.
+        Detects broadcast refs (all identical) and resolves once,
+        returning shape (1, ...) so consumers can expand efficiently
+        (e.g. torch .expand() on GPU, or np.broadcast_to on CPU).
 
         Args:
             condition_refs: Dict[str, List[ObjectRef]] or None
 
         Returns:
-            Dict[str, ndarray] with stacked/broadcast arrays, or empty dict
+            Dict[str, ndarray] — broadcast entries have shape (1, ...),
+            non-broadcast have shape (N, ...). Empty dict if no refs.
         """
         if not condition_refs:
             return {}
@@ -212,19 +214,19 @@ class NodeWrapper:
         slices = {}
         for name, refs in condition_refs.items():
             if len(set(refs)) == 1:  # all same ref → broadcast
-                slices[name] = ('broadcast', len(all_refs), len(refs))
+                slices[name] = ('broadcast', len(all_refs))
                 all_refs.append(refs[0])
             else:
                 slices[name] = ('full', len(all_refs), len(all_refs) + len(refs))
                 all_refs.extend(refs)
         all_values = ray.get(all_refs)  # ONE call resolves everything
         result = {}
-        for name, (mode, start, end_or_n) in slices.items():
-            if mode == 'broadcast':
-                val = all_values[start]
-                result[name] = np.broadcast_to(val, (end_or_n,) + val.shape)
+        for name, info in slices.items():
+            if info[0] == 'broadcast':
+                val = all_values[info[1]]
+                result[name] = val[np.newaxis]  # (1, ...) — compact, consumer expands
             else:
-                result[name] = np.stack(all_values[start:end_or_n])
+                result[name] = np.stack(all_values[info[1]:info[2]])
         return result
 
     def _batch_to_refs(self, output):
@@ -259,6 +261,9 @@ class NodeWrapper:
     def _chunked_sample(self, n_samples, condition_refs, method):
         """Resolve refs, chunk, call method, return refs.
 
+        Broadcast conditions (shape[0]==1) pass through without slicing,
+        letting consumers expand efficiently (GPU expand or np.broadcast_to).
+
         Args:
             n_samples: Number of samples to generate
             condition_refs: Dict[str, List[ObjectRef]] or None
@@ -272,7 +277,10 @@ class NodeWrapper:
         result = []
         for start in range(0, n_samples, chunk_size):
             end = min(start + chunk_size, n_samples)
-            chunk = {k: v[start:end] for k, v in conditions.items()} if conditions else None
+            chunk = {
+                k: v if v.shape[0] == 1 else v[start:end]
+                for k, v in conditions.items()
+            } if conditions else None
             output = method(end - start, chunk)
             result.extend(self._batch_to_refs(output))
         return result
@@ -320,11 +328,20 @@ class NodeWrapper:
     def _simulate(self, n_samples, conditions=None):
         """Call simulator/estimator with resolved arrays.
 
+        Expands broadcast conditions (shape[0]==1) via np.broadcast_to
+        so simulators see per-sample arrays.
+
         Returns:
             dict: {'value': ndarray} or {'value': ndarray, 'log_prob': ndarray}
         """
         if self.estimator_instance is not None:
             return self.estimator_instance.sample_prior(n_samples, conditions=conditions or None)
+        # Expand broadcast conditions for simulators
+        if conditions:
+            conditions = {
+                k: np.broadcast_to(v, (n_samples,) + v.shape[1:]) if v.shape[0] == 1 else v
+                for k, v in conditions.items()
+            }
         # Simulator: extract parent arrays as positional args
         incoming = [conditions[p] for p in self.parents] if conditions else []
         if hasattr(self.simulator_instance, "simulate_batch"):

@@ -421,6 +421,9 @@ class CachedDataLoader:
     evictions or are bulk-appended. sample_batch() uses torch fancy indexing,
     which is ~5x faster than numpy for large arrays.
 
+    Data fetching (ray.get) runs in a background thread so the training event
+    loop is not blocked. New data becomes available one sync() call later.
+
     When device='cuda', the entire buffer lives on GPU for maximum speed
     (~50x vs numpy dict cache). Falls back to CPU when GPU memory is
     insufficient.
@@ -429,6 +432,7 @@ class CachedDataLoader:
     def __init__(self, dataset_manager, keys, sample_status, max_cache_samples=0,
                  device=None):
         import torch
+        from concurrent.futures import ThreadPoolExecutor
         self.dataset_manager = dataset_manager
         self.keys = keys
         self.sample_status = sample_status
@@ -443,29 +447,28 @@ class CachedDataLoader:
         self._id_to_row = {}    # sample_id -> row index in stacked arrays
         self._free_rows = []    # reusable row indices from evicted samples
 
+        # Background fetch thread
+        self._fetch_executor = ThreadPoolExecutor(max_workers=1)
+        self._pending_fetch = None  # Future -> (new_data, checkout)
+
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
         import torch
         return torch.as_tensor(np.array(arr)).to(self.device)
 
-    def sync(self):
-        """Incremental sync: fetch new samples, evict stale, update stacked tensors."""
+    def _fetch_data(self, checkout):
+        """Fetch new sample data from Ray object store (runs in background thread)."""
+        new_data = {}
+        for key in self.keys:
+            new_data[key] = ray.get(checkout[key])
+        ray.get(self.dataset_manager.release_refs.remote(checkout['_new_ids']))
+        return new_data, checkout
+
+    def _apply_fetch(self, new_data, checkout):
+        """Apply fetched data to the cache (runs on main thread at epoch boundary)."""
         import torch
-        checkout = ray.get(
-            self.dataset_manager.checkout_refs.remote(
-                self.sample_status, self.keys, self.max_cache_samples,
-                already_cached_ids=self.active_ids,
-            )
-        )
         active_ids = checkout['_active_ids']
         new_ids = checkout['_new_ids']
-
-        # Fetch new sample data from Ray object store (always numpy from Ray)
-        new_data = {}
-        if len(new_ids) > 0:
-            for key in self.keys:
-                new_data[key] = ray.get(checkout[key])
-            ray.get(self.dataset_manager.release_refs.remote(new_ids))
 
         # Evict stale samples: mark their rows as free
         active_set = set(active_ids.tolist())
@@ -517,6 +520,53 @@ class CachedDataLoader:
             dtype=torch.long, device=self.device,
         )
         self.count = len(self._active_rows)
+
+    def sync(self):
+        """Incremental sync with background data fetching.
+
+        Heavy ray.get calls run in a background thread. New data is applied
+        on the next sync() call, giving a 1-epoch delay but never blocking
+        the training event loop for bulk data transfer.
+        """
+        # 1. Apply any completed background fetch
+        if self._pending_fetch is not None:
+            new_data, checkout = self._pending_fetch.result()
+            self._apply_fetch(new_data, checkout)
+            self._pending_fetch = None
+
+        # 2. Check for new data and start background fetch
+        checkout = ray.get(
+            self.dataset_manager.checkout_refs.remote(
+                self.sample_status, self.keys, self.max_cache_samples,
+                already_cached_ids=self.active_ids,
+            )
+        )
+        new_ids = checkout['_new_ids']
+
+        if len(new_ids) > 0:
+            if len(self._arrays) == 0:
+                # First sync: must block to have data for training
+                new_data, checkout = self._fetch_data(checkout)
+                self._apply_fetch(new_data, checkout)
+            else:
+                # Subsequent syncs: fetch in background
+                self._pending_fetch = self._fetch_executor.submit(
+                    self._fetch_data, checkout
+                )
+        else:
+            # No new data, just update evictions
+            active_ids = checkout['_active_ids']
+            active_set = set(active_ids.tolist())
+            for sid in list(self._id_to_row.keys()):
+                if sid not in active_set:
+                    self._free_rows.append(self._id_to_row.pop(sid))
+            self.active_ids = active_ids
+            import torch
+            self._active_rows = torch.tensor(
+                [self._id_to_row[sid] for sid in self._id_to_row],
+                dtype=torch.long, device=self.device,
+            )
+            self.count = len(self._active_rows)
 
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
