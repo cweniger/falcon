@@ -15,7 +15,6 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.base_estimator import BaseEstimator
-from falcon.core.utils import RVBatch
 from falcon.core.logger import log, debug, info, warning, error
 
 
@@ -185,7 +184,8 @@ class StepwiseEstimator(BaseEstimator):
             buffer: BufferView providing access to training/validation data
         """
         cfg = self.loop_config
-        keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+        keys = [f"{self.theta_key}.value", f"{self.theta_key}.log_prob",
+                *[f"{k}.value" for k in self.condition_keys]]
         await self._train(buffer, cfg, keys)
 
     async def _train(self, buffer, cfg, keys) -> None:
@@ -430,9 +430,9 @@ class LossBasedEstimator(StepwiseEstimator):
         from falcon.contrib.torch_embedding import instantiate_embedding
 
         # Extract and store tensors for reload
-        self._init_theta = self._to_tensor(batch[self.theta_key])
+        self._init_theta = self._to_tensor(batch[f"{self.theta_key}.value"])
         self._init_conditions = {
-            k: self._to_tensor(batch[k]) for k in self.condition_keys if k in batch
+            k: self._to_tensor(batch[f"{k}.value"]) for k in self.condition_keys if f"{k}.value" in batch
         }
         return self._create_model(self._init_theta, self._init_conditions)
 
@@ -471,11 +471,11 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def _compute_loss(self, batch) -> Tuple[torch.Tensor, Dict[str, float]]:
         """Compute loss from batch."""
-        theta = self._to_tensor(batch[self.theta_key], self.device)
-        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.logprob"])
+        theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
+        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
-            k: self._to_tensor(batch[k], self.device)
-            for k in self.condition_keys if k in batch
+            k: self._to_tensor(batch[f"{k}.value"], self.device)
+            for k in self.condition_keys if f"{k}.value" in batch
         }
 
         # Transform theta to latent space if mode specified
@@ -601,15 +601,15 @@ class LossBasedEstimator(StepwiseEstimator):
 
     # ==================== Sampling Methods ====================
 
-    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from the prior distribution."""
         if conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
-        logprob = np.zeros(num_samples)
-        return RVBatch(samples, logprob=logprob)
+        log_prob = np.zeros(num_samples)
+        return {'value': samples, 'log_prob': log_prob}
 
-    def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> RVBatch:
+    def _sample(self, num_samples: int, conditions: Optional[Dict], gamma: Optional[float]) -> dict:
         """Internal sampling using inference model. Falls back to prior if not trained."""
         if not self.has_trained_model:
             return self.sample_prior(num_samples)
@@ -617,7 +617,7 @@ class LossBasedEstimator(StepwiseEstimator):
         assert conditions, "Conditions must be provided for sampling."
 
         conditions_device = {
-            k: v.to(self.device).expand(num_samples, *v.shape[1:])
+            k: self._to_tensor(v, self.device).expand(num_samples, *v.shape[1:])
             for k, v in conditions.items()
         }
 
@@ -625,25 +625,25 @@ class LossBasedEstimator(StepwiseEstimator):
         with torch.no_grad():
             model.eval()
             samples = model.sample(conditions_device, gamma=gamma)
-            logprob = model.log_prob(samples, conditions_device)
+            log_prob = model.log_prob(samples, conditions_device)
 
             # Transform samples from latent space back to theta space
             if self.latent_mode is not None:
                 samples = self.simulator_instance.forward(samples, mode=self.latent_mode)
 
-        return RVBatch(samples.cpu().numpy(), logprob=logprob.cpu().numpy())
+        return {'value': samples.cpu().numpy(), 'log_prob': log_prob.cpu().numpy()}
 
-    def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+    def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from the posterior distribution q(theta|x)."""
         return self._sample(num_samples, conditions, gamma=None)
 
-    def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+    def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from widened proposal distribution for adaptive resampling."""
         result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
         log({
-            "sample_proposal:mean": result.value.mean(),
-            "sample_proposal:std": result.value.std(),
-            "sample_proposal:logprob": result.logprob.mean(),
+            "sample_proposal:mean": result['value'].mean(),
+            "sample_proposal:std": result['value'].std(),
+            "sample_proposal:logprob": result['log_prob'].mean(),
         })
         return result
 

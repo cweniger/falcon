@@ -10,7 +10,15 @@ from omegaconf import ListConfig
 
 from falcon.core.logger import Logger, set_logger, debug, info, warning, error, log
 from falcon.core.raystore import BufferView
-from .utils import LazyLoader, RVBatch
+from .utils import LazyLoader
+
+# Keys in the ray: config section that are consumed by NodeWrapper, not by Ray itself
+_CUSTOM_ACTOR_KEYS = {'chunk_size'}
+
+
+def _ray_options(actor_config):
+    """Filter actor_config to only valid Ray actor options."""
+    return {k: v for k, v in actor_config.items() if k not in _CUSTOM_ACTOR_KEYS}
 
 
 @ray.remote
@@ -18,21 +26,20 @@ class MultiplexNodeWrapper:
     def __init__(self, actor_config, node, graph, num_actors, model_path=None, log_config=None):
         self.num_actors = num_actors
         self.wrapped_node_list = [
-            NodeWrapper.options(**actor_config).remote(node, graph, model_path, log_config)
+            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, model_path, log_config)
             for _ in range(self.num_actors)
         ]
 
-    def sample(self, n_samples, incoming=None):
-        """Multiplexed sampling returning refs.
-
-        Distributes work across actors and gathers refs.
+    def _multiplexed_call(self, method_name, n_samples, condition_refs=None):
+        """Distribute work across actors, slicing ref lists.
 
         Args:
-            n_samples: Number of samples to generate
-            incoming: List of arrays from parent nodes
+            method_name: Name of the method to call on each actor
+            n_samples: Total number of samples to generate
+            condition_refs: Dict[str, List[ObjectRef]] or None
 
         Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample with refs to values
+            List[Dict[str, ObjectRef]]: Concatenated results from all actors
         """
         num_samples_per_node = n_samples / self.num_actors
         index_range_list = [
@@ -43,40 +50,9 @@ class MultiplexNodeWrapper:
 
         futures = []
         for i, (start, end) in enumerate(index_range_list):
-            my_incoming = [v[start:end] for v in incoming] if incoming else None
-            futures.append(
-                self.wrapped_node_list[i].sample.remote(
-                    end - start, incoming=my_incoming
-                )
-            )
-        # Each actor returns List[Dict[str, ObjectRef]]
-        sample_lists = ray.get(futures)
-        # Concatenate lists
-        result = []
-        for sample_list in sample_lists:
-            if sample_list:
-                result.extend(sample_list)
-        return result
-
-    def sample_posterior(self, n_samples, conditions=None):
-        """Multiplexed posterior sampling returning refs."""
-        num_samples_per_node = n_samples / self.num_actors
-        index_range_list = [
-            (int(i * num_samples_per_node), int((i + 1) * num_samples_per_node))
-            for i in range(self.num_actors)
-        ]
-        index_range_list[-1] = (index_range_list[-1][0], n_samples)
-
-        futures = []
-        for i, (start, end) in enumerate(index_range_list):
-            chunk_conditions = None
-            if conditions:
-                chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
-            futures.append(
-                self.wrapped_node_list[i].sample_posterior.remote(
-                    end - start, conditions=chunk_conditions
-                )
-            )
+            chunk_refs = {k: v[start:end] for k, v in condition_refs.items()} if condition_refs else None
+            method = getattr(self.wrapped_node_list[i], method_name)
+            futures.append(method.remote(end - start, condition_refs=chunk_refs))
         sample_lists = ray.get(futures)
         result = []
         for sample_list in sample_lists:
@@ -84,31 +60,14 @@ class MultiplexNodeWrapper:
                 result.extend(sample_list)
         return result
 
-    def sample_proposal(self, n_samples, conditions=None):
-        """Multiplexed proposal sampling returning refs."""
-        num_samples_per_node = n_samples / self.num_actors
-        index_range_list = [
-            (int(i * num_samples_per_node), int((i + 1) * num_samples_per_node))
-            for i in range(self.num_actors)
-        ]
-        index_range_list[-1] = (index_range_list[-1][0], n_samples)
+    def sample(self, n_samples, condition_refs=None):
+        return self._multiplexed_call('sample', n_samples, condition_refs)
 
-        futures = []
-        for i, (start, end) in enumerate(index_range_list):
-            chunk_conditions = None
-            if conditions:
-                chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
-            futures.append(
-                self.wrapped_node_list[i].sample_proposal.remote(
-                    end - start, conditions=chunk_conditions
-                )
-            )
-        sample_lists = ray.get(futures)
-        result = []
-        for sample_list in sample_lists:
-            if sample_list:
-                result.extend(sample_list)
-        return result
+    def sample_posterior(self, n_samples, condition_refs=None):
+        return self._multiplexed_call('sample_posterior', n_samples, condition_refs)
+
+    def sample_proposal(self, n_samples, condition_refs=None):
+        return self._multiplexed_call('sample_proposal', n_samples, condition_refs)
 
     def shutdown(self):
         for node in self.wrapped_node_list:
@@ -231,160 +190,144 @@ class NodeWrapper:
         else:
             info(f"[{self.name}] Training completed")
 
-    def _simulate(self, n_samples, incoming=None):
-        """Internal method that calls the actual simulator/estimator.
+    # ==================== Ref/Array Boundary ====================
+
+    def _resolve_refs(self, condition_refs):
+        """Convert refs to arrays. Single batched ray.get.
+
+        Args:
+            condition_refs: Dict[str, List[ObjectRef]] or None
 
         Returns:
-            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
+            Dict[str, ndarray] with stacked arrays, or empty dict
         """
-        # Default to empty list for simulator paths
-        if incoming is None:
-            incoming = []
+        if not condition_refs:
+            return {}
+        # Flatten all refs into one list for a single ray.get call
+        all_refs = []
+        slices = {}
+        for name, refs in condition_refs.items():
+            slices[name] = (len(all_refs), len(all_refs) + len(refs))
+            all_refs.extend(refs)
+        all_values = ray.get(all_refs)  # ONE call resolves everything
+        return {name: np.stack(all_values[start:end]) for name, (start, end) in slices.items()}
 
-        if self.estimator_instance is not None:
-            # Convert list to dict for new interface (prior typically has no conditions)
-            conditions = None
-            if incoming:
-                conditions = {k: v for k, v in zip(self.parents, incoming)}
-            result = self.estimator_instance.sample_prior(n_samples, conditions=conditions)
-            # Normalize to (value, logprob) tuple
-            if isinstance(result, RVBatch):
-                return result.value, result.logprob
-            return result, None
-        if hasattr(self.simulator_instance, "simulate_batch"):
-            return self.simulator_instance.simulate_batch(n_samples, *incoming), None
-        else:
-            samples = []
-            for i in range(n_samples):
-                params = [v[i] for v in incoming]
-                samples.append(self.simulator_instance.simulate(*params))
-            return np.stack(samples), None
+    def _batch_to_refs(self, output):
+        """Convert output dict to list of per-sample ref dicts.
 
-    def sample(self, n_samples, incoming=None):
-        """Sample and return ObjectRefs. Handles chunking internally.
+        Args:
+            output: {'value': arr[N,...], 'log_prob': arr[N], ...}
+
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample with flat keys
+                e.g. [{'theta.value': ref, 'theta.log_prob': ref}, ...]
+        """
+        value = output['value']
+        n = value.shape[0] if isinstance(value, np.ndarray) else len(next(iter(value.values())))
+        # Phase 1: fire all ray.put calls (non-blocking, all return immediately)
+        ref_columns = {}
+        for key, arr in output.items():
+            full_key = f"{self.name}.{key}"
+            if isinstance(arr, np.ndarray):
+                ref_columns[full_key] = [ray.put(arr[i]) for i in range(n)]
+            else:  # dict-valued (CompositeNode)
+                ref_columns[full_key] = [ray.put({k: v[i] for k, v in arr.items()}) for i in range(n)]
+        # Phase 2: assemble per-sample dicts
+        return [{k: refs[i] for k, refs in ref_columns.items()} for i in range(n)]
+
+    def _chunked_sample(self, n_samples, condition_refs, method):
+        """Resolve refs, chunk, call method, return refs.
 
         Args:
             n_samples: Number of samples to generate
-            incoming: List of arrays from parent nodes (one per parent)
-
-        Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample with refs to values
-        """
-        chunk_size = self.node.actor_config.get('chunk_size', 0)
-        if chunk_size <= 0:
-            chunk_size = n_samples  # No chunking
-
-        result = []
-        for start in range(0, n_samples, chunk_size):
-            end = min(start + chunk_size, n_samples)
-            chunk_incoming = [v[start:end] for v in incoming] if incoming is not None else None
-
-            # Call simulator - returns (value, logprob) tuple
-            value, logprob = self._simulate(end - start, chunk_incoming)
-
-            # Convert chunk to refs
-            result.extend(self._batch_to_refs(value, logprob))
-
-        return result
-
-    def _sample_posterior(self, n_samples, conditions=None):
-        """Internal method for posterior sampling.
-
-        Returns:
-            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
-        """
-        result = self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
-        if isinstance(result, RVBatch):
-            return result.value, result.logprob
-        return result, None
-
-    def _sample_proposal(self, n_samples, conditions=None):
-        """Internal method for proposal sampling.
-
-        Returns:
-            Tuple[ndarray, ndarray|None]: (value, logprob) where logprob may be None
-        """
-        result = self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
-        if isinstance(result, RVBatch):
-            return result.value, result.logprob
-        return result, None
-
-    def _batch_to_refs(self, value, logprob):
-        """Convert batched (value, logprob) to list of dicts with ObjectRefs.
-
-        Args:
-            value: Batched values (ndarray or dict of ndarrays)
-            logprob: Batched logprobs (ndarray) or None
+            condition_refs: Dict[str, List[ObjectRef]] or None
+            method: Internal method (_simulate, _sample_posterior, _sample_proposal)
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample
         """
-        result = []
-        n = value.shape[0] if isinstance(value, np.ndarray) else len(next(iter(value.values())))
-        for i in range(n):
-            sample_dict = {}
-            if isinstance(value, np.ndarray):
-                sample_dict[self.name] = ray.put(value[i])
-            else:
-                # value is a dict, store the i-th slice as a dict under self.name
-                sample_i = {k: v[i] for k, v in value.items()}
-                sample_dict[self.name] = ray.put(sample_i)
-            if logprob is not None:
-                sample_dict[f"{self.name}.logprob"] = ray.put(logprob[i])
-            result.append(sample_dict)
-        return result
-
-    def sample_posterior(self, n_samples, conditions=None):
-        """Sample from posterior and return ObjectRefs. Handles chunking internally.
-
-        Args:
-            n_samples: Number of samples to generate
-            conditions: Dict mapping condition keys to arrays
-
-        Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample with refs to values
-        """
-        chunk_size = self.node.actor_config.get('chunk_size', 0)
-        if chunk_size <= 0:
-            chunk_size = n_samples
-
+        conditions = self._resolve_refs(condition_refs)
+        chunk_size = self.node.actor_config.get('chunk_size', 0) or n_samples
         result = []
         for start in range(0, n_samples, chunk_size):
             end = min(start + chunk_size, n_samples)
-            chunk_conditions = None
-            if conditions:
-                chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
-
-            value, logprob = self._sample_posterior(end - start, conditions=chunk_conditions)
-            result.extend(self._batch_to_refs(value, logprob))
-
+            chunk = {k: v[start:end] for k, v in conditions.items()} if conditions else None
+            output = method(end - start, chunk)
+            result.extend(self._batch_to_refs(output))
         return result
 
-    def sample_proposal(self, n_samples, conditions=None):
-        """Sample from proposal and return ObjectRefs. Handles chunking internally.
+    # ==================== Public Sampling Methods ====================
+
+    def sample(self, n_samples, condition_refs=None):
+        """Sample and return ObjectRefs. Handles chunking internally.
 
         Args:
             n_samples: Number of samples to generate
-            conditions: Dict mapping condition keys to arrays
+            condition_refs: Dict[str, List[ObjectRef]] from parent nodes
 
         Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample with refs to values
+            List[Dict[str, ObjectRef]]: One dict per sample
         """
-        chunk_size = self.node.actor_config.get('chunk_size', 0)
-        if chunk_size <= 0:
-            chunk_size = n_samples
+        return self._chunked_sample(n_samples, condition_refs, self._simulate)
 
-        result = []
-        for start in range(0, n_samples, chunk_size):
-            end = min(start + chunk_size, n_samples)
-            chunk_conditions = None
-            if conditions:
-                chunk_conditions = {k: v[start:end] for k, v in conditions.items()}
+    def sample_posterior(self, n_samples, condition_refs=None):
+        """Sample from posterior and return ObjectRefs.
 
-            value, logprob = self._sample_proposal(end - start, conditions=chunk_conditions)
-            result.extend(self._batch_to_refs(value, logprob))
+        Args:
+            n_samples: Number of samples to generate
+            condition_refs: Dict[str, List[ObjectRef]] from condition nodes
 
-        return result
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample
+        """
+        return self._chunked_sample(n_samples, condition_refs, self._sample_posterior)
+
+    def sample_proposal(self, n_samples, condition_refs=None):
+        """Sample from proposal and return ObjectRefs.
+
+        Args:
+            n_samples: Number of samples to generate
+            condition_refs: Dict[str, List[ObjectRef]] from condition nodes
+
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample
+        """
+        return self._chunked_sample(n_samples, condition_refs, self._sample_proposal)
+
+    # ==================== Internal Sampling Methods ====================
+
+    def _simulate(self, n_samples, conditions=None):
+        """Call simulator/estimator with resolved arrays.
+
+        Returns:
+            dict: {'value': ndarray} or {'value': ndarray, 'log_prob': ndarray}
+        """
+        if self.estimator_instance is not None:
+            return self.estimator_instance.sample_prior(n_samples, conditions=conditions or None)
+        # Simulator: extract parent arrays as positional args
+        incoming = [conditions[p] for p in self.parents] if conditions else []
+        if hasattr(self.simulator_instance, "simulate_batch"):
+            value = self.simulator_instance.simulate_batch(n_samples, *incoming)
+        else:
+            value = np.stack([self.simulator_instance.simulate(*[v[i] for v in incoming])
+                              for i in range(n_samples)])
+        return {'value': value}
+
+    def _sample_posterior(self, n_samples, conditions=None):
+        """Call estimator posterior sampling with resolved arrays.
+
+        Returns:
+            dict: {'value': ndarray, 'log_prob': ndarray}
+        """
+        return self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
+
+    def _sample_proposal(self, n_samples, conditions=None):
+        """Call estimator proposal sampling with resolved arrays.
+
+        Returns:
+            dict: {'value': ndarray, 'log_prob': ndarray}
+        """
+        return self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
 
     # TODO: Currently not used anywhere, add tests?
     def call_simulator_method(self, method_name, *args, **kwargs):
@@ -517,7 +460,7 @@ class DeployedGraph:
                 )
             else:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
-                    **node.actor_config
+                    **_ray_options(node.actor_config)
                 ).remote(node, self.graph, self.model_path, self.log_config)
 
         # Wait for all actors to initialize and register with monitor bridge
@@ -536,28 +479,6 @@ class DeployedGraph:
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
-    def _resolve_refs_to_trace(self, sample_refs, trace):
-        """Resolve ObjectRefs and update trace with stacked arrays.
-
-        Args:
-            sample_refs: List[Dict[str, ObjectRef]] - one dict per sample
-            trace: Dict to update with stacked arrays
-        """
-        if not sample_refs:
-            return
-
-        # Collect all keys from the refs
-        keys = set()
-        for ref_dict in sample_refs:
-            keys.update(ref_dict.keys())
-
-        # Resolve and stack for each key
-        for key in keys:
-            if key not in trace:
-                values = [ray.get(ref_dict[key]) for ref_dict in sample_refs if key in ref_dict]
-                if values:
-                    trace[key] = np.stack(values)
-
     def _merge_refs(self, sample_refs, node_refs):
         """Merge node refs into sample refs list.
 
@@ -572,55 +493,90 @@ class DeployedGraph:
             # Merge keys from node_refs into existing sample dicts
             for i, ref_dict in enumerate(node_refs):
                 sample_refs[i].update(ref_dict)
-        # Debug: print keys in first sample
         if sample_refs:
             debug(f"_merge_refs: sample_refs[0] keys = {list(sample_refs[0].keys())}")
 
-    def _execute_graph(self, num_samples, sorted_node_names, conditions, sample_method):
+    def _arrays_to_condition_refs(self, conditions, num_samples):
+        """Convert arrays/tensors to per-sample ObjectRefs.
+
+        Handles broadcast: arrays with shape[0]==1 use a single ref repeated.
+
+        Args:
+            conditions: Dict[str, ndarray/Tensor]
+            num_samples: Number of samples
+
+        Returns:
+            Dict[str, List[ObjectRef]]
+        """
+        if not conditions:
+            return {}
+        result = {}
+        for name, arr in conditions.items():
+            if arr.shape[0] == 1:
+                ref = ray.put(arr[0])
+                result[name] = [ref] * num_samples
+            else:
+                result[name] = [ray.put(arr[i]) for i in range(arr.shape[0])]
+        return result
+
+    def _extract_value_refs(self, sample_refs):
+        """Extract .value refs grouped by node name from sample_refs.
+
+        Args:
+            sample_refs: List[Dict[str, ObjectRef]] with flat keys like 'theta.value'
+
+        Returns:
+            Dict[str, List[ObjectRef]] keyed by node name
+        """
+        if not sample_refs:
+            return {}
+        result = {}
+        for key in sample_refs[0].keys():
+            if key.endswith('.value'):
+                node_name = key[:-6]
+                result[node_name] = [d[key] for d in sample_refs]
+        return result
+
+    def _execute_graph(self, num_samples, sorted_node_names, condition_refs, sample_method):
         """Execute graph traversal with specified sampling method.
+
+        All data flows as ObjectRefs - no array resolution at this layer.
 
         Args:
             num_samples: Number of samples to generate
             sorted_node_names: Node names in execution order
-            conditions: Initial trace conditions (dict of arrays for observed nodes)
+            condition_refs: Dict[str, List[ObjectRef]] for pre-set nodes
             sample_method: One of "sample", "sample_posterior", "sample_proposal"
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
         """
-        # trace holds stacked arrays for passing between nodes during graph traversal
-        trace = conditions.copy()
-
-        # sample_refs accumulates ObjectRefs from all nodes
+        ref_trace = dict(condition_refs)  # {name: [ObjectRef, ...]}
         sample_refs = []
 
         for name in sorted_node_names:
-            if name in trace:
+            if name in ref_trace:
                 continue
 
-            # Get conditions based on sampling method
+            # Build condition refs for this node
+            node_condition_refs = {}
             if sample_method == "sample":
-                incoming = [trace[parent] for parent in self.graph.get_parents(name)]
-                node_refs = ray.get(
-                    self.wrapped_nodes_dict[name].sample.remote(num_samples, incoming=incoming)
-                )
-            else:
-                # Build conditions dict from parents and evidence
-                node_conditions = {}
                 for parent in self.graph.get_parents(name):
-                    node_conditions[parent] = trace[parent]
+                    node_condition_refs[parent] = ref_trace[parent]
+            else:
+                for parent in self.graph.get_parents(name):
+                    node_condition_refs[parent] = ref_trace[parent]
                 for evidence in self.graph.get_evidence(name):
-                    node_conditions[evidence] = trace[evidence]
+                    node_condition_refs[evidence] = ref_trace[evidence]
 
-                remote_method = getattr(self.wrapped_nodes_dict[name], sample_method)
-                node_refs = ray.get(
-                    remote_method.remote(num_samples, conditions=node_conditions)
-                )
+            remote_method = getattr(self.wrapped_nodes_dict[name], sample_method)
+            node_refs = ray.get(
+                remote_method.remote(num_samples, condition_refs=node_condition_refs)
+            )
 
-            # Resolve refs to arrays for the trace (needed for child nodes)
-            self._resolve_refs_to_trace(node_refs, trace)
+            # Update trace with value refs for downstream nodes
+            ref_trace[name] = [d[f'{name}.value'] for d in node_refs]
 
-            # Merge refs into accumulator
             self._merge_refs(sample_refs, node_refs)
 
         return sample_refs
@@ -630,16 +586,14 @@ class DeployedGraph:
 
         Args:
             num_samples: Number of samples to generate
-            conditions: Optional dict of pre-set conditions (arrays)
+            conditions: Optional dict of pre-set conditions (arrays/tensors)
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
         """
+        condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples,
-            self.graph.sorted_node_names,
-            conditions or {},
-            "sample",
+            num_samples, self.graph.sorted_node_names, condition_refs, "sample",
         )
 
     def sample_posterior(self, num_samples, conditions=None):
@@ -647,16 +601,14 @@ class DeployedGraph:
 
         Args:
             num_samples: Number of samples to generate
-            conditions: Optional dict of pre-set conditions (arrays)
+            conditions: Optional dict of pre-set conditions (arrays/tensors)
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
         """
+        condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples,
-            self.graph.sorted_inference_node_names,
-            conditions or {},
-            "sample_posterior",
+            num_samples, self.graph.sorted_inference_node_names, condition_refs, "sample_posterior",
         )
 
     def sample_proposal(self, num_samples, conditions=None):
@@ -664,38 +616,33 @@ class DeployedGraph:
 
         Args:
             num_samples: Number of samples to generate
-            conditions: Optional dict of pre-set conditions (arrays)
+            conditions: Optional dict of pre-set conditions (arrays/tensors)
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
         """
+        condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples,
-            self.graph.sorted_inference_node_names,
-            conditions or {},
-            "sample_proposal",
+            num_samples, self.graph.sorted_inference_node_names, condition_refs, "sample_proposal",
         )
 
     def _refs_to_arrays(self, sample_refs):
         """Convert List[Dict[str, ObjectRef]] to Dict[str, ndarray].
 
-        Resolves refs and stacks into batched arrays.
+        Uses a single batched ray.get for efficiency.
         """
         if not sample_refs:
             return {}
-
-        # Collect all keys
-        keys = set()
-        for ref_dict in sample_refs:
-            keys.update(ref_dict.keys())
-
-        # Resolve and stack
-        result = {}
+        keys = list(sample_refs[0].keys())
+        # Flatten all refs across all keys into one list
+        all_refs = []
+        key_slices = {}
         for key in keys:
-            values = [ray.get(ref_dict[key]) for ref_dict in sample_refs if key in ref_dict]
-            if values:
-                result[key] = np.stack(values)
-        return result
+            refs = [d[key] for d in sample_refs if key in d]
+            key_slices[key] = (len(all_refs), len(all_refs) + len(refs))
+            all_refs.extend(refs)
+        all_values = ray.get(all_refs)  # ONE call
+        return {key: np.stack(all_values[start:end]) for key, (start, end) in key_slices.items()}
 
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
@@ -764,15 +711,16 @@ class DeployedGraph:
             if num_new_samples > 0:
                 # Sample from proposal (returns refs)
                 proposal_refs = self.sample_proposal(num_new_samples, observations)
-                # Convert refs to arrays for use as conditions
-                proposal_arrays = self._refs_to_arrays(proposal_refs)
+                # Extract value refs directly (no array resolution needed)
+                condition_refs = self._extract_value_refs(proposal_refs)
                 # Remove observations from conditions
-                for key in observations.keys():
-                    proposal_arrays.pop(key, None)
-                # Forward sample with proposal as conditions (returns refs)
-                sample_refs = self.sample(num_new_samples, conditions=proposal_arrays)
-                # Merge proposal refs (z1, z2, logprobs) into sample refs (img1, img2, x)
-                # so the complete sample is stored in the buffer
+                for key in observations:
+                    condition_refs.pop(key, None)
+                # Forward sample with proposal values as conditions (ref-only, no double serialization)
+                sample_refs = self._execute_graph(
+                    num_new_samples, self.graph.sorted_node_names, condition_refs, "sample"
+                )
+                # Merge proposal refs (theta.value, theta.log_prob) into sample refs (x.value)
                 for i, prop_ref in enumerate(proposal_refs):
                     sample_refs[i].update(prop_ref)
                 # Append refs directly to buffer

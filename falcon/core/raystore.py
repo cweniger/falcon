@@ -15,11 +15,13 @@ class Batch:
     Provides dictionary-style access to batch data and allows marking
     samples as disfavoured via the discard() method.
 
+    Keys use flat dotted format: 'theta.value', 'theta.log_prob', 'x.value', etc.
+
     Example:
         for batch in dataloader:
-            theta = batch['z']
-            logprob = batch['z.logprob']
-            x = batch['x']
+            theta = batch['theta.value']
+            logprob = batch['theta.log_prob']
+            x = batch['x.value']
 
             # Discard low-likelihood samples
             mask = logprob < threshold
@@ -444,7 +446,7 @@ class CachedDataLoader:
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
         import torch
-        return torch.as_tensor(np.asarray(arr)).to(self.device)
+        return torch.as_tensor(np.array(arr)).to(self.device)
 
     def sync(self):
         """Incremental sync: fetch new samples, evict stale, update stacked tensors."""
@@ -530,17 +532,19 @@ class BufferView:
     """View into the sample buffer for estimator training.
 
     Passed to estimator.train() - estimator requests cached dataloaders with specific keys.
+    Keys use flat dotted format: 'theta.value', 'theta.log_prob', 'x.value', etc.
 
     Example:
         async def train(self, buffer: BufferView):
-            keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+            keys = [f"{self.theta_key}.value", f"{self.theta_key}.log_prob",
+                    *[f"{k}.value" for k in self.condition_keys]]
             train_cache = buffer.cached_loader(keys)
             val_cache = buffer.cached_val_loader(keys)
             train_cache.sync()
             val_cache.sync()
             for step in range(steps_per_epoch):
                 batch = train_cache.sample_batch(batch_size)
-                theta = batch[self.theta_key]
+                theta = batch[f'{self.theta_key}.value']
                 ...
     """
 
