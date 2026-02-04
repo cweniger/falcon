@@ -116,9 +116,7 @@ class StepwiseEstimator(BaseEstimator):
         """Convert numpy array or torch tensor to the target device."""
         if isinstance(x, torch.Tensor):
             return x if device is None else x.to(device)
-        if not x.flags.writeable:
-            x = np.array(x)
-        return torch.from_numpy(x) if device is None else torch.from_numpy(x).to(device)
+        return torch.from_numpy(np.asarray(x)) if device is None else torch.from_numpy(np.asarray(x)).to(device)
 
     # ==================== Abstract Methods ====================
 
