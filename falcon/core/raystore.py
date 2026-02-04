@@ -456,16 +456,35 @@ class CachedDataLoader:
         import torch
         return torch.as_tensor(np.array(arr)).to(self.device)
 
-    def _fetch_data(self, checkout):
-        """Fetch new sample data from Ray object store (runs in background thread)."""
-        new_data = {}
-        for key in self.keys:
-            new_data[key] = ray.get(checkout[key])
-        ray.get(self.dataset_manager.release_refs.remote(checkout['_new_ids']))
-        return new_data, checkout
+    def _checkout_and_fetch(self, active_ids_snapshot):
+        """Run checkout + data fetch + tensor build in background thread.
 
-    def _apply_fetch(self, new_data, checkout):
-        """Apply fetched data to the cache (runs on main thread at epoch boundary)."""
+        Moves checkout_refs, ray.get data resolution, AND the expensive
+        np.stack + tensor conversion off the main thread.  _apply_fetch
+        on the main thread only does fast indexed scatter/cat.
+        """
+        import torch
+        checkout = ray.get(
+            self.dataset_manager.checkout_refs.remote(
+                self.sample_status, self.keys, self.max_cache_samples,
+                already_cached_ids=active_ids_snapshot,
+            )
+        )
+        new_ids = checkout['_new_ids']
+        new_tensors = {}
+        if len(new_ids) > 0:
+            for key in self.keys:
+                raw = ray.get(checkout[key])
+                new_tensors[key] = torch.as_tensor(np.stack(raw)).to(self.device)
+            ray.get(self.dataset_manager.release_refs.remote(new_ids))
+        return new_tensors, checkout
+
+    def _apply_fetch(self, new_tensors, checkout):
+        """Apply pre-built tensors to the cache (runs on main thread).
+
+        Tensors are already stacked and on-device (built in background thread).
+        This method only does fast indexed scatter and torch.cat.
+        """
         import torch
         active_ids = checkout['_active_ids']
         new_ids = checkout['_new_ids']
@@ -480,93 +499,76 @@ class CachedDataLoader:
         if len(new_ids) == 0:
             pass
         elif len(self._arrays) == 0:
-            # First sync: bulk-build stacked tensors
+            # First sync: use pre-built tensors directly
             for key in self.keys:
-                self._arrays[key] = self._to_tensor(np.stack(new_data[key]))
+                self._arrays[key] = new_tensors[key]
             self._stacked_ids = np.array(new_ids)
             for i, sid in enumerate(new_ids):
                 self._id_to_row[sid] = i
         else:
-            # Incremental: fill free slots first, then bulk-append remainder
-            idx = 0
-            while idx < len(new_ids) and self._free_rows:
-                row = self._free_rows.pop()
-                sid = new_ids[idx]
+            # Scatter into free slots (batched indexed assignment)
+            n_free = min(len(new_ids), len(self._free_rows))
+            if n_free > 0:
+                free_rows = [self._free_rows.pop() for _ in range(n_free)]
+                row_idx = torch.tensor(free_rows, dtype=torch.long, device=self.device)
                 for key in self.keys:
-                    self._arrays[key][row] = self._to_tensor(new_data[key][idx])
-                self._stacked_ids[row] = sid
-                self._id_to_row[sid] = row
-                idx += 1
+                    self._arrays[key][row_idx] = new_tensors[key][:n_free]
+                for i, row in enumerate(free_rows):
+                    sid = new_ids[i]
+                    self._stacked_ids[row] = sid
+                    self._id_to_row[sid] = row
 
-            if idx < len(new_ids):
-                # Bulk-append remaining
+            # Bulk-append remainder
+            if n_free < len(new_ids):
                 for key in self.keys:
-                    tail = self._to_tensor(np.stack(new_data[key][idx:]))
                     self._arrays[key] = torch.cat(
-                        [self._arrays[key], tail], dim=0
+                        [self._arrays[key], new_tensors[key][n_free:]], dim=0
                     )
                 base_row = len(self._stacked_ids)
                 self._stacked_ids = np.concatenate(
-                    [self._stacked_ids, np.array(new_ids[idx:])]
+                    [self._stacked_ids, np.array(new_ids[n_free:])]
                 )
-                for j, sid in enumerate(new_ids[idx:]):
+                for j, sid in enumerate(new_ids[n_free:]):
                     self._id_to_row[sid] = base_row + j
 
         self.active_ids = active_ids
 
         # Build index of active rows for sampling
         self._active_rows = torch.tensor(
-            [self._id_to_row[sid] for sid in self._id_to_row],
+            list(self._id_to_row.values()),
             dtype=torch.long, device=self.device,
         )
         self.count = len(self._active_rows)
 
     def sync(self):
-        """Incremental sync with background data fetching.
+        """Non-blocking incremental sync.
 
-        Heavy ray.get calls run in a background thread. New data is applied
-        on the next sync() call, giving a 1-epoch delay but never blocking
-        the training event loop for bulk data transfer.
+        Both checkout_refs and data fetching run in a background thread,
+        so sync() never blocks the training loop.  The only exception is
+        the very first call, which must block until initial data arrives.
         """
-        # 1. Apply any completed background fetch
+        first_sync = len(self._arrays) == 0
+
+        # 1. Apply completed background work
         if self._pending_fetch is not None:
-            new_data, checkout = self._pending_fetch.result()
-            self._apply_fetch(new_data, checkout)
-            self._pending_fetch = None
-
-        # 2. Check for new data and start background fetch
-        checkout = ray.get(
-            self.dataset_manager.checkout_refs.remote(
-                self.sample_status, self.keys, self.max_cache_samples,
-                already_cached_ids=self.active_ids,
-            )
-        )
-        new_ids = checkout['_new_ids']
-
-        if len(new_ids) > 0:
-            if len(self._arrays) == 0:
-                # First sync: must block to have data for training
-                new_data, checkout = self._fetch_data(checkout)
-                self._apply_fetch(new_data, checkout)
+            if first_sync or self._pending_fetch.done():
+                new_tensors, checkout = self._pending_fetch.result()
+                self._pending_fetch = None
+                self._apply_fetch(new_tensors, checkout)
             else:
-                # Subsequent syncs: fetch in background
-                self._pending_fetch = self._fetch_executor.submit(
-                    self._fetch_data, checkout
-                )
-        else:
-            # No new data, just update evictions
-            active_ids = checkout['_active_ids']
-            active_set = set(active_ids.tolist())
-            for sid in list(self._id_to_row.keys()):
-                if sid not in active_set:
-                    self._free_rows.append(self._id_to_row.pop(sid))
-            self.active_ids = active_ids
-            import torch
-            self._active_rows = torch.tensor(
-                [self._id_to_row[sid] for sid in self._id_to_row],
-                dtype=torch.long, device=self.device,
-            )
-            self.count = len(self._active_rows)
+                # Still running — don't block, training continues
+                return
+
+        # 2. Launch new background checkout + fetch
+        self._pending_fetch = self._fetch_executor.submit(
+            self._checkout_and_fetch, self.active_ids.copy()
+        )
+
+        # First sync must block — training needs initial data
+        if first_sync:
+            new_tensors, checkout = self._pending_fetch.result()
+            self._pending_fetch = None
+            self._apply_fetch(new_tensors, checkout)
 
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
