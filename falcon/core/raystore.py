@@ -7,7 +7,7 @@ from pathlib import Path
 
 import joblib
 import ray
-from falcon.core.logger import Logger, set_logger, log, error
+from falcon.core.logger import Logger, set_logger, log, info, error
 
 
 class Batch:
@@ -149,6 +149,8 @@ class DatasetManagerActor:
         if log_config:
             logger = Logger("dataset", log_config, capture_exceptions=True)
             set_logger(logger)
+
+        info(f"Dataset manager initialized | max_train={max_training_samples} val_window={validation_window_size}")
 
         asyncio.create_task(self.monitor())
 
@@ -319,6 +321,7 @@ class DatasetManagerActor:
             sample_refs: List of dicts, each dict has {key: ObjectRef}
         """
         num_new_samples = len(sample_refs)
+        total_after = len(self.ray_store) + num_new_samples
 
         # Store refs directly - no ray.put() needed
         self.ray_store.extend(sample_refs)
@@ -331,14 +334,18 @@ class DatasetManagerActor:
         self.rotate_sample_buffer()
 
         # Log buffer statistics
+        n_train = int(sum(self.status == SampleStatus.TRAINING))
+        n_val = int(sum(self.status == SampleStatus.VALIDATION))
         log({
             "n_total": len(self.ray_store),
-            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
-            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            "n_validation": n_val,
+            "n_training": n_train,
             "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
             "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
             "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
         }, prefix="buffer")
+
+        info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
         if self.store_fraction > 0 and self.buffer_path is not None:
