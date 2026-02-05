@@ -650,7 +650,7 @@ def parse_args():
         print(f"{BANNER} v{_get_version()}")
         print()
         print("Usage:")
-        print("  falcon launch [--run-dir DIR] [--config-name FILE] [--interactive] [key=value ...]")
+        print("  falcon launch [--run-dir DIR] [--config-name FILE] [--no-interactive] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon graph [--config-name FILE]")
         print("  falcon monitor [--address ADDR] [--refresh SECS]")
@@ -658,8 +658,8 @@ def parse_args():
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
-        print("  --interactive, -i    Interactive TUI with live status footer")
-        print("  --log-lines N        Number of log lines in footer (default: 16)")
+        print("  --no-interactive     Disable interactive TUI (plain output)")
+        print("  --log-lines N        Number of log lines in interactive footer (default: 16)")
         print("  --address ADDR       Ray cluster address (default: auto)")
         print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
         sys.exit(0)
@@ -697,7 +697,8 @@ def parse_args():
     # Extract --run-dir, --config-name, --interactive, --log-lines and collect overrides
     run_dir = None
     config_name = "config.yaml"
-    interactive = False
+    # Interactive mode: default to True if stdout is a TTY
+    interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
     overrides = []
     i = 0
@@ -715,6 +716,8 @@ def parse_args():
             config_name = arg.split("=", 1)[1]
         elif arg in ("--interactive", "-i"):
             interactive = True
+        elif arg == "--no-interactive":
+            interactive = False
         elif arg == "--log-lines" and i + 1 < len(args):
             log_lines = int(args[i + 1])
             i += 1
