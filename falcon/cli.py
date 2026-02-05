@@ -438,6 +438,9 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16) -> None:
                             samples=node_status.get("samples", 0),
                         )
 
+                    # Add dataset manager as a viewable node (for its output.log)
+                    display.update_node(name="dataset", status="active")
+
                     # Update buffer stats
                     buffer = status.get("buffer", {})
                     display.update_buffer(

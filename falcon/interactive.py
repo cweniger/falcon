@@ -258,6 +258,7 @@ class InteractiveDisplay:
                     "idle": "\x1b[90m",      # Gray
                     "done": "\x1b[32m",      # Green
                     "error": "\x1b[31m",     # Red
+                    "active": "\x1b[36m",    # Cyan
                 }
                 color = status_colors.get(node.status, "")
                 reset = "\x1b[0m"
