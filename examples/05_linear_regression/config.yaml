@@ -110,6 +110,7 @@ graph:
 
     ray:
       num_gpus: 0.5
+      chunk_size: 128
 
   y:
     parents: [theta]
@@ -120,6 +121,7 @@ graph:
     observed: "./data/mock_data.npz['y']"
     ray:
       num_gpus: 0.5
+      chunk_size: 128
 
 # -----------------------------------------------------------------------------
 # Sampling configuration

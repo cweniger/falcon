@@ -6,8 +6,6 @@ from typing import Dict, Optional
 
 import torch
 
-from falcon.core.utils import RVBatch
-
 # Type alias for conditions: maps node names to tensors
 Conditions = Dict[str, torch.Tensor]
 
@@ -20,6 +18,7 @@ class BaseEstimator(ABC):
     Concrete implementations must provide all functionality.
 
     Conditions are passed as Dict[str, Tensor] mapping node names to values.
+    Sampling methods return dicts with 'value' (ndarray) and optionally 'log_prob' (ndarray).
     """
 
     @abstractmethod
@@ -35,7 +34,7 @@ class BaseEstimator(ABC):
     @abstractmethod
     def sample_prior(
         self, num_samples: int, conditions: Optional[Conditions] = None
-    ) -> RVBatch:
+    ) -> dict:
         """
         Sample from the prior distribution.
 
@@ -44,14 +43,14 @@ class BaseEstimator(ABC):
             conditions: Conditioning values from parent nodes (usually None for prior)
 
         Returns:
-            RVBatch with samples and log probabilities
+            Dict with 'value' (ndarray) and optionally 'log_prob' (ndarray)
         """
         pass
 
     @abstractmethod
     def sample_posterior(
         self, num_samples: int, conditions: Optional[Conditions] = None
-    ) -> RVBatch:
+    ) -> dict:
         """
         Sample from the posterior distribution.
 
@@ -60,14 +59,14 @@ class BaseEstimator(ABC):
             conditions: Dict mapping node names to condition tensors
 
         Returns:
-            RVBatch with samples and log probabilities
+            Dict with 'value' (ndarray) and optionally 'log_prob' (ndarray)
         """
         pass
 
     @abstractmethod
     def sample_proposal(
         self, num_samples: int, conditions: Optional[Conditions] = None
-    ) -> RVBatch:
+    ) -> dict:
         """
         Sample from the proposal distribution for adaptive resampling.
 
@@ -76,7 +75,7 @@ class BaseEstimator(ABC):
             conditions: Dict mapping node names to condition tensors
 
         Returns:
-            RVBatch with samples and log probabilities
+            Dict with 'value' (ndarray) and optionally 'log_prob' (ndarray)
         """
         pass
 

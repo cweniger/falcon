@@ -411,46 +411,54 @@ def sample_mode(cfg, sample_type: str) -> None:
 
     if sample_type == "prior":
         # Generate forward samples from prior
-        samples = deployed_graph.sample(num_samples)
+        sample_refs = deployed_graph.sample(num_samples)
 
     elif sample_type == "posterior":
-        # TODO: Implement posterior sampling (requires trained model and observations)
         deployed_graph.load(Path(cfg.paths.graph))
-        samples = deployed_graph.sample_posterior(num_samples, observations)
+        sample_refs = deployed_graph.sample_posterior(num_samples, observations)
 
     elif sample_type == "proposal":
-        # Proposal sampling requires observations for conditioning
-        # Load observations from config
         deployed_graph.load(Path(cfg.paths.graph))
-        samples = deployed_graph.sample_proposal(num_samples, observations)
+        sample_refs = deployed_graph.sample_proposal(num_samples, observations)
 
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    # Apply smart key selection based on mode and user overrides
+    # Resolve refs to arrays (keys are flat: 'theta.value', 'theta.log_prob', 'x.value', ...)
+    samples = deployed_graph._refs_to_arrays(sample_refs)
+
+    # Build key selection based on node names (strip .value/.log_prob suffixes)
+    node_keys = {k for k in samples.keys() if k.endswith('.value')}
+
     if sample_type in ["prior", "proposal"]:
-        # Default: save everything
-        default_keys = set(samples.keys())
+        # Default: save all .value keys
+        default_keys = set(node_keys)
     elif sample_type == "posterior":
         # Default: save only posterior nodes (nodes with evidence)
         default_keys = {
-            k for k, node in graph.node_dict.items() if node.evidence and k in samples
+            f"{k}.value" for k, node in graph.node_dict.items()
+            if node.evidence and f"{k}.value" in samples
         }
 
-    # Apply user overrides
+    # Apply user overrides (user specifies node names, we match .value keys)
     exclude_keys = sample_cfg.get("exclude_keys", None)
     add_keys = sample_cfg.get("add_keys", None)
 
     if exclude_keys:
-        exclude_set = set(exclude_keys.split(","))
+        exclude_set = {f"{k}.value" for k in exclude_keys.split(",")}
         default_keys -= exclude_set
 
     if add_keys:
-        add_set = set(add_keys.split(","))
+        add_set = {f"{k}.value" for k in add_keys.split(",")}
         default_keys |= add_set
 
-    # Filter samples to selected keys
-    save_data = {k: samples[k] for k in default_keys if k in samples}
+    # Filter samples to selected keys, strip .value suffix for user-facing output
+    save_data = {}
+    for k in default_keys:
+        if k in samples:
+            # Strip '.value' suffix for cleaner output key names
+            user_key = k[:-6] if k.endswith('.value') else k
+            save_data[user_key] = samples[k]
 
     print(f"Generated samples with shapes:")
     for key, value in save_data.items():

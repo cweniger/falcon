@@ -12,7 +12,6 @@ from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.utils import RVBatch
 from falcon.core.logger import log, debug, info, warning, error
 from falcon.contrib.flow import Flow
 from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
@@ -228,10 +227,10 @@ class SNPE_A(StepwiseEstimator):
             Tuple of (ids, theta, theta_logprob, conditions, u, u_device, conditions_device)
         """
         ids = batch._ids
-        theta = self._to_tensor(batch[self.theta_key])
-        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.logprob"])
+        theta = self._to_tensor(batch[f"{self.theta_key}.value"])
+        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
-            k: self._to_tensor(batch[k]) for k in self.condition_keys if k in batch
+            k: self._to_tensor(batch[f"{k}.value"]) for k in self.condition_keys if f"{k}.value" in batch
         }
 
         # Record IDs for history
@@ -345,34 +344,34 @@ class SNPE_A(StepwiseEstimator):
 
     # ==================== Sampling Methods ====================
 
-    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> RVBatch:
+    def sample_prior(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from the prior distribution."""
         if conditions:
             raise ValueError("Conditions are not supported for sample_prior.")
         samples = self.simulator_instance.simulate_batch(num_samples)
         # Log probability for uniform prior over hypercube [-bound, bound]^d
         bound = self.config.inference.hypercube_bound
-        logprob = np.ones(num_samples) * (-np.log(2 * bound) ** self.param_dim)
-        return RVBatch(samples, logprob=logprob)
+        log_prob = np.ones(num_samples) * (-np.log(2 * bound) ** self.param_dim)
+        return {'value': samples, 'log_prob': log_prob}
 
     def sample_posterior(
         self,
         num_samples: int,
         conditions: Optional[Dict] = None,
-    ) -> RVBatch:
+    ) -> dict:
         """Sample from the posterior distribution q(theta|x)."""
         # Fall back to prior if networks not yet initialized (training hasn't started)
         if not self.networks_initialized:
             return self.sample_prior(num_samples)
 
         samples, logprob = self._importance_sample(num_samples, mode="posterior", conditions=conditions or {})
-        return RVBatch(samples.numpy(), logprob=logprob.numpy())
+        return {'value': samples.numpy(), 'log_prob': logprob.numpy()}
 
     def sample_proposal(
         self,
         num_samples: int,
         conditions: Optional[Dict] = None,
-    ) -> RVBatch:
+    ) -> dict:
         """Sample from the widened proposal distribution for adaptive resampling."""
         # Fall back to prior if networks not yet initialized (training hasn't started)
         if not self.networks_initialized:
@@ -393,7 +392,7 @@ class SNPE_A(StepwiseEstimator):
             "sample_proposal:std": samples.std().item(),
             "sample_proposal:logprob": logprob.mean().item(),
         })
-        return RVBatch(samples.numpy(), logprob=logprob.numpy())
+        return {'value': samples.numpy(), 'log_prob': logprob.numpy()}
 
     def _importance_sample(
         self,
@@ -405,8 +404,8 @@ class SNPE_A(StepwiseEstimator):
         cfg_inf = self.config.inference
 
         assert conditions, "Conditions must be provided."
-        # Move conditions to device
-        conditions = {k: v.to(self.device) for k, v in conditions.items()}
+        # Move conditions to device (handles both numpy arrays and tensors)
+        conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
 
         # Use best models if available and configured, otherwise fall back to current
         use_best = cfg_inf.use_best_models_during_inference and self._best_conditional_flow is not None

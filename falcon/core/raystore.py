@@ -5,6 +5,7 @@ from enum import IntEnum
 from datetime import datetime
 from pathlib import Path
 
+import joblib
 import ray
 from falcon.core.logger import Logger, set_logger, log, error
 
@@ -15,11 +16,13 @@ class Batch:
     Provides dictionary-style access to batch data and allows marking
     samples as disfavoured via the discard() method.
 
+    Keys use flat dotted format: 'theta.value', 'theta.log_prob', 'x.value', etc.
+
     Example:
         for batch in dataloader:
-            theta = batch['z']
-            logprob = batch['z.logprob']
-            x = batch['x']
+            theta = batch['theta.value']
+            logprob = batch['theta.log_prob']
+            x = batch['x.value']
 
             # Discard low-likelihood samples
             mask = logprob < threshold
@@ -257,7 +260,15 @@ class DatasetManagerActor:
 
         result = {'_active_ids': ids, '_new_ids': new_ids}
         for key in keys:
-            result[key] = [self.ray_store[i][key] for i in new_ids]
+            refs = []
+            for i in new_ids:
+                try:
+                    refs.append(self.ray_store[i][key])
+                except KeyError as e:
+                    # Provide more info in the error message
+                    sample_keys = list(self.ray_store[i].keys()) if self.ray_store[i] else []
+                    raise KeyError(f"Key '{key}' not found in sample {i}. Available keys: {sample_keys}. Total samples: {len(self.ray_store)}") from e
+            result[key] = refs
         return result
 
     def release_refs(self, ids):
@@ -300,6 +311,48 @@ class DatasetManagerActor:
         }, prefix="buffer")
 
         self.dump_store(data)
+
+    def append_refs(self, sample_refs: list):
+        """Append samples that are already ObjectRefs.
+
+        Args:
+            sample_refs: List of dicts, each dict has {key: ObjectRef}
+        """
+        num_new_samples = len(sample_refs)
+
+        # Store refs directly - no ray.put() needed
+        self.ray_store.extend(sample_refs)
+
+        self.status = np.append(
+            self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
+        )
+        self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
+
+        self.rotate_sample_buffer()
+
+        # Log buffer statistics
+        log({
+            "n_total": len(self.ray_store),
+            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
+            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
+            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
+            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
+        }, prefix="buffer")
+
+        # Disk dump: fetch values lazily if needed
+        if self.store_fraction > 0 and self.buffer_path is not None:
+            self._dump_refs(sample_refs)
+
+    def _dump_refs(self, sample_refs: list):
+        """Fetch and dump samples to disk."""
+        interval = max(1, int(1.0 / self.store_fraction))
+
+        for ref_dict in sample_refs:
+            self._sample_counter += 1
+            if self._sample_counter % interval == 0:
+                sample = {k: ray.get(v) for k, v in ref_dict.items()}
+                self._save_sample(sample)
 
     def _save_sample(self, sample: dict):
         """Save a single sample as NPZ file."""
@@ -356,10 +409,6 @@ class DatasetManagerActor:
             return len(initial_samples)
         return 0
 
-    # TODO: Currently not used anywhere, add tests?
-    def shutdown(self):
-        pass
-
 
 class CachedDataLoader:
     """Cached dataloader with pre-stacked torch tensors for fast batch sampling.
@@ -369,6 +418,9 @@ class CachedDataLoader:
     evictions or are bulk-appended. sample_batch() uses torch fancy indexing,
     which is ~5x faster than numpy for large arrays.
 
+    Data fetching (ray.get) runs in a background thread so the training event
+    loop is not blocked. New data becomes available one sync() call later.
+
     When device='cuda', the entire buffer lives on GPU for maximum speed
     (~50x vs numpy dict cache). Falls back to CPU when GPU memory is
     insufficient.
@@ -377,6 +429,7 @@ class CachedDataLoader:
     def __init__(self, dataset_manager, keys, sample_status, max_cache_samples=0,
                  device=None):
         import torch
+        from concurrent.futures import ThreadPoolExecutor
         self.dataset_manager = dataset_manager
         self.keys = keys
         self.sample_status = sample_status
@@ -391,29 +444,47 @@ class CachedDataLoader:
         self._id_to_row = {}    # sample_id -> row index in stacked arrays
         self._free_rows = []    # reusable row indices from evicted samples
 
+        # Background fetch thread
+        self._fetch_executor = ThreadPoolExecutor(max_workers=1)
+        self._pending_fetch = None  # Future -> (new_data, checkout)
+
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
         import torch
-        return torch.as_tensor(np.asarray(arr)).to(self.device)
+        return torch.as_tensor(np.array(arr)).to(self.device)
 
-    def sync(self):
-        """Incremental sync: fetch new samples, evict stale, update stacked tensors."""
+    def _checkout_and_fetch(self, active_ids_snapshot):
+        """Run checkout + data fetch + tensor build in background thread.
+
+        Moves checkout_refs, ray.get data resolution, AND the expensive
+        np.stack + tensor conversion off the main thread.  _apply_fetch
+        on the main thread only does fast indexed scatter/cat.
+        """
         import torch
         checkout = ray.get(
             self.dataset_manager.checkout_refs.remote(
                 self.sample_status, self.keys, self.max_cache_samples,
-                already_cached_ids=self.active_ids,
+                already_cached_ids=active_ids_snapshot,
             )
         )
-        active_ids = checkout['_active_ids']
         new_ids = checkout['_new_ids']
-
-        # Fetch new sample data from Ray object store (always numpy from Ray)
-        new_data = {}
+        new_tensors = {}
         if len(new_ids) > 0:
             for key in self.keys:
-                new_data[key] = ray.get(checkout[key])
+                raw = ray.get(checkout[key])
+                new_tensors[key] = torch.as_tensor(np.stack(raw)).to(self.device)
             ray.get(self.dataset_manager.release_refs.remote(new_ids))
+        return new_tensors, checkout
+
+    def _apply_fetch(self, new_tensors, checkout):
+        """Apply pre-built tensors to the cache (runs on main thread).
+
+        Tensors are already stacked and on-device (built in background thread).
+        This method only does fast indexed scatter and torch.cat.
+        """
+        import torch
+        active_ids = checkout['_active_ids']
+        new_ids = checkout['_new_ids']
 
         # Evict stale samples: mark their rows as free
         active_set = set(active_ids.tolist())
@@ -425,46 +496,81 @@ class CachedDataLoader:
         if len(new_ids) == 0:
             pass
         elif len(self._arrays) == 0:
-            # First sync: bulk-build stacked tensors
+            # First sync: use pre-built tensors directly
             for key in self.keys:
-                self._arrays[key] = self._to_tensor(np.stack(new_data[key]))
+                self._arrays[key] = new_tensors[key]
             self._stacked_ids = np.array(new_ids)
             for i, sid in enumerate(new_ids):
                 self._id_to_row[sid] = i
         else:
-            # Incremental: fill free slots first, then bulk-append remainder
-            idx = 0
-            while idx < len(new_ids) and self._free_rows:
-                row = self._free_rows.pop()
-                sid = new_ids[idx]
-                for key in self.keys:
-                    self._arrays[key][row] = self._to_tensor(new_data[key][idx])
-                self._stacked_ids[row] = sid
-                self._id_to_row[sid] = row
-                idx += 1
+            # Match dtypes: background thread may produce different precision
+            for key in self.keys:
+                if new_tensors[key].dtype != self._arrays[key].dtype:
+                    new_tensors[key] = new_tensors[key].to(self._arrays[key].dtype)
 
-            if idx < len(new_ids):
-                # Bulk-append remaining
+            # Scatter into free slots (batched indexed assignment)
+            n_free = min(len(new_ids), len(self._free_rows))
+            if n_free > 0:
+                free_rows = [self._free_rows.pop() for _ in range(n_free)]
+                row_idx = torch.tensor(free_rows, dtype=torch.long, device=self.device)
                 for key in self.keys:
-                    tail = self._to_tensor(np.stack(new_data[key][idx:]))
+                    self._arrays[key][row_idx] = new_tensors[key][:n_free]
+                for i, row in enumerate(free_rows):
+                    sid = new_ids[i]
+                    self._stacked_ids[row] = sid
+                    self._id_to_row[sid] = row
+
+            # Bulk-append remainder
+            if n_free < len(new_ids):
+                for key in self.keys:
                     self._arrays[key] = torch.cat(
-                        [self._arrays[key], tail], dim=0
+                        [self._arrays[key], new_tensors[key][n_free:]], dim=0
                     )
                 base_row = len(self._stacked_ids)
                 self._stacked_ids = np.concatenate(
-                    [self._stacked_ids, np.array(new_ids[idx:])]
+                    [self._stacked_ids, np.array(new_ids[n_free:])]
                 )
-                for j, sid in enumerate(new_ids[idx:]):
+                for j, sid in enumerate(new_ids[n_free:]):
                     self._id_to_row[sid] = base_row + j
 
         self.active_ids = active_ids
 
         # Build index of active rows for sampling
         self._active_rows = torch.tensor(
-            [self._id_to_row[sid] for sid in self._id_to_row],
+            list(self._id_to_row.values()),
             dtype=torch.long, device=self.device,
         )
         self.count = len(self._active_rows)
+
+    def sync(self):
+        """Non-blocking incremental sync.
+
+        Both checkout_refs and data fetching run in a background thread,
+        so sync() never blocks the training loop.  The only exception is
+        the very first call, which must block until initial data arrives.
+        """
+        first_sync = len(self._arrays) == 0
+
+        # 1. Apply completed background work
+        if self._pending_fetch is not None:
+            if first_sync or self._pending_fetch.done():
+                new_tensors, checkout = self._pending_fetch.result()
+                self._pending_fetch = None
+                self._apply_fetch(new_tensors, checkout)
+            else:
+                # Still running — don't block, training continues
+                return
+
+        # 2. Launch new background checkout + fetch
+        self._pending_fetch = self._fetch_executor.submit(
+            self._checkout_and_fetch, self.active_ids.copy()
+        )
+
+        # First sync must block — training needs initial data
+        if first_sync:
+            new_tensors, checkout = self._pending_fetch.result()
+            self._pending_fetch = None
+            self._apply_fetch(new_tensors, checkout)
 
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
@@ -480,17 +586,19 @@ class BufferView:
     """View into the sample buffer for estimator training.
 
     Passed to estimator.train() - estimator requests cached dataloaders with specific keys.
+    Keys use flat dotted format: 'theta.value', 'theta.log_prob', 'x.value', etc.
 
     Example:
         async def train(self, buffer: BufferView):
-            keys = [self.theta_key, f"{self.theta_key}.logprob", *self.condition_keys]
+            keys = [f"{self.theta_key}.value", f"{self.theta_key}.log_prob",
+                    *[f"{k}.value" for k in self.condition_keys]]
             train_cache = buffer.cached_loader(keys)
             val_cache = buffer.cached_val_loader(keys)
             train_cache.sync()
             val_cache.sync()
             for step in range(steps_per_epoch):
                 batch = train_cache.sample_batch(batch_size)
-                theta = batch[self.theta_key]
+                theta = batch[f'{self.theta_key}.value']
                 ...
     """
 
