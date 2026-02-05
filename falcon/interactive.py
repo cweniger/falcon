@@ -55,9 +55,7 @@ class InteractiveDisplay:
         └─────────────────────────────────────────────────────┘
     """
 
-    LOG_TAIL_LINES = 8  # Number of log lines to show in footer
-
-    def __init__(self, footer_height: int = 12):
+    def __init__(self, footer_height: int = 15):
         from blessed import Terminal
 
         self.term = Terminal()
@@ -215,8 +213,11 @@ class InteractiveDisplay:
             self.state.buffer_stats["validation"] = validation
             self._draw_footer()
 
-    def _get_node_log_tail(self, node_name: str, num_lines: int = 8) -> list[str]:
+    def _get_node_log_tail(self, node_name: str, num_lines: int = None) -> list[str]:
         """Read the last N lines from a node's output.log file."""
+        if num_lines is None:
+            # Footer layout: separator(1) + status bar(1) + sub-separator(1) + log lines + help(1)
+            num_lines = max(1, self.footer_height - 4)
         if self.state.log_dir is None:
             return ["[Log directory not set]"]
 
@@ -308,9 +309,11 @@ class InteractiveDisplay:
         lines.append("\x1b[90m" + "─" * self.term.width + "\x1b[0m")
 
         # Node log tail
+        # Footer layout: separator(1) + status bar(1) + sub-separator(1) + log lines + help(1)
+        num_log_lines = max(1, self.footer_height - 4)
         selected_name = self.get_selected_node()
         if selected_name:
-            log_lines = self._get_node_log_tail(selected_name, self.LOG_TAIL_LINES)
+            log_lines = self._get_node_log_tail(selected_name, num_log_lines)
             for log_line in log_lines:
                 # Truncate long lines
                 if len(log_line) > self.term.width - 1:
@@ -318,11 +321,11 @@ class InteractiveDisplay:
                 lines.append(log_line)
 
             # Pad with empty lines if needed
-            while len(log_lines) < self.LOG_TAIL_LINES:
+            while len(log_lines) < num_log_lines:
                 lines.append("")
                 log_lines.append("")  # For counting
         else:
-            for _ in range(self.LOG_TAIL_LINES):
+            for _ in range(num_log_lines):
                 lines.append("")
 
         # Help line
