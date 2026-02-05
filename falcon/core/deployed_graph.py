@@ -367,20 +367,6 @@ class NodeWrapper:
         """
         return self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
 
-    # TODO: Currently not used anywhere, add tests?
-    def call_simulator_method(self, method_name, *args, **kwargs):
-        method = getattr(self.simulator_instance, method_name)
-        return method(*args, **kwargs)
-
-    # TODO: Currently not used anywhere, add tests?
-    def call_estimator_method(self, method_name, *args, **kwargs):
-        method = getattr(self.estimator_instance, method_name)
-        return method(*args, **kwargs)
-
-    # TODO: Currently not used anywhere, add tests?
-    def shutdown(self):
-        pass
-
     def save(self, node_dir):
         if self.estimator_instance is not None:
             node_dir.mkdir(parents=True, exist_ok=True)
@@ -531,8 +517,6 @@ class DeployedGraph:
             # Merge keys from node_refs into existing sample dicts
             for i, ref_dict in enumerate(node_refs):
                 sample_refs[i].update(ref_dict)
-        if sample_refs:
-            debug(f"_merge_refs: sample_refs[0] keys = {list(sample_refs[0].keys())}")
 
     def _arrays_to_condition_refs(self, conditions, num_samples):
         """Convert arrays/tensors to per-sample ObjectRefs.
@@ -596,14 +580,11 @@ class DeployedGraph:
             if name in ref_trace:
                 continue
 
-            # Build condition refs for this node
+            # Build condition refs for this node (parents always, evidence for inference)
             node_condition_refs = {}
-            if sample_method == "sample":
-                for parent in self.graph.get_parents(name):
-                    node_condition_refs[parent] = ref_trace[parent]
-            else:
-                for parent in self.graph.get_parents(name):
-                    node_condition_refs[parent] = ref_trace[parent]
+            for parent in self.graph.get_parents(name):
+                node_condition_refs[parent] = ref_trace[parent]
+            if sample_method != "sample":
                 for evidence in self.graph.get_evidence(name):
                     node_condition_refs[evidence] = ref_trace[evidence]
 

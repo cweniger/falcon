@@ -5,6 +5,7 @@ from enum import IntEnum
 from datetime import datetime
 from pathlib import Path
 
+import joblib
 import ray
 from falcon.core.logger import Logger, set_logger, log, error
 
@@ -407,10 +408,6 @@ class DatasetManagerActor:
                 self.append(initial_samples)
             return len(initial_samples)
         return 0
-
-    # TODO: Currently not used anywhere, add tests?
-    def shutdown(self):
-        pass
 
 
 class CachedDataLoader:
