@@ -175,6 +175,14 @@ class NodeWrapper:
 
         # Mark initialization complete
         self._status = "idle"
+        self._stop_requested = False
+
+    def request_stop(self):
+        """Request graceful stop after current epoch."""
+        self._stop_requested = True
+        # Signal to estimator to terminate after current epoch
+        if self.estimator_instance is not None and hasattr(self.estimator_instance, 'interrupt'):
+            self.estimator_instance.interrupt()
 
     async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
         self._status = "training"
@@ -681,10 +689,18 @@ class DeployedGraph:
         """Shut down the deployed graph and release resources."""
         ray.get([node.shutdown.remote() for node in self.wrapped_nodes_dict.values()])
 
-    def launch(self, dataset_manager, observations, graph_path=None):
-        asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path))
+    def launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
+        """Launch training.
 
-    async def _launch(self, dataset_manager, observations, graph_path=None):
+        Args:
+            dataset_manager: Dataset manager for samples
+            observations: Observation data
+            graph_path: Path to save/load graph
+            stop_check: Optional callable that returns True when graceful stop is requested
+        """
+        asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check))
+
+    async def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
         # Load graph if saved model files exist (not just logging directories)
         if graph_path is not None and any(graph_path.glob("*/*.pth")):
             self.load(graph_path)
@@ -734,25 +750,40 @@ class DeployedGraph:
         STATUS_LOG_INTERVAL = 60  # seconds
 
         train_future_list = list(train_futures.keys())
+        stop_requested = False
         while train_future_list:
+            # Check for graceful stop request
+            if stop_check is not None and stop_check():
+                info("Graceful stop requested, finishing current epoch...")
+                stop_requested = True
+                # Signal all training nodes to stop after current epoch
+                for name, node in self.wrapped_nodes_dict.items():
+                    try:
+                        ray.get(node.request_stop.remote(), timeout=1)
+                    except Exception:
+                        pass  # Node may not support request_stop
+
             ready, train_future_list = ray.wait(
                 train_future_list, num_returns=len(train_future_list), timeout=1
             )
-            time.sleep(resample_interval)
-            num_new_samples = ray.get(dataset_manager.num_resims.remote())
-            if num_new_samples > 0:
-                # sample_proposal interleaves with training via async yield points —
-                # no pause needed. Forward simulation runs on separate actors concurrently.
-                proposal_refs = self.sample_proposal(num_new_samples, observations)
-                condition_refs = self._extract_value_refs(proposal_refs)
-                for key in observations:
-                    condition_refs.pop(key, None)
-                sample_refs = self._execute_graph(
-                    num_new_samples, self.graph.sorted_node_names, condition_refs, "sample"
-                )
-                for i, prop_ref in enumerate(proposal_refs):
-                    sample_refs[i].update(prop_ref)
-                ray.get(dataset_manager.append_refs.remote(sample_refs))
+
+            # Skip resampling if stopping
+            if not stop_requested:
+                time.sleep(resample_interval)
+                num_new_samples = ray.get(dataset_manager.num_resims.remote())
+                if num_new_samples > 0:
+                    # sample_proposal interleaves with training via async yield points —
+                    # no pause needed. Forward simulation runs on separate actors concurrently.
+                    proposal_refs = self.sample_proposal(num_new_samples, observations)
+                    condition_refs = self._extract_value_refs(proposal_refs)
+                    for key in observations:
+                        condition_refs.pop(key, None)
+                    sample_refs = self._execute_graph(
+                        num_new_samples, self.graph.sorted_node_names, condition_refs, "sample"
+                    )
+                    for i, prop_ref in enumerate(proposal_refs):
+                        sample_refs[i].update(prop_ref)
+                    ray.get(dataset_manager.append_refs.remote(sample_refs))
 
             # Periodic status update (every ~60 seconds)
             now = time.time()
