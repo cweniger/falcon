@@ -506,6 +506,11 @@ class CachedDataLoader:
             for i, sid in enumerate(new_ids):
                 self._id_to_row[sid] = i
         else:
+            # Match dtypes: background thread may produce different precision
+            for key in self.keys:
+                if new_tensors[key].dtype != self._arrays[key].dtype:
+                    new_tensors[key] = new_tensors[key].to(self._arrays[key].dtype)
+
             # Scatter into free slots (batched indexed assignment)
             n_free = min(len(new_ids), len(self._free_rows))
             if n_free > 0:
