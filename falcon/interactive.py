@@ -55,7 +55,7 @@ class InteractiveDisplay:
         └─────────────────────────────────────────────────────┘
     """
 
-    def __init__(self, footer_height: int = 15):
+    def __init__(self, footer_height: int = 20):
         from blessed import Terminal
 
         self.term = Terminal()

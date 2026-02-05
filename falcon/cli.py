@@ -283,7 +283,7 @@ class _GracefulShutdown:
         return self._stopping
 
 
-def launch_mode(cfg, interactive: bool = False) -> None:
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16) -> None:
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
@@ -299,7 +299,8 @@ def launch_mode(cfg, interactive: bool = False) -> None:
     shutdown_handler = None
     if interactive:
         from falcon.interactive import InteractiveDisplay
-        display = InteractiveDisplay()
+        # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
+        display = InteractiveDisplay(footer_height=log_lines + 4)
         display.start()
     else:
         # Non-interactive mode: install double Ctrl+C handler
@@ -655,6 +656,7 @@ def parse_args():
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
         print("  --interactive, -i    Interactive TUI with live status footer")
+        print("  --log-lines N        Number of log lines in footer (default: 16)")
         print("  --address ADDR       Ray cluster address (default: auto)")
         print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
         sys.exit(0)
@@ -680,7 +682,7 @@ def parse_args():
             elif arg.startswith("--refresh="):
                 refresh = float(arg.split("=", 1)[1])
             i += 1
-        return mode, None, None, None, None, False, address, refresh
+        return mode, None, None, None, None, False, 16, address, refresh
 
     sample_type = None
     if mode == "sample":
@@ -689,10 +691,11 @@ def parse_args():
             sys.exit(1)
         sample_type = args.pop(0)
 
-    # Extract --run-dir, --config-name, --interactive and collect overrides
+    # Extract --run-dir, --config-name, --interactive, --log-lines and collect overrides
     run_dir = None
     config_name = "config.yaml"
     interactive = False
+    log_lines = 16  # Default log lines in footer
     overrides = []
     i = 0
     while i < len(args):
@@ -709,16 +712,21 @@ def parse_args():
             config_name = arg.split("=", 1)[1]
         elif arg in ("--interactive", "-i"):
             interactive = True
+        elif arg == "--log-lines" and i + 1 < len(args):
+            log_lines = int(args[i + 1])
+            i += 1
+        elif arg.startswith("--log-lines="):
+            log_lines = int(arg.split("=", 1)[1])
         elif "=" in arg and not arg.startswith("-"):
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, address, refresh = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
@@ -732,7 +740,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg, interactive=interactive)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines)
     elif mode == "graph":
         graph_mode(cfg)
     else:
