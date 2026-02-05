@@ -10,6 +10,7 @@ import numpy as np
 from omegaconf import ListConfig
 
 from falcon.core.logger import Logger, set_logger, debug, info, warning, error, log
+
 from falcon.core.raystore import BufferView
 from .utils import LazyLoader
 
@@ -115,6 +116,19 @@ class MultiplexNodeWrapper:
 @ray.remote
 class NodeWrapper:
     def __init__(self, node, graph, model_path=None, log_config=None):
+        # Suppress Ray warning about blocking ray.get in async actor.
+        # Ray emits this once per actor via a global flag. We set the flag
+        # to True before any ray.get calls to prevent the warning.
+        # NodeWrapper is async (for train's pause/resume), but sampling methods
+        # are synchronous and need blocking ray.get. This is unavoidable without
+        # splitting into separate training/sampling actors.
+        # TODO: Consider actor split to fully separate async training from sync sampling.
+        try:
+            import ray._private.worker as _ray_worker
+            _ray_worker.blocking_get_inside_async_warned = True
+        except (ImportError, AttributeError):
+            pass  # Ray internals changed, warning will appear
+
         # Add model_path to sys.path if provided
         if model_path:
             model_path = Path(model_path).resolve()

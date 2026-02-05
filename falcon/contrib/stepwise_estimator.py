@@ -270,18 +270,7 @@ class StepwiseEstimator(BaseEstimator):
             # Log step/sample counts
             log({"total_steps": total_steps})
             try:
-                # Suppress Ray warning about blocking ray.get in async actor.
-                # This is a known issue: buffer.get_stats() does a synchronous
-                # ray.get to fetch buffer statistics. It's fast (<1ms) and only
-                # called once per epoch, so the blocking is negligible.
-                # TODO: Consider making BufferView.get_stats async, or caching
-                # stats in the background thread that already does data fetching.
-                import warnings
-                with warnings.catch_warnings():
-                    warnings.filterwarnings(
-                        "ignore", message="Using blocking ray.get inside async actor"
-                    )
-                    n_sims = buffer.get_stats()["total_length"]
+                n_sims = buffer.get_stats()["total_length"]
                 log({"n_samples": n_sims})
             except Exception:
                 n_sims = None
@@ -335,13 +324,7 @@ class StepwiseEstimator(BaseEstimator):
         log({"elapsed_minutes": elapsed})
 
         try:
-            # Suppress Ray warning (see comment in _train for details)
-            import warnings
-            with warnings.catch_warnings():
-                warnings.filterwarnings(
-                    "ignore", message="Using blocking ray.get inside async actor"
-                )
-                stats = buffer.get_stats()
+            stats = buffer.get_stats()
             self.history["n_samples"].append(stats["total_length"])
         except Exception:
             pass
