@@ -283,7 +283,86 @@ class _GracefulShutdown:
         return self._stopping
 
 
-def launch_mode(cfg, interactive: bool = False, log_lines: int = 16) -> None:
+def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
+    """Save generated samples to disk.
+
+    Args:
+        samples: Dict of sample arrays (keys like 'theta.value', 'x.value')
+        sample_cfg: Config for this sample type (with exclude_keys, add_keys)
+        sample_type: 'prior', 'posterior', or 'proposal'
+        graph: The Graph object (for determining default keys)
+        cfg: Full config (for paths)
+        info_fn: Function to use for info logging
+    """
+    from datetime import datetime
+    import numpy as np
+    from pathlib import Path
+
+    # Build key selection based on node names (strip .value/.log_prob suffixes)
+    node_keys = {k for k in samples.keys() if k.endswith('.value')}
+
+    if sample_type in ["prior", "proposal"]:
+        # Default: save all .value keys
+        default_keys = set(node_keys)
+    elif sample_type == "posterior":
+        # Default: save only posterior nodes (nodes with evidence)
+        default_keys = {
+            f"{k}.value" for k, node in graph.node_dict.items()
+            if node.evidence and f"{k}.value" in samples
+        }
+    else:
+        default_keys = set(node_keys)
+
+    # Apply user overrides (user specifies node names, we match .value keys)
+    exclude_keys = sample_cfg.get("exclude_keys", None)
+    add_keys = sample_cfg.get("add_keys", None)
+
+    if exclude_keys:
+        if isinstance(exclude_keys, str):
+            exclude_set = {f"{k}.value" for k in exclude_keys.split(",")}
+        else:
+            exclude_set = {f"{k}.value" for k in exclude_keys}
+        default_keys -= exclude_set
+
+    if add_keys:
+        if isinstance(add_keys, str):
+            add_set = {f"{k}.value" for k in add_keys.split(",")}
+        else:
+            add_set = {f"{k}.value" for k in add_keys}
+        default_keys |= add_set
+
+    # Filter samples to selected keys, strip .value suffix for user-facing output
+    save_data = {}
+    for k in default_keys:
+        if k in samples:
+            # Strip '.value' suffix for cleaner output key names
+            user_key = k[:-6] if k.endswith('.value') else k
+            save_data[user_key] = samples[k]
+
+    info_fn(f"Generated samples with shapes:")
+    for key, value in save_data.items():
+        info_fn(f"  {key}: {value.shape}")
+
+    # Determine output directory
+    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    batch_timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
+    output_dir = Path(samples_dir) / sample_type / batch_timestamp
+    output_dir.mkdir(parents=True, exist_ok=True)
+
+    info_fn(f"Saving samples to: {output_dir}/")
+
+    # Save each sample as individual NPZ file
+    num_samples = len(next(iter(save_data.values())))
+    for i in range(num_samples):
+        sample_data = {k: v[i] for k, v in save_data.items()}
+        sample_data["_batch"] = batch_timestamp
+        sample_path = output_dir / f"{i:06d}.npz"
+        np.savez(sample_path, **sample_data)
+
+    info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
+
+
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_sample: bool = True) -> None:
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
@@ -470,6 +549,31 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16) -> None:
 
     try:
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
+
+        #############################
+        ### Posterior sampling    ###
+        #############################
+
+        # Check if posterior sampling is configured and enabled
+        sample_cfg = cfg.get("sample", {}).get("posterior", {})
+        num_posterior_samples = sample_cfg.get("n", 0)
+
+        if posterior_sample and num_posterior_samples > 0:
+            info(f"Generating {num_posterior_samples} posterior samples...")
+
+            sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
+            samples = deployed_graph._refs_to_arrays(sample_refs)
+
+            # Save posterior samples
+            _save_samples(
+                samples=samples,
+                sample_cfg=sample_cfg,
+                sample_type="posterior",
+                graph=graph,
+                cfg=cfg,
+                info_fn=info,
+            )
+
     finally:
         ##########################
         ### Clean up resources ###
@@ -563,63 +667,16 @@ def sample_mode(cfg, sample_type: str) -> None:
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
-    # Resolve refs to arrays (keys are flat: 'theta.value', 'theta.log_prob', 'x.value', ...)
+    # Resolve refs to arrays and save
     samples = deployed_graph._refs_to_arrays(sample_refs)
-
-    # Build key selection based on node names (strip .value/.log_prob suffixes)
-    node_keys = {k for k in samples.keys() if k.endswith('.value')}
-
-    if sample_type in ["prior", "proposal"]:
-        # Default: save all .value keys
-        default_keys = set(node_keys)
-    elif sample_type == "posterior":
-        # Default: save only posterior nodes (nodes with evidence)
-        default_keys = {
-            f"{k}.value" for k, node in graph.node_dict.items()
-            if node.evidence and f"{k}.value" in samples
-        }
-
-    # Apply user overrides (user specifies node names, we match .value keys)
-    exclude_keys = sample_cfg.get("exclude_keys", None)
-    add_keys = sample_cfg.get("add_keys", None)
-
-    if exclude_keys:
-        exclude_set = {f"{k}.value" for k in exclude_keys.split(",")}
-        default_keys -= exclude_set
-
-    if add_keys:
-        add_set = {f"{k}.value" for k in add_keys.split(",")}
-        default_keys |= add_set
-
-    # Filter samples to selected keys, strip .value suffix for user-facing output
-    save_data = {}
-    for k in default_keys:
-        if k in samples:
-            # Strip '.value' suffix for cleaner output key names
-            user_key = k[:-6] if k.endswith('.value') else k
-            save_data[user_key] = samples[k]
-
-    print(f"Generated samples with shapes:")
-    for key, value in save_data.items():
-        print(f"  {key}: {value.shape}")
-
-    # Determine output directory
-    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
-    batch_timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
-    output_dir = Path(samples_dir) / sample_type / batch_timestamp
-    output_dir.mkdir(parents=True, exist_ok=True)
-
-    print(f"Saving samples to: {output_dir}/")
-
-    # Save each sample as individual NPZ file
-    num_samples = len(next(iter(save_data.values())))
-    for i in range(num_samples):
-        sample_data = {k: v[i] for k, v in save_data.items()}
-        sample_data["_batch"] = batch_timestamp
-        sample_path = output_dir / f"{i:06d}.npz"
-        np.savez(sample_path, **sample_data)
-
-    print(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
+    _save_samples(
+        samples=samples,
+        sample_cfg=sample_cfg,
+        sample_type=sample_type,
+        graph=graph,
+        cfg=cfg,
+        info_fn=print,
+    )
 
     # Clean up
     deployed_graph.shutdown()
@@ -655,10 +712,11 @@ def parse_args():
         print("  falcon graph [--config-name FILE]")
         print()
         print("Options:")
-        print("  --run-dir DIR        Run directory (default: auto-generated)")
-        print("  --config-name FILE   Config file (default: config.yaml)")
-        print("  --no-interactive     Disable interactive TUI (plain output)")
-        print("  --log-lines N        Number of log lines in interactive footer (default: 16)")
+        print("  --run-dir DIR          Run directory (default: auto-generated)")
+        print("  --config-name FILE     Config file (default: config.yaml)")
+        print("  --no-interactive       Disable interactive TUI (plain output)")
+        print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
+        print("  --no-posterior-sample  Skip posterior sampling after training")
         sys.exit(0)
 
     mode = sys.argv[1]
@@ -697,6 +755,7 @@ def parse_args():
     # Interactive mode: default to True if stdout is a TTY
     interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
+    posterior_sample = True  # Sample posteriors after training if configured
     overrides = []
     i = 0
     while i < len(args):
@@ -715,6 +774,8 @@ def parse_args():
             interactive = True
         elif arg == "--no-interactive":
             interactive = False
+        elif arg == "--no-posterior-sample":
+            posterior_sample = False
         elif arg == "--log-lines" and i + 1 < len(args):
             log_lines = int(args[i + 1])
             i += 1
@@ -724,12 +785,12 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, address, refresh = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
@@ -743,7 +804,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg, interactive=interactive, log_lines=log_lines)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines, posterior_sample=posterior_sample)
     elif mode == "graph":
         graph_mode(cfg)
     else:
