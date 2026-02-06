@@ -237,14 +237,75 @@ class TeeOutput:
         self.log.close()
 
 
-def launch_mode(cfg) -> None:
+class _InteractiveStream:
+    """Stream adapter that routes writes to InteractiveDisplay.log()."""
+    def __init__(self, display):
+        self.display = display
+    def write(self, msg):
+        msg = msg.rstrip()
+        if msg:
+            self.display.log(msg)
+    def flush(self):
+        pass
+
+
+class _GracefulShutdown:
+    """Handle double Ctrl+C pattern for non-interactive mode."""
+    def __init__(self):
+        self._interrupt_count = 0
+        self._stopping = False
+        self._original_handler = None
+
+    def install(self):
+        """Install signal handler."""
+        import signal
+        self._original_handler = signal.signal(signal.SIGINT, self._handler)
+
+    def uninstall(self):
+        """Restore original signal handler."""
+        import signal
+        if self._original_handler is not None:
+            signal.signal(signal.SIGINT, self._original_handler)
+
+    def _handler(self, signum, frame):
+        """Handle SIGINT with double Ctrl+C pattern."""
+        self._interrupt_count += 1
+        if self._interrupt_count == 1:
+            self._stopping = True
+            print("\n\x1b[33m⚠ Stopping gracefully... (Ctrl+C again to force quit)\x1b[0m", flush=True)
+            return
+        # Second interrupt: force exit
+        self.uninstall()
+        raise KeyboardInterrupt
+
+    @property
+    def stop_requested(self) -> bool:
+        return self._stopping
+
+
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16) -> None:
     """Launch mode: Full training and inference pipeline."""
+    import logging
+    import threading
     import torch
     import ray
     from omegaconf import OmegaConf
     import falcon
     from falcon.core.graph import create_graph_from_config
     from falcon.core.logger import Logger, set_logger, info
+
+    # Initialize interactive display or graceful shutdown handler
+    display = None
+    shutdown_handler = None
+    if interactive:
+        from falcon.interactive import InteractiveDisplay
+        # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
+        display = InteractiveDisplay(footer_height=log_lines + 4)
+        display.start()
+    else:
+        # Non-interactive mode: install double Ctrl+C handler
+        shutdown_handler = _GracefulShutdown()
+        shutdown_handler.install()
 
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
@@ -263,6 +324,21 @@ def launch_mode(cfg) -> None:
     # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
     set_logger(driver_logger)
+
+    # If interactive mode, replace console handler with one that routes to display
+    if display:
+        for handler in driver_logger._logger.handlers[:]:
+            if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+                driver_logger._logger.removeHandler(handler)
+                # Add custom handler that routes to display
+                interactive_handler = logging.StreamHandler(_InteractiveStream(display))
+                interactive_handler.setFormatter(logging.Formatter(
+                    '%(asctime)s [%(levelname)s] %(message)s',
+                    datefmt='%H:%M:%S'
+                ))
+                interactive_handler.setLevel(logging.INFO)
+                driver_logger._logger.addHandler(interactive_handler)
+                break
 
     # Log startup info
     info(f"falcon v{falcon.__version__}")
@@ -336,16 +412,79 @@ def launch_mode(cfg) -> None:
         log_config=logging_cfg,
     )
 
-    # 3) Launch training & simulations
+    # 3) Start status polling thread for interactive mode
+    status_thread = None
     graph_path = Path(cfg.paths.graph)
-    deployed_graph.launch(dataset_manager, observations, graph_path=graph_path)
+    if display:
+        # Set log directory so display can read node output.log files
+        display.set_log_dir(str(graph_path))
 
-    ##########################
-    ### Clean up resources ###
-    ##########################
+        def poll_status():
+            """Background thread to poll MonitorBridge and update display."""
+            import time
+            while display.is_running:
+                try:
+                    bridge = ray.get_actor("falcon:monitor_bridge")
+                    status = ray.get(bridge.get_status.remote())
 
-    deployed_graph.shutdown()
-    driver_logger.shutdown()
+                    # Update nodes
+                    for name, node_status in status.get("nodes", {}).items():
+                        display.update_node(
+                            name=name,
+                            status=node_status.get("status", "unknown"),
+                            current_epoch=node_status.get("current_epoch", 0),
+                            total_epochs=node_status.get("total_epochs", 0),
+                            loss=node_status.get("loss"),
+                            samples=node_status.get("samples", 0),
+                        )
+
+                    # Add dataset manager as a viewable node (for its output.log)
+                    display.update_node(name="dataset", status="active")
+
+                    # Update buffer stats
+                    buffer = status.get("buffer", {})
+                    display.update_buffer(
+                        training=buffer.get("training", 0),
+                        validation=buffer.get("validation", 0),
+                    )
+                except Exception:
+                    pass  # MonitorBridge may not be ready yet
+
+                # Redraw footer to refresh log tail
+                with display._lock:
+                    display._draw_footer()
+
+                time.sleep(1.0)
+
+        status_thread = threading.Thread(target=poll_status, daemon=True)
+        status_thread.start()
+
+    # 4) Launch training & simulations
+    # Create stop check callback for graceful shutdown
+    if display:
+        stop_check = lambda: display.stop_requested
+    elif shutdown_handler:
+        stop_check = lambda: shutdown_handler.stop_requested
+    else:
+        stop_check = None
+
+    try:
+        deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
+    finally:
+        ##########################
+        ### Clean up resources ###
+        ##########################
+
+        # Stop interactive display first (restores terminal)
+        if display:
+            display.stop()
+
+        # Uninstall shutdown handler
+        if shutdown_handler:
+            shutdown_handler.uninstall()
+
+        deployed_graph.shutdown()
+        driver_logger.shutdown()
 
 
 def sample_mode(cfg, sample_type: str) -> None:
@@ -511,16 +650,15 @@ def parse_args():
         print(f"{BANNER} v{_get_version()}")
         print()
         print("Usage:")
-        print("  falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]")
+        print("  falcon launch [--run-dir DIR] [--config-name FILE] [--no-interactive] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon graph [--config-name FILE]")
-        print("  falcon monitor [--address ADDR] [--refresh SECS]")
         print()
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
-        print("  --address ADDR       Ray cluster address (default: auto)")
-        print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
+        print("  --no-interactive     Disable interactive TUI (plain output)")
+        print("  --log-lines N        Number of log lines in interactive footer (default: 16)")
         sys.exit(0)
 
     mode = sys.argv[1]
@@ -544,7 +682,7 @@ def parse_args():
             elif arg.startswith("--refresh="):
                 refresh = float(arg.split("=", 1)[1])
             i += 1
-        return mode, None, None, None, None, address, refresh
+        return mode, None, None, None, None, False, 16, address, refresh
 
     sample_type = None
     if mode == "sample":
@@ -553,9 +691,12 @@ def parse_args():
             sys.exit(1)
         sample_type = args.pop(0)
 
-    # Extract --run-dir, --config-name and collect overrides
+    # Extract --run-dir, --config-name, --interactive, --log-lines and collect overrides
     run_dir = None
     config_name = "config.yaml"
+    # Interactive mode: default to True if stdout is a TTY
+    interactive = sys.stdout.isatty()
+    log_lines = 16  # Default log lines in footer
     overrides = []
     i = 0
     while i < len(args):
@@ -570,19 +711,29 @@ def parse_args():
             i += 1
         elif arg.startswith("--config-name="):
             config_name = arg.split("=", 1)[1]
+        elif arg in ("--interactive", "-i"):
+            interactive = True
+        elif arg == "--no-interactive":
+            interactive = False
+        elif arg == "--log-lines" and i + 1 < len(args):
+            log_lines = int(args[i + 1])
+            i += 1
+        elif arg.startswith("--log-lines="):
+            log_lines = int(arg.split("=", 1)[1])
         elif "=" in arg and not arg.startswith("-"):
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, address, refresh = parse_args()
 
-    # Print startup banner
-    print(f"{BANNER} v{_get_version()}", flush=True)
+    # Print startup banner (skip for interactive mode - it will draw its own)
+    if not interactive:
+        print(f"{BANNER} v{_get_version()}", flush=True)
 
     # Monitor mode doesn't need config loading
     if mode == "monitor":
@@ -592,7 +743,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines)
     elif mode == "graph":
         graph_mode(cfg)
     else:
