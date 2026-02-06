@@ -38,11 +38,11 @@ graph:
   z:                                    # Latent parameters
     evidence: [x]
     simulator:
-      _target_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.priors.Hypercube
       priors:
         - ['uniform', -5.0, 5.0]
     estimator:
-      _target_: falcon.contrib.SNPE_A
+      _target_: falcon.estimators.Flow
 
   x:                                    # Observations
     parents: [z]
