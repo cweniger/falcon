@@ -69,14 +69,14 @@ graph:
     evidence: [x]                       # Node z is inferred from observed x
 
     simulator:                          # Defines the prior distribution for z
-      _target_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.priors.Hypercube
       priors:                           # Uniform priors for each parameter dimension
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]
 
     estimator:                          # Posterior estimator network
-      _target_: falcon.contrib.SNPE_A   # Sequential Neural Posterior Estimation (SNPE-A)
+      _target_: falcon.estimators.Flow   # Flow-based posterior estimation
       loop:                             # Training loop parameters
         num_epochs: 300
         batch_size: 128
@@ -85,9 +85,9 @@ graph:
         net_type: nsf                   # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
         theta_norm: true                # Normalize parameter space
         norm_momentum: 0.003            # Momentum for online normalization updates
-        embedding:                      # Neural embedding for observation x
-          _target_: model.E
-          _input_: [x]
+      embedding:                        # Neural embedding for observation x
+        _target_: model.E
+        _input_: [x]
       optimizer:                        # Optimizer parameters
         lr: 0.01
         lr_decay_factor: 0.5            # LR decay multiplier

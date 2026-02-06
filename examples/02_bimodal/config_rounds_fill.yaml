@@ -30,7 +30,7 @@ graph:
   z:
     evidence: [x]
     simulator: 
-      _target_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.priors.Hypercube
       priors: 
         - ['uniform', -10000.0, 10000.0]
         - ['uniform', -10000.0, 10000.0]
@@ -43,7 +43,7 @@ graph:
         - ['uniform', -10000.0, 10000.0]
         - ['uniform', -10000.0, 10000.0]
     estimator:
-      _target_: falcon.contrib.SNPE_A
+      _target_: falcon.estimators.Flow
       loop:
         num_epochs: 300
         batch_size: 128
@@ -55,9 +55,9 @@ graph:
         norm_momentum: 0.0005
         use_log_update: true
         adaptive_momentum: false
-        embedding:
-          _target_: model.E
-          _input_: [x]
+      embedding:
+        _target_: model.E
+        _input_: [x]
       optimizer:
         lr: 0.003
         lr_decay_factor: 0.5

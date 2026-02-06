@@ -64,7 +64,7 @@ graph:
     evidence: [y]
 
     simulator:
-      _target_: falcon.contrib.ProductPrior
+      _target_: falcon.priors.Product
       priors:
         - ['normal', 0.0, 1.0]
         - ['normal', 0.0, 1.0]
@@ -78,7 +78,7 @@ graph:
         - ['normal', 0.0, 1.0]
 
     estimator:
-      _target_: falcon.contrib.SNPE_gaussian
+      _target_: falcon.estimators.Gaussian
       loop:
         num_epochs: 1000
         batch_size: 128

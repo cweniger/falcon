@@ -121,7 +121,7 @@ class Add:
 class E(torch.nn.Module):
     def __init__(self, log_prefix=None):
         super().__init__()
-        from falcon.contrib.norms import LazyOnlineNorm
+        from falcon.embeddings import LazyOnlineNorm
 
         self.norm = LazyOnlineNorm(momentum=5e-3)
         self.linear = torch.nn.Linear(DIM, DIM * 2)

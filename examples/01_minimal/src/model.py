@@ -40,7 +40,7 @@ class E(torch.nn.Module):
 
     def __init__(self, momentum: float = 1e-2):
         super(E, self).__init__()
-        self.norm = falcon.contrib.LazyOnlineNorm(momentum=momentum)
+        self.norm = falcon.embeddings.LazyOnlineNorm(momentum=momentum)
 
     def forward(self, x):
         falcon.log({"norm_pre": x.std().item()})
