@@ -2,8 +2,8 @@ import torch
 import math
 
 
-class HypercubeMappingPrior:
-    # TODO: Merge with ProductPrior. ProductPrior supports both hypercube and standard_normal
+class Hypercube:
+    # TODO: Merge with Product. Product supports both hypercube and standard_normal
     # latent spaces via mode parameter. Consider making hypercube map to [0,1] instead of [-2,2].
     """
     Maps a set of univariate priors between a hypercube domain and their target distributions.
@@ -33,7 +33,7 @@ class HypercubeMappingPrior:
 
     def __init__(self, priors=[], hypercube_range=[-2, 2]):
         """
-        Initializes the HypercubeMappingPrior object.
+        Initializes the Hypercube object.
 
         Args:
             priors (list): List of tuples defining each prior. Each tuple starts with a string specifying
@@ -253,9 +253,9 @@ if __name__ == "__main__":
         ("triangular", -1.0, 0.0, 1.0),
     ]
 
-    # Create an instance of HypercubeMappingPrior with the given priors.
+    # Create an instance of Hypercube with the given priors.
     # The hypercube_range is the domain for the input values (default: [-2, 2]).
-    hmp = HypercubeMappingPrior(priors)
+    hmp = Hypercube(priors)
 
     # Generate a random tensor 'u' with shape (2, n_params) in the hypercube_range.
     # Here, 2 is the batch size and n_params is the number of priors.

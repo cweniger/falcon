@@ -426,8 +426,8 @@ class LossBasedEstimator(StepwiseEstimator):
     def _build_model(self, batch) -> nn.Module:
         """Build model from first batch."""
         # Import here to avoid circular imports
-        from falcon.contrib.embedded_posterior import EmbeddedPosterior
-        from falcon.contrib.torch_embedding import instantiate_embedding
+        from falcon.estimators.embedded_posterior import EmbeddedPosterior
+        from falcon.embeddings import instantiate_embedding
 
         # Extract and store tensors for reload
         self._init_theta = self._to_tensor(batch[f"{self.theta_key}.value"])
@@ -438,8 +438,8 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def _create_model(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> nn.Module:
         """Create EmbeddedPosterior from theta and conditions tensors."""
-        from falcon.contrib.embedded_posterior import EmbeddedPosterior
-        from falcon.contrib.torch_embedding import instantiate_embedding
+        from falcon.estimators.embedded_posterior import EmbeddedPosterior
+        from falcon.embeddings import instantiate_embedding
 
         debug("Building model...")
 

@@ -46,13 +46,19 @@ cd examples/01_minimal && falcon launch --run-dir outputs/run_01
 - `NodeWrapper`: Ray actor wrapping individual nodes for async training
 - `DatasetManagerActor`: Centralized dataset orchestration with sample lifecycle (VALIDATION → TRAINING → DISFAVOURED → TOMBSTONE)
 
-**Inference** (`falcon/contrib/SNPE_A.py`):
-- Sequential Neural Posterior Estimation with support for multiple flow architectures (NSF, MAF, NAF, Zuko flows)
-- Features: amortization (gamma parameter), parameter normalization, early stopping, LR scheduling
+**Estimators** (`falcon/estimators/`):
+- `Flow` (`flow.py`): Flow-based posterior estimation with dual flow architecture (NSF, MAF, Zuko flows)
+- `Gaussian` (`gaussian.py`): Full covariance Gaussian posterior with eigendecomposition
+- `StepwiseEstimator`, `LossBasedEstimator` (`base.py`): Base classes for epoch-based training
 
-**Embeddings** (`falcon/contrib/torch_embedding.py`):
-- Declarative embedding builder supporting nested configurations
-- Compatible with external libraries (timm, transformers)
+**Priors** (`falcon/priors/`):
+- `Hypercube` (`hypercube.py`): Bidirectional hypercube-to-target distribution mapping
+- `Product` (`product.py`): Product of independent marginals with fixed parameter support
+
+**Embeddings** (`falcon/embeddings/`):
+- `instantiate_embedding` (`builder.py`): Declarative embedding builder supporting nested configurations
+- `LazyOnlineNorm`, `DiagonalWhitener` (`norms.py`): Online normalization utilities
+- `PCAProjector` (`svd.py`): Streaming PCA for dimensionality reduction
 
 ### Configuration System
 
@@ -71,19 +77,19 @@ graph:
   theta:                          # Latent parameters node
     evidence: [x]                 # Inferred from observation x
     simulator:                    # Prior distribution
-      _target_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.priors.Hypercube
       priors:
         - ['uniform', -100.0, 100.0]
     estimator:                    # Posterior network
-      _target_: falcon.contrib.SNPE_A
+      _target_: falcon.estimators.Flow
       loop:                       # Training loop config
         num_epochs: 300
         batch_size: 128
       network:                    # Network config
         net_type: nsf
-        embedding:
-          _target_: model.E
-          _input_: [x]
+      embedding:                  # Embedding config (sibling of network)
+        _target_: model.E
+        _input_: [x]
       optimizer:                  # Optimizer config
         lr: 0.01
       inference:                  # Inference config
@@ -127,6 +133,10 @@ graph:
 - `falcon/cli.py`: Entry point, implements `launch_mode` and `sample_mode`
 - `falcon/core/graph.py`: Graph and Node class definitions
 - `falcon/core/deployed_graph.py`: Runtime execution with Ray
-- `falcon/contrib/SNPE_A.py`: Main inference algorithm
-- `falcon/contrib/hypercubemappingprior.py`: Prior distribution transformations
+- `falcon/estimators/flow.py`: Flow-based posterior estimation (main inference algorithm)
+- `falcon/estimators/gaussian.py`: Gaussian posterior estimation
+- `falcon/priors/hypercube.py`: Hypercube mapping prior distribution
+- `falcon/priors/product.py`: Product prior with latent space transformations
+- `falcon/embeddings/builder.py`: Declarative embedding pipeline builder
+- `falcon/contrib/`: Backward-compatibility shims (re-exports from new locations)
 - `examples/01_minimal/`: Best starting point for understanding the framework

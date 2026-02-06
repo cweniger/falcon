@@ -6,7 +6,7 @@ import torch
 import sbi.utils  # Don't remove - needed for sbi.neural_nets.net_builders
 from sbi.neural_nets import net_builders
 
-from .norms import LazyOnlineNorm
+from falcon.embeddings.norms import LazyOnlineNorm
 
 
 # Network builder registry
@@ -27,7 +27,7 @@ NET_BUILDERS = {
 }
 
 
-class Flow(torch.nn.Module):
+class FlowDensity(torch.nn.Module):
     """Normalizing flow network with optional parameter normalization."""
 
     def __init__(

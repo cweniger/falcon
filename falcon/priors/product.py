@@ -2,7 +2,7 @@
 
 Provides:
 - TransformedPrior: Base class defining forward/inverse interface with mode parameter
-- ProductPrior: Product of independent marginal distributions
+- Product: Product of independent marginal distributions
 """
 
 import torch
@@ -18,10 +18,10 @@ class TransformedPrior(ABC):
       - inverse(x, mode): parameter space -> latent space
 
     Modes:
-      - "hypercube": Maps to/from bounded hypercube. Use with SNPE_A.
-      - "standard_normal": Maps to/from N(0, I). Use with SNPE_gaussian.
+      - "hypercube": Maps to/from bounded hypercube. Use with Flow estimator.
+      - "standard_normal": Maps to/from N(0, I). Use with Gaussian estimator.
 
-    This base class is used for type checking in estimators like SNPE_gaussian
+    This base class is used for type checking in estimators like Gaussian
     that require the transformation interface.
     """
 
@@ -47,7 +47,7 @@ class TransformedPrior(ABC):
         pass
 
 
-class ProductPrior(TransformedPrior):
+class Product(TransformedPrior):
     """
     Maps between target distributions and a latent space (hypercube or standard normal).
 
@@ -56,8 +56,8 @@ class ProductPrior(TransformedPrior):
       - inverse(x, mode): target distribution -> latent space
 
     Modes:
-      - "hypercube": Maps to/from hypercube domain (default [-2, 2]). Use with SNPE_A.
-      - "standard_normal": Maps to/from N(0, I). Use with SNPE_gaussian.
+      - "hypercube": Maps to/from hypercube domain (default [-2, 2]). Use with Flow estimator.
+      - "standard_normal": Maps to/from N(0, I). Use with Gaussian estimator.
 
     Supported distribution types and their required parameters:
       - "uniform": Linear mapping. Parameters: low, high.
@@ -69,7 +69,7 @@ class ProductPrior(TransformedPrior):
       - "fixed": Fixed value (excluded from latent space). Parameters: value.
 
     Example:
-        prior = ProductPrior([
+        prior = Product([
             ("uniform", -100.0, 100.0),
             ("fixed", 5.0),              # Fixed parameter, not in latent space
             ("normal", 0.0, 1.0),
@@ -78,18 +78,18 @@ class ProductPrior(TransformedPrior):
         # Latent space has dim=2 (only free params)
         # Output space has dim=3 (includes fixed params)
 
-        # For SNPE_gaussian (standard normal latent space)
+        # For Gaussian estimator (standard normal latent space)
         z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 3) -> z: (..., 2)
         theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 3)
 
-        # For SNPE_A (hypercube latent space)
+        # For Flow estimator (hypercube latent space)
         u = prior.inverse(theta, mode="hypercube")
         theta = prior.forward(u, mode="hypercube")
     """
 
     def __init__(self, priors=[], hypercube_range=[-2, 2]):
         """
-        Initialize ProductPrior.
+        Initialize Product.
 
         Args:
             priors: List of tuples (dist_type, param1, param2, ...).

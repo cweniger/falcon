@@ -79,8 +79,8 @@ class Add:
 #     def __init__(self, log_prefix=None):
 #         super(E, self).__init__()
 #         # Import PCA components from their specific modules
-#         from falcon.contrib.svd import PCAProjector
-#         from falcon.contrib.norms import DiagonalWhitener
+#         from falcon.embeddings import PCAProjector
+#         from falcon.embeddings import DiagonalWhitener
 
 #         self.projector = PCAProjector(buffer_size=128)
 #         self.whitener = DiagonalWhitener(NBINS, use_fourier=False)
@@ -121,7 +121,7 @@ class Add:
 class E(torch.nn.Module):
     def __init__(self, log_prefix=None):
         super().__init__()
-        from falcon.contrib.norms import LazyOnlineNorm
+        from falcon.embeddings import LazyOnlineNorm
 
         self.norm = LazyOnlineNorm(momentum=5e-3)
         self.linear = torch.nn.Linear(DIM, DIM * 2)

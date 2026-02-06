@@ -1,8 +1,8 @@
-"""Sequential Neural Posterior Estimation with Gaussian posterior (SNPE-Gaussian).
+"""Gaussian posterior estimation (was SNPE_gaussian).
 
 This module provides:
 - GaussianPosterior: nn.Module implementing the Gaussian posterior
-- SNPE_gaussian: Factory function creating a configured LossBasedEstimator
+- Gaussian: Factory function creating a configured LossBasedEstimator
 
 The Gaussian posterior uses:
 - Diagonal whitening for input/output normalization (stable under distribution shift)
@@ -24,9 +24,9 @@ import torch
 import torch.nn as nn
 from omegaconf import OmegaConf
 
-from falcon.contrib.networks import build_mlp
-from falcon.contrib.product_prior import TransformedPrior
-from falcon.contrib.stepwise_estimator import (
+from falcon.estimators.networks import build_mlp
+from falcon.priors.product import TransformedPrior
+from falcon.estimators.base import (
     LossBasedEstimator,
     TrainingLoopConfig,
     OptimizerConfig,
@@ -55,7 +55,7 @@ def _default_optimizer_config():
 
 @dataclass
 class GaussianConfig:
-    """Top-level SNPE_gaussian configuration."""
+    """Top-level Gaussian estimator configuration."""
 
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     network: GaussianPosteriorConfig = field(default_factory=GaussianPosteriorConfig)
@@ -232,7 +232,7 @@ class GaussianPosterior(nn.Module):
 # ==================== Factory Function ====================
 
 
-def SNPE_gaussian(
+def Gaussian(
     simulator_instance,
     theta_key: Optional[str] = None,
     condition_keys: Optional[List[str]] = None,
@@ -260,7 +260,7 @@ def SNPE_gaussian(
 
     Example YAML:
         estimator:
-          _target_: falcon.contrib.SNPE_gaussian
+          _target_: falcon.estimators.Gaussian
           network:
             hidden_dim: 128
             num_layers: 3
@@ -271,7 +271,7 @@ def SNPE_gaussian(
     # Check simulator supports transformation interface
     if not isinstance(simulator_instance, TransformedPrior):
         raise TypeError(
-            f"SNPE_gaussian requires a TransformedPrior (e.g., ProductPrior), "
+            f"Gaussian requires a TransformedPrior (e.g., Product), "
             f"got {type(simulator_instance).__name__}. "
             f"The simulator must support forward/inverse with mode='standard_normal'."
         )

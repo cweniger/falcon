@@ -1,4 +1,4 @@
-"""Sequential Neural Posterior Estimation (SNPE-A) implementation."""
+"""Flow-based posterior estimation (was SNPE_A)."""
 
 import copy
 import time
@@ -13,9 +13,9 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.logger import log, debug, info, warning, error
-from falcon.contrib.flow import Flow
-from falcon.contrib.stepwise_estimator import StepwiseEstimator, TrainingLoopConfig
-from falcon.contrib.torch_embedding import instantiate_embedding
+from falcon.estimators.flow_density import FlowDensity
+from falcon.estimators.base import StepwiseEstimator, TrainingLoopConfig
+from falcon.embeddings import instantiate_embedding
 
 
 # ==================== Configuration Dataclasses ====================
@@ -30,7 +30,6 @@ class NetworkConfig:
     norm_momentum: float = 1e-2
     adaptive_momentum: bool = False
     use_log_update: bool = False
-    embedding: Optional[Any] = None
 
 
 @dataclass
@@ -60,22 +59,23 @@ class InferenceConfig:
 
 
 @dataclass
-class SNPEConfig:
-    """Top-level SNPE_A configuration."""
+class FlowConfig:
+    """Top-level Flow estimator configuration."""
 
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
     optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
+    embedding: Optional[Any] = None
     device: Optional[str] = None
 
 
-# ==================== SNPE_A Implementation ====================
+# ==================== Flow Implementation ====================
 
 
-class SNPE_A(StepwiseEstimator):
+class Flow(StepwiseEstimator):
     """
-    Sequential Neural Posterior Estimation (SNPE-A).
+    Flow-based posterior estimation (formerly SNPE_A).
 
     Implementation-specific features:
     - Dual flow architecture (conditional + marginal)
@@ -91,7 +91,7 @@ class SNPE_A(StepwiseEstimator):
         config: Optional[dict] = None,
     ):
         """
-        Initialize SNPE_A estimator.
+        Initialize Flow estimator.
 
         Args:
             simulator_instance: Prior/simulator instance
@@ -100,7 +100,7 @@ class SNPE_A(StepwiseEstimator):
             config: Configuration dict with loop, network, optimizer, inference sections
         """
         # Merge user config with defaults using OmegaConf structured config
-        schema = OmegaConf.structured(SNPEConfig)
+        schema = OmegaConf.structured(FlowConfig)
         config = OmegaConf.merge(schema, config or {})
 
         super().__init__(
@@ -116,8 +116,7 @@ class SNPE_A(StepwiseEstimator):
         self.device = self._setup_device(config.device)
 
         # Embedding network
-        # Convert to plain dict for instantiate_embedding which uses isinstance(x, dict)
-        embedding_config = OmegaConf.to_container(config.network.embedding, resolve=True)
+        embedding_config = OmegaConf.to_container(config.embedding, resolve=True)
         self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
         # Flow networks (initialized lazily)
@@ -136,7 +135,7 @@ class SNPE_A(StepwiseEstimator):
         self._optimizer = None
         self._scheduler = None
 
-        # Extended history for SNPE-specific tracking
+        # Extended history for Flow-specific tracking
         self.history.update({
             "theta_mins": [],
             "theta_maxs": [],
@@ -202,9 +201,9 @@ class SNPE_A(StepwiseEstimator):
         debug("Networks initialized.")
 
     def _create_flow(self, theta, s, is_conditional=True):
-        """Create a Flow network with current config."""
+        """Create a FlowDensity network with current config."""
         cfg = self.config.network
-        return Flow(
+        return FlowDensity(
             theta,
             s if is_conditional else s * 0,
             theta_norm=cfg.theta_norm,
@@ -275,7 +274,7 @@ class SNPE_A(StepwiseEstimator):
         return loss_cond, loss_marg
 
     def train_step(self, batch) -> Dict[str, float]:
-        """SNPE-A training step with gradient update and optional sample discarding."""
+        """Flow training step with gradient update and optional sample discarding."""
         ids, theta, theta_logprob, conditions, u, u_device, conditions_device = \
             self._unpack_batch(batch, "train")
 
@@ -305,7 +304,7 @@ class SNPE_A(StepwiseEstimator):
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
     def val_step(self, batch) -> Dict[str, float]:
-        """SNPE-A validation step without gradient computation."""
+        """Flow validation step without gradient computation."""
         _, theta, theta_logprob, conditions, u, u_device, conditions_device = \
             self._unpack_batch(batch, "val")
 
@@ -466,7 +465,7 @@ class SNPE_A(StepwiseEstimator):
     # ==================== Save/Load ====================
 
     def save(self, node_dir: Path) -> None:
-        """Save SNPE-A state."""
+        """Save Flow state."""
         debug(f"Saving: {node_dir}")
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
@@ -490,7 +489,7 @@ class SNPE_A(StepwiseEstimator):
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
 
     def load(self, node_dir: Path) -> None:
-        """Load SNPE-A state."""
+        """Load Flow state."""
         debug(f"Loading: {node_dir}")
         init_parameters = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init_parameters[0], init_parameters[1])

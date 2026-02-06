@@ -17,7 +17,7 @@ sequence of modules that execute sequentially with a shared data dictionary.
 ## Basic Usage
 
 ```python
-from falcon.core.embedding import instantiate_embedding
+from falcon.embeddings import instantiate_embedding
 import torch
 
 # Simple single-input embedding
@@ -124,7 +124,7 @@ result = embedding({
 ```python
 # Simulation-based inference embedding for parameter estimation
 config = {
-    '_target_': 'falcon.contrib.PosteriorNet',
+    '_target_': 'falcon.embeddings.PosteriorNet',
     'hidden_dims': [128, 64],
     'output_dim': 4,  # Parameter dimension
     '_input_': [
@@ -133,13 +133,13 @@ config = {
 
         # Processed observations
         {
-            '_target_': 'falcon.contrib.ObservationEncoder',
+            '_target_': 'falcon.embeddings.ObservationEncoder',
             'embedding_dim': 64,
             '_input_': {
-                '_target_': 'falcon.contrib.PCAProjector',
+                '_target_': 'falcon.embeddings.PCAProjector',
                 'n_components': 32,
                 '_input_': {
-                    '_target_': 'falcon.contrib.DiagonalWhitener',
+                    '_target_': 'falcon.embeddings.DiagonalWhitener',
                     'normalize': True,
                     '_input_': 'x_obs'
                 }
