@@ -187,7 +187,8 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
 
     # 1. Default run_dir if not specified
-    if run_dir is None:
+    auto_generated = run_dir is None
+    if auto_generated:
         run_dir = generate_run_dir()
 
     run_dir_path = Path(run_dir)
@@ -218,6 +219,15 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
     run_dir_path.mkdir(parents=True, exist_ok=True)
     if not saved_config.exists():
         OmegaConf.save(cfg, saved_config)
+
+    # 7. Update 'latest' symlink in parent directory (only for auto-generated run dirs)
+    if auto_generated:
+        latest_link = run_dir_path.parent / "latest"
+        try:
+            latest_link.unlink(missing_ok=True)
+            latest_link.symlink_to(run_dir_path.name)
+        except OSError:
+            pass  # Ignore on platforms/filesystems that don't support symlinks
 
     return cfg
 
