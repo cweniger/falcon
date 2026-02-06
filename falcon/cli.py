@@ -653,15 +653,12 @@ def parse_args():
         print("  falcon launch [--run-dir DIR] [--config-name FILE] [--no-interactive] [key=value ...]")
         print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
         print("  falcon graph [--config-name FILE]")
-        print("  falcon monitor [--address ADDR] [--refresh SECS]")
         print()
         print("Options:")
         print("  --run-dir DIR        Run directory (default: auto-generated)")
         print("  --config-name FILE   Config file (default: config.yaml)")
         print("  --no-interactive     Disable interactive TUI (plain output)")
         print("  --log-lines N        Number of log lines in interactive footer (default: 16)")
-        print("  --address ADDR       Ray cluster address (default: auto)")
-        print("  --refresh SECS       Monitor refresh interval (default: 1.0)")
         sys.exit(0)
 
     mode = sys.argv[1]
