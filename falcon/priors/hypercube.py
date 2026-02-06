@@ -233,10 +233,6 @@ class Hypercube:
         return self.forward(u).numpy()
 
 
-# Backward-compat alias
-HypercubeMappingPrior = Hypercube
-
-
 # ==================== Example Usage ==================== #
 if __name__ == "__main__":
     # Define a list of priors.

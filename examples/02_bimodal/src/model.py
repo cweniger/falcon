@@ -79,8 +79,8 @@ class Add:
 #     def __init__(self, log_prefix=None):
 #         super(E, self).__init__()
 #         # Import PCA components from their specific modules
-#         from falcon.contrib.svd import PCAProjector
-#         from falcon.contrib.norms import DiagonalWhitener
+#         from falcon.embeddings import PCAProjector
+#         from falcon.embeddings import DiagonalWhitener
 
 #         self.projector = PCAProjector(buffer_size=128)
 #         self.whitener = DiagonalWhitener(NBINS, use_fourier=False)

@@ -297,7 +297,3 @@ def Gaussian(
         device=cfg.device,
         latent_mode="standard_normal",  # GaussianPosterior assumes N(0,I) prior
     )
-
-
-# Backward-compat alias
-SNPE_gaussian = Gaussian

@@ -2,7 +2,6 @@
 
 import copy
 import time
-import warnings
 from dataclasses import dataclass, field
 from pathlib import Path
 from typing import Any, Dict, List, Optional
@@ -116,20 +115,8 @@ class Flow(StepwiseEstimator):
         # Device setup
         self.device = self._setup_device(config.device)
 
-        # Embedding network - check new location (config.embedding) first,
-        # fall back to old location (config.network.embedding) for backward compat
-        embedding_cfg = config.embedding
-        if embedding_cfg is None and hasattr(config.network, 'embedding') and config.network.embedding is not None:
-            warnings.warn(
-                "Specifying 'embedding' inside 'network' is deprecated. "
-                "Move 'embedding' to be a sibling of 'network' in your config.",
-                DeprecationWarning,
-                stacklevel=2,
-            )
-            embedding_cfg = config.network.embedding
-
-        # Convert to plain dict for instantiate_embedding which uses isinstance(x, dict)
-        embedding_config = OmegaConf.to_container(embedding_cfg, resolve=True)
+        # Embedding network
+        embedding_config = OmegaConf.to_container(config.embedding, resolve=True)
         self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
         # Flow networks (initialized lazily)
@@ -560,8 +547,3 @@ class Flow(StepwiseEstimator):
         log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
         log_ratio = log_prob - theta_logprob.cpu()
         return log_ratio < cfg_inf.log_ratio_threshold
-
-
-# Backward-compat aliases
-SNPE_A = Flow
-SNPEConfig = FlowConfig

@@ -23,19 +23,7 @@ from falcon.estimators.gaussian import (
     GaussianPosterior,
 )
 
-# Backward-compat aliases
-SNPE_A = Flow
-SNPEConfig = FlowConfig
-SNPE_gaussian = Gaussian
-
-# Re-export aliased config names from flow.py
-from falcon.estimators.flow import (
-    OptimizerConfig as SNPEOptimizerConfig,
-    InferenceConfig as SNPEInferenceConfig,
-)
-
 __all__ = [
-    # New names
     "Flow",
     "FlowConfig",
     "NetworkConfig",
@@ -48,10 +36,4 @@ __all__ = [
     "TrainingLoopConfig",
     "OptimizerConfig",
     "InferenceConfig",
-    # Backward-compat aliases
-    "SNPE_A",
-    "SNPEConfig",
-    "SNPEOptimizerConfig",
-    "SNPEInferenceConfig",
-    "SNPE_gaussian",
 ]

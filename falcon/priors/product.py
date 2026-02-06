@@ -387,7 +387,3 @@ class Product(TransformedPrior):
 
         else:
             raise ValueError(f"Unknown dist_type: {dist_type}")
-
-
-# Backward-compat alias
-ProductPrior = Product

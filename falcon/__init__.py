@@ -14,7 +14,6 @@ __all__ = [
     "read_run",
     "load_run",
     "read_samples",
-    "contrib",
     "estimators",
     "priors",
     "embeddings",
@@ -48,7 +47,7 @@ def __getattr__(name):
         attr = getattr(module, name)
         globals()[name] = attr
         return attr
-    if name in ("contrib", "estimators", "priors", "embeddings"):
+    if name in ("estimators", "priors", "embeddings"):
         import importlib
         mod = importlib.import_module(f".{name}", __name__)
         globals()[name] = mod
