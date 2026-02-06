@@ -362,7 +362,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
 
-def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_sample: bool = True) -> None:
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_sample: bool = True, timeout: float = None) -> None:
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
@@ -539,13 +539,27 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         status_thread.start()
 
     # 4) Launch training & simulations
-    # Create stop check callback for graceful shutdown
-    if display:
-        stop_check = lambda: display.stop_requested
-    elif shutdown_handler:
-        stop_check = lambda: shutdown_handler.stop_requested
-    else:
-        stop_check = None
+    # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
+    import time as _time
+    _start_time = _time.time()
+    _timeout_logged = False
+
+    def stop_check():
+        nonlocal _timeout_logged
+        # Check user interrupt (Ctrl+C)
+        if display and display.stop_requested:
+            return True
+        if shutdown_handler and shutdown_handler.stop_requested:
+            return True
+        # Check timeout
+        if timeout is not None:
+            elapsed = _time.time() - _start_time
+            if elapsed >= timeout:
+                if not _timeout_logged:
+                    info(f"Timeout reached ({timeout}s), stopping gracefully...")
+                    _timeout_logged = True
+                return True
+        return False
 
     try:
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
@@ -717,6 +731,7 @@ def parse_args():
         print("  --no-interactive       Disable interactive TUI (plain output)")
         print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
         print("  --no-posterior-sample  Skip posterior sampling after training")
+        print("  --timeout SECONDS      Stop training after SECONDS (graceful stop)")
         sys.exit(0)
 
     mode = sys.argv[1]
@@ -756,6 +771,7 @@ def parse_args():
     interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
     posterior_sample = True  # Sample posteriors after training if configured
+    timeout = None  # Training timeout in seconds
     overrides = []
     i = 0
     while i < len(args):
@@ -776,6 +792,11 @@ def parse_args():
             interactive = False
         elif arg == "--no-posterior-sample":
             posterior_sample = False
+        elif arg == "--timeout" and i + 1 < len(args):
+            timeout = float(args[i + 1])
+            i += 1
+        elif arg.startswith("--timeout="):
+            timeout = float(arg.split("=", 1)[1])
         elif arg == "--log-lines" and i + 1 < len(args):
             log_lines = int(args[i + 1])
             i += 1
@@ -785,12 +806,12 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, address, refresh = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
@@ -804,7 +825,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg, interactive=interactive, log_lines=log_lines, posterior_sample=posterior_sample)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines, posterior_sample=posterior_sample, timeout=timeout)
     elif mode == "graph":
         graph_mode(cfg)
     else:
