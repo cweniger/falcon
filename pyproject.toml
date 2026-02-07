@@ -20,13 +20,13 @@ classifiers = [
 dependencies = [
     "wandb>=0.15.0",
     "torch>=2.0.0",
-    "numpy",
-    "ray",
-    "sbi",
-    "omegaconf",
-    "coolname",
-    "rich>=13.0.0",
-    "blessed>=1.20.0",
+    "numpy>=1.16",
+    "ray>=2.0",
+    "sbi>=0.18",
+    "omegaconf>=2.1",
+    "coolname>=1.0",
+    "rich>=13.0",
+    "blessed>=1.20",
 ]
 
 [project.optional-dependencies]
