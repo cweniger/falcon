@@ -14,6 +14,7 @@ setup(
         "coolname",
         "rich>=13.0.0",
         "blessed>=1.20.0",
+        "timm",
     ],
     extras_require={
         "monitor": ["textual>=0.40.0"],
