@@ -77,7 +77,7 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         cmd,
         cwd=example_dir,
         capture_output=True,
-        timeout=600,  # 10 minute timeout
+        timeout=180,  # 3 minute timeout
         env=env,
     )
 
