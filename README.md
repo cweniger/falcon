@@ -1,5 +1,7 @@
 # Falcon
 
+[![Tests](https://github.com/cweniger/falcon/actions/workflows/tests.yml/badge.svg)](https://github.com/cweniger/falcon/actions/workflows/tests.yml)
+[![codecov](https://codecov.io/gh/cweniger/falcon/branch/main/graph/badge.svg)](https://codecov.io/gh/cweniger/falcon)
 [![Documentation](https://img.shields.io/badge/docs-cweniger.github.io%2Ffalcon-blue)](https://cweniger.github.io/falcon/)
 
 Falcon is a CLI-driven Python framework for **simulation-based inference (SBI)** with large, expensive simulators. Born in astrophysics, built for any domain with complex forward models — break your model into components and Falcon jointly infers their parameters.
