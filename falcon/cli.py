@@ -720,7 +720,7 @@ def _get_version():
     """Get package version string."""
     from importlib.metadata import version, PackageNotFoundError
     try:
-        return version("falcon")
+        return version("falcon-sbi")
     except PackageNotFoundError:
         return "0.0.0+unknown"
 

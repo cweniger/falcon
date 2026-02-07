@@ -14,9 +14,15 @@ Falcon is a CLI-driven Python framework for **simulation-based inference (SBI)**
 ## Installation
 
 ```bash
+pip install falcon-sbi
+```
+
+For development:
+
+```bash
 git clone https://github.com/cweniger/falcon.git
 cd falcon
-pip install .
+pip install -e ".[monitor]"
 ```
 
 ## Quick Start

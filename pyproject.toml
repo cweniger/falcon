@@ -1,7 +1,56 @@
+[build-system]
+requires = ["setuptools>=64", "setuptools-scm"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "falcon-sbi"
+version = "0.2.0"
+description = "CLI-driven framework for simulation-based inference with large simulators"
+readme = "README.md"
+license = "Apache-2.0"
+requires-python = ">=3.10"
+authors = [
+    { name = "Christoph Weniger" },
+]
+keywords = ["simulation-based-inference", "sbi", "bayesian", "pytorch"]
+classifiers = [
+    "Programming Language :: Python :: 3",
+    "Topic :: Scientific/Engineering",
+]
+dependencies = [
+    "wandb>=0.15.0",
+    "torch>=2.0.0",
+    "numpy",
+    "ray",
+    "sbi",
+    "omegaconf",
+    "coolname",
+    "rich>=13.0.0",
+    "blessed>=1.20.0",
+]
+
+[project.optional-dependencies]
+monitor = ["textual>=0.40.0"]
+docs = [
+    "mkdocs>=1.5",
+    "mkdocs-material>=9.0",
+    "mkdocstrings[python]>=0.24",
+]
+
+[project.scripts]
+falcon = "falcon.cli:main"
+
+[project.urls]
+Homepage = "https://github.com/cweniger/falcon"
+Documentation = "https://cweniger.github.io/falcon/"
+
+[tool.setuptools.packages.find]
+include = ["falcon*"]
+
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 markers = [
-    "slow: marks tests as slow (deselect with '-m \"not slow\"')",
+    'slow: marks tests as slow (deselect with "-m \"not slow\"")',
 ]
 filterwarnings = [
     "ignore::DeprecationWarning",

@@ -10,7 +10,7 @@ This guide walks you through setting up and running your first Falcon project.
 ## Installation
 
 ```bash
-pip install falcon
+pip install falcon-sbi
 ```
 
 ## Project Structure
