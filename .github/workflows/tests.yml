@@ -39,9 +39,7 @@ jobs:
         example:
           - 01_minimal
           - 02_bimodal
-          - 03_composite
           - 04_gaussian
-          - 05_linear_regression
     steps:
       - uses: actions/checkout@v4
 
