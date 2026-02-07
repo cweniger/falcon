@@ -38,7 +38,7 @@ falcon launch --run-dir outputs/run_01
 ## Installation
 
 ```bash
-pip install falcon
+pip install falcon-sbi
 ```
 
 Or install from source:

@@ -47,9 +47,9 @@ class Run:
     def config(self) -> DictConfig:
         """Load and return the run configuration."""
         if self._config is None:
-            config_path = self.run_dir / "config.yaml"
+            config_path = self.run_dir / "config.yml"
             if not config_path.exists():
-                raise FileNotFoundError(f"No config.yaml found in {self.run_dir}")
+                raise FileNotFoundError(f"No config.yml found in {self.run_dir}")
             self._config = OmegaConf.load(config_path)
         return self._config
 

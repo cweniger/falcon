@@ -18,21 +18,21 @@ _skip_ci = pytest.mark.skipif(IN_CI, reason="Too resource-heavy for CI runners")
 # Each tuple: (example_dir_name, config_name, epoch_overrides)
 EXAMPLE_CONFIGS = [
     # 01_minimal: single estimator 'z'
-    ("01_minimal", "config.yaml", ["graph.z.estimator.loop.num_epochs=2"]),
+    ("01_minimal", "config.yml", ["graph.z.estimator.loop.num_epochs=2"]),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
-    ("02_bimodal", "config_regular.yaml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("02_bimodal", "config_regular.yml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 03_composite: two ResNet18 + Ray actors exceed CI runner memory
     pytest.param(
-        "03_composite", "config.yaml",
+        "03_composite", "config.yml",
         ["graph.z1.estimator.loop.num_epochs=2", "graph.z2.estimator.loop.num_epochs=2",
          "graph.z1.ray.num_gpus=0", "graph.z2.ray.num_gpus=0"],
         marks=_skip_ci,
     ),
     # 04_gaussian: SNPE_gaussian with exponential forward model (needs GPU override)
-    ("04_gaussian", "config.yaml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("04_gaussian", "config.yml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 05_linear_regression: requires GPU
     pytest.param(
-        "05_linear_regression", "config.yaml",
+        "05_linear_regression", "config.yml",
         ["graph.theta.estimator.loop.num_epochs=2", "graph.theta.ray.num_gpus=0"],
         marks=_skip_ci,
     ),

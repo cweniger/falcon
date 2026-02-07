@@ -10,7 +10,7 @@ This guide walks you through setting up and running your first Falcon project.
 ## Installation
 
 ```bash
-pip install falcon
+pip install falcon-sbi
 ```
 
 ## Project Structure
@@ -19,7 +19,7 @@ A typical Falcon project has this structure:
 
 ```
 my_project/
-├── config.yaml      # Graph and training configuration
+├── config.yml      # Graph and training configuration
 ├── model.py         # Your simulator and embedding definitions
 └── data/
     └── obs.npz      # Observed data (optional)
@@ -45,7 +45,7 @@ class Simulator:
 
 ### 2. Create Configuration
 
-Create `config.yaml`:
+Create `config.yml`:
 
 ```yaml
 logging:
