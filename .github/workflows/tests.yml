@@ -32,7 +32,16 @@ jobs:
 
   smoke:
     runs-on: ubuntu-latest
-    timeout-minutes: 15
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        example:
+          - 01_minimal
+          - 02_bimodal
+          - 03_composite
+          - 04_gaussian
+          - 05_linear_regression
     steps:
       - uses: actions/checkout@v4
 
@@ -43,8 +52,8 @@ jobs:
       - name: Install dependencies
         run: pip install -e . pytest
 
-      - name: Run smoke tests
-        run: pytest -m slow --tb=short
+      - name: Smoke test ${{ matrix.example }}
+        run: pytest -m slow -k "${{ matrix.example }}" --tb=short
         env:
           WANDB_MODE: disabled
           RAY_ADDRESS: ""
