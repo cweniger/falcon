@@ -125,7 +125,7 @@ graph:
 ├── samples_dir/                # Generated samples
 │   └── posterior/{timestamp}/  # Timestamped sample batches
 │       └── 000000.npz
-└── config.yaml                 # Saved configuration
+└── config.yml                 # Saved configuration
 ```
 
 ## Key Files

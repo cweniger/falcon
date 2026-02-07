@@ -39,7 +39,7 @@ This trains a neural posterior estimator on simulated data, then draws 1000 post
 
 ## How It Works
 
-You define a directed graph of random variables in `config.yaml`. Each node has a **simulator** (forward model) and optionally an **estimator** (learned posterior). Falcon iterates between simulating data and training the estimator, automatically managing the sample buffer.
+You define a directed graph of random variables in `config.yml`. Each node has a **simulator** (forward model) and optionally an **estimator** (learned posterior). Falcon iterates between simulating data and training the estimator, automatically managing the sample buffer.
 
 ```yaml
 graph:

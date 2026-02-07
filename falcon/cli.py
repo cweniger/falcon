@@ -7,8 +7,8 @@ Usage: falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]
 
 Run directory behavior:
   - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
-  - If --run-dir exists with config.yaml, resumes from saved config
-  - Otherwise, loads ./config.yaml and saves resolved config to run_dir
+  - If --run-dir exists with config.yml, resumes from saved config
+  - Otherwise, loads ./config.yml and saves resolved config to run_dir
 """
 
 import sys
@@ -168,11 +168,11 @@ def graph_mode(cfg) -> None:
     print(f"Nodes: {len(graph.node_list)} | Observed: {', '.join(observed)} | Estimators: {', '.join(with_estimator)}")
 
 
-def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides: list = None):
+def load_config(config_name: str = "config.yml", run_dir: str = None, overrides: list = None):
     """Load config with run_dir injection and resume support.
 
     Args:
-        config_name: Config file name (e.g., config.yaml)
+        config_name: Config file name (e.g., config.yml)
         run_dir: Run directory path. If None, auto-generates one.
         overrides: List of key=value CLI overrides
 
@@ -192,7 +192,7 @@ def load_config(config_name: str = "config.yaml", run_dir: str = None, overrides
         run_dir = generate_run_dir()
 
     run_dir_path = Path(run_dir)
-    saved_config = run_dir_path / "config.yaml"
+    saved_config = run_dir_path / "config.yml"
 
     # 2. Load config (from run_dir if resuming, else from cwd)
     if saved_config.exists():
@@ -663,7 +663,7 @@ def sample_mode(cfg, sample_type: str) -> None:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
     if sample_cfg is None or "n" not in sample_cfg:
-        raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yaml.")
+        raise ValueError(f"Missing sample.{sample_type}.n in config. Add it to your config.yml.")
 
     num_samples = sample_cfg.n
     info(f"Generating {num_samples} samples using {sample_type} sampling...")
@@ -737,7 +737,7 @@ def parse_args():
         print()
         print("Options:")
         print("  --run-dir DIR          Run directory (default: auto-generated)")
-        print("  --config-name FILE     Config file (default: config.yaml)")
+        print("  --config-name FILE     Config file (default: config.yml)")
         print("  --no-interactive       Disable interactive TUI (plain output)")
         print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
         print("  --no-posterior-sample  Skip posterior sampling after training")
@@ -776,7 +776,7 @@ def parse_args():
 
     # Extract --run-dir, --config-name, --interactive, --log-lines and collect overrides
     run_dir = None
-    config_name = "config.yaml"
+    config_name = "config.yml"
     # Interactive mode: default to True if stdout is a TTY
     interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
