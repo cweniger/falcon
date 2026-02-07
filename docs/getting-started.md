@@ -66,11 +66,11 @@ graph:
   theta:
     evidence: [x]
     simulator:
-      _target_: falcon.contrib.HypercubeMappingPrior
+      _target_: falcon.priors.Hypercube
       priors:
         - ['uniform', -10.0, 10.0]
     estimator:
-      _target_: falcon.contrib.SNPE_A
+      _target_: falcon.estimators.Flow
       loop:
         num_epochs: 100
       network:

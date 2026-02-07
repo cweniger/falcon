@@ -1,12 +1,15 @@
-# HypercubeMappingPrior
+# Hypercube
 
 Flexible prior distributions with hypercube mapping.
 
 ## Overview
 
-`HypercubeMappingPrior` maps between a hypercube domain and various target
+`Hypercube` maps between a hypercube domain and various target
 distributions. This enables uniform treatment of different prior types during
 training while preserving the original distribution semantics.
+
+Use `Hypercube` as the simulator (prior) for latent nodes when pairing with the
+[Flow](flow.md) estimator.
 
 ## Supported Distributions
 
@@ -22,10 +25,10 @@ training while preserving the original distribution semantics.
 ## Usage
 
 ```python
-from falcon.contrib import HypercubeMappingPrior
+from falcon.priors import Hypercube
 
 # Define priors for 3 parameters
-prior = HypercubeMappingPrior(
+prior = Hypercube(
     priors=[
         ('uniform', -10.0, 10.0),
         ('normal', 0.0, 1.0),
@@ -45,7 +48,7 @@ x = prior.forward(u)         # From hypercube
 
 ```yaml
 simulator:
-  _target_: falcon.contrib.HypercubeMappingPrior
+  _target_: falcon.priors.Hypercube
   priors:
     - ['uniform', -10.0, 10.0]
     - ['normal', 0.0, 1.0]
@@ -54,7 +57,7 @@ simulator:
 
 ## Class Reference
 
-::: falcon.contrib.hypercubemappingprior.HypercubeMappingPrior
+::: falcon.priors.hypercube.Hypercube
     options:
       show_source: true
       members:

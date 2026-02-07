@@ -46,10 +46,14 @@ nav:
           - Graph: api/graph.md
           - DeployedGraph: api/deployed-graph.md
           - BaseEstimator: api/base-estimator.md
-      - Contrib:
-          - SNPE_A: api/snpe-a.md
-          - HypercubeMappingPrior: api/hypercube-prior.md
+      - Estimators:
           - Flow: api/flow.md
+          - Gaussian: api/gaussian.md
+          - FlowDensity: api/flow-density.md
+      - Priors:
+          - Hypercube: api/hypercube.md
+          - Product: api/product.md
+      - Embeddings: api/embeddings.md
 
 plugins:
   - search

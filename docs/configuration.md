@@ -83,11 +83,14 @@ graph:
       param1: value1
 
     estimator:                     # Posterior learner (optional)
-      _target_: falcon.contrib.SNPE_A
+      _target_: falcon.estimators.Flow
       loop:
         num_epochs: 300
       network:
         net_type: nsf
+      embedding:
+        _target_: model.MyEmbedding
+        _input_: [x]
       optimizer:
         lr: 0.01
       inference:
@@ -106,7 +109,7 @@ The forward model that generates samples:
 
 ```yaml
 simulator:
-  _target_: falcon.contrib.HypercubeMappingPrior
+  _target_: falcon.priors.Hypercube
   priors:
     - ['uniform', -10.0, 10.0]
     - ['normal', 0.0, 1.0]
@@ -114,11 +117,14 @@ simulator:
 
 ### `estimator`
 
-The posterior learner (typically SNPE_A):
+The posterior learner. Falcon provides two estimators:
+
+- [`falcon.estimators.Flow`](api/flow.md) — Flow-based posterior estimation (recommended for most cases)
+- [`falcon.estimators.Gaussian`](api/gaussian.md) — Full covariance Gaussian posterior
 
 ```yaml
 estimator:
-  _target_: falcon.contrib.SNPE_A
+  _target_: falcon.estimators.Flow
 
   loop:
     num_epochs: 300
@@ -131,9 +137,10 @@ estimator:
   network:
     net_type: nsf          # nsf, maf, zuko_nice, etc.
     theta_norm: true
-    embedding:
-      _target_: model.Embedding
-      _input_: [x]
+
+  embedding:
+    _target_: model.Embedding
+    _input_: [x]
 
   optimizer:
     lr: 0.01
