@@ -18,11 +18,9 @@ classifiers = [
     "Topic :: Scientific/Engineering",
 ]
 dependencies = [
-    "wandb>=0.15.0",
     "torch>=2.0.0",
     "numpy>=1.16",
     "ray>=2.0",
-    "sbi>=0.18",
     "omegaconf>=2.1",
     "coolname>=1.0",
     "rich>=13.0",
@@ -30,7 +28,10 @@ dependencies = [
 ]
 
 [project.optional-dependencies]
+sbi = ["sbi>=0.18"]
+wandb = ["wandb>=0.15.0"]
 monitor = ["textual>=0.40.0"]
+all = ["sbi>=0.18", "wandb>=0.15.0", "textual>=0.40.0"]
 docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9.0",
