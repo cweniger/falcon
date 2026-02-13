@@ -21,6 +21,7 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.16",
     "ray>=2.0",
+    "joblib>=1.0",
     "omegaconf>=2.1",
     "coolname>=1.0",
     "rich>=13.0",

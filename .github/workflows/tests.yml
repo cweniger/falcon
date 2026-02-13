@@ -36,10 +36,13 @@ jobs:
     strategy:
       fail-fast: false
       matrix:
-        example:
-          - 01_minimal
-          - 02_bimodal
-          - 04_gaussian
+        include:
+          - example: 01_minimal
+            extras: ".[sbi]"
+          - example: 02_bimodal
+            extras: ".[sbi]"
+          - example: 04_gaussian
+            extras: "."
     steps:
       - uses: actions/checkout@v4
 
@@ -48,7 +51,7 @@ jobs:
           python-version: "3.11"
 
       - name: Install dependencies
-        run: pip install -e . pytest
+        run: pip install -e "${{ matrix.extras }}" pytest
 
       - name: Smoke test ${{ matrix.example }}
         run: pytest -m slow -k "${{ matrix.example }}" --tb=short
