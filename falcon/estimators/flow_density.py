@@ -1,30 +1,39 @@
-"""Flow networks for density estimation."""
+"""Flow networks for density estimation.
+
+Requires the sbi package: pip install falcon-sbi[sbi]
+"""
 
 import numpy as np
 import torch
 
-import sbi.utils  # Don't remove - needed for sbi.neural_nets.net_builders
-from sbi.neural_nets import net_builders
-
 from falcon.embeddings.norms import LazyOnlineNorm
 
 
-# Network builder registry
-NET_BUILDERS = {
-    "nsf": net_builders.build_nsf,
-    "made": net_builders.build_made,
-    "maf": net_builders.build_maf,
-    "maf_rqs": net_builders.build_maf_rqs,
-    "zuko_nice": net_builders.build_zuko_nice,
-    "zuko_maf": net_builders.build_zuko_maf,
-    "zuko_nsf": net_builders.build_zuko_nsf,
-    "zuko_ncsf": net_builders.build_zuko_ncsf,
-    "zuko_sospf": net_builders.build_zuko_sospf,
-    "zuko_naf": net_builders.build_zuko_naf,
-    "zuko_unaf": net_builders.build_zuko_unaf,
-    "zuko_gf": net_builders.build_zuko_gf,
-    "zuko_bpf": net_builders.build_zuko_bpf,
-}
+def _get_net_builders():
+    """Lazily import sbi and return the network builder registry."""
+    try:
+        import sbi.utils  # noqa: F401 — needed for sbi.neural_nets.net_builders
+        from sbi.neural_nets import net_builders
+    except ImportError:
+        raise ImportError(
+            "sbi is required for flow-based estimators.\n"
+            "Install it with: pip install falcon-sbi[sbi]"
+        )
+    return {
+        "nsf": net_builders.build_nsf,
+        "made": net_builders.build_made,
+        "maf": net_builders.build_maf,
+        "maf_rqs": net_builders.build_maf_rqs,
+        "zuko_nice": net_builders.build_zuko_nice,
+        "zuko_maf": net_builders.build_zuko_maf,
+        "zuko_nsf": net_builders.build_zuko_nsf,
+        "zuko_ncsf": net_builders.build_zuko_ncsf,
+        "zuko_sospf": net_builders.build_zuko_sospf,
+        "zuko_naf": net_builders.build_zuko_naf,
+        "zuko_unaf": net_builders.build_zuko_unaf,
+        "zuko_gf": net_builders.build_zuko_gf,
+        "zuko_bpf": net_builders.build_zuko_bpf,
+    }
 
 
 class FlowDensity(torch.nn.Module):
@@ -51,9 +60,10 @@ class FlowDensity(torch.nn.Module):
             else None
         )
 
-        builder = NET_BUILDERS.get(net_type)
+        net_builders = _get_net_builders()
+        builder = net_builders.get(net_type)
         if builder is None:
-            raise ValueError(f"Unknown net_type: {net_type}. Available: {list(NET_BUILDERS.keys())}")
+            raise ValueError(f"Unknown net_type: {net_type}. Available: {list(net_builders.keys())}")
         self.net = builder(theta.float(), s.float(), z_score_x=None, z_score_y=None)
 
         if self.theta_norm is not None:

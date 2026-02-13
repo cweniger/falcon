@@ -1,7 +1,7 @@
 """
 WandB logging backend.
 
-Logs metrics to Weights & Biases. Optional dependency - install with: pip install wandb
+Logs metrics to Weights & Biases. Optional dependency - install with: pip install falcon-sbi[wandb]
 """
 
 import logging
@@ -22,7 +22,8 @@ def _check_wandb_available():
     """Raise ImportError if wandb is not installed."""
     if not WANDB_AVAILABLE:
         raise ImportError(
-            "WandB is not installed. Install it with: pip install wandb"
+            "wandb is required for WandB logging.\n"
+            "Install it with: pip install falcon-sbi[wandb]"
         )
 
 
