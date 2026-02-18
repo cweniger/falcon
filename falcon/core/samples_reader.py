@@ -18,9 +18,6 @@ Usage:
 
     # Stacked access
     samples.posterior.stacked['x'] # np.stack() result
-
-    # Filtering
-    samples.posterior.where(batch='250113-1200')['x']
 """
 
 from pathlib import Path
@@ -53,12 +50,11 @@ class SampleSetReader:
         self._sample_files: Optional[List[Path]] = None
         self._samples_cache: Dict[int, Dict[str, np.ndarray]] = {}
         self._keys_cache: Optional[Set[str]] = None
-        self._batches_cache: Optional[List[str]] = None
         self._indices = indices  # For filtered views
         self._stacked = StackedAccessor(self)
 
     def _discover_files(self) -> List[Path]:
-        """Find all sample NPZ files across all batches."""
+        """Find all sample NPZ files in the sample type directory."""
         if self._sample_files is not None:
             return self._sample_files
 
@@ -66,11 +62,7 @@ class SampleSetReader:
         if not self.sample_type_dir.exists():
             return self._sample_files
 
-        # Find all batch directories and their NPZ files
-        for batch_dir in sorted(self.sample_type_dir.iterdir()):
-            if batch_dir.is_dir():
-                npz_files = sorted(batch_dir.glob("*.npz"))
-                self._sample_files.extend(npz_files)
+        self._sample_files = sorted(self.sample_type_dir.glob("*.npz"))
 
         return self._sample_files
 
@@ -152,61 +144,9 @@ class SampleSetReader:
         self._keys_cache = all_keys
         return self._keys_cache
 
-    @property
-    def batches(self) -> List[str]:
-        """List of unique batch IDs."""
-        if self._batches_cache is not None:
-            return self._batches_cache
-
-        batches = set()
-        files = self._discover_files()
-        for idx in self._get_active_indices():
-            if idx < len(files):
-                # Batch is the parent directory name
-                batch_name = files[idx].parent.name
-                batches.add(batch_name)
-
-        self._batches_cache = sorted(batches)
-        return self._batches_cache
-
-    def where(self, batch: Optional[str] = None) -> 'SampleSetReader':
-        """Filter samples by criteria. Returns a new reader with filtered view.
-
-        Args:
-            batch: Filter to samples from this batch only
-
-        Returns:
-            New SampleSetReader with filtered indices
-        """
-        files = self._discover_files()
-        active_indices = self._get_active_indices()
-
-        filtered_indices = []
-        for idx in active_indices:
-            if idx >= len(files):
-                continue
-
-            include = True
-
-            # Filter by batch
-            if batch is not None:
-                batch_name = files[idx].parent.name
-                if batch_name != batch:
-                    include = False
-
-            if include:
-                filtered_indices.append(idx)
-
-        # Return new reader with filtered indices
-        filtered = SampleSetReader(self.sample_type_dir, indices=filtered_indices)
-        filtered._sample_files = self._sample_files  # Share discovered files
-        filtered._samples_cache = self._samples_cache  # Share cache
-        return filtered
-
     def __repr__(self):
         n = len(self)
-        batches = len(self.batches)
-        return f"<SampleSetReader: {n} samples, {batches} batch(es)>"
+        return f"<SampleSetReader: {n} samples>"
 
 
 class SamplesReader:
@@ -263,6 +203,5 @@ def read_samples(path: str) -> SamplesReader:
         samples.posterior[32]           # Dict for sample 32
         samples.posterior['x']          # List of arrays
         samples.posterior.stacked['x']  # Stacked array
-        samples.posterior.where(batch='250113-1200')['x']  # Filtered
     """
     return SamplesReader(Path(path))

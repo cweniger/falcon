@@ -24,9 +24,6 @@ buffer:
   resample_batch_size: 256
   keep_resampling: true
   resample_interval: 5
-  dump:
-    enabled: true
-    path: sample_{step}.joblib
 
 # Graph definition using declarative YAML
 graph:

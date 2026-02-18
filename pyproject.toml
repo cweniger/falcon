@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "falcon-sbi"
-version = "0.2.1"
+version = "0.3.0"
 description = "CLI-driven framework for simulation-based inference with large simulators"
 readme = "README.md"
 license = "Apache-2.0"
@@ -21,7 +21,6 @@ dependencies = [
     "torch>=2.0.0",
     "numpy>=1.16",
     "ray>=2.0",
-    "joblib>=1.0",
     "omegaconf>=2.1",
     "coolname>=1.0",
     "rich>=13.0",

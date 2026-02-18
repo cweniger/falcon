@@ -304,7 +304,6 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         cfg: Full config (for paths)
         info_fn: Function to use for info logging
     """
-    from datetime import datetime
     import numpy as np
     from pathlib import Path
 
@@ -353,11 +352,14 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     for key, value in save_data.items():
         info_fn(f"  {key}: {value.shape}")
 
-    # Determine output directory
+    # Determine output directory (flat structure)
     samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
-    batch_timestamp = datetime.now().strftime("%y%m%d-%H%M%S")
-    output_dir = Path(samples_dir) / sample_type / batch_timestamp
+    output_dir = Path(samples_dir) / sample_type
     output_dir.mkdir(parents=True, exist_ok=True)
+
+    # Find next index from existing NPZ files
+    existing = sorted(output_dir.glob("*.npz"))
+    start_idx = len(existing)
 
     info_fn(f"Saving samples to: {output_dir}/")
 
@@ -365,8 +367,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     num_samples = len(next(iter(save_data.values())))
     for i in range(num_samples):
         sample_data = {k: v[i] for k, v in save_data.items()}
-        sample_data["_batch"] = batch_timestamp
-        sample_path = output_dir / f"{i:06d}.npz"
+        sample_path = output_dir / f"{start_idx + i:06d}.npz"
         np.savez(sample_path, **sample_data)
 
     info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
@@ -496,7 +497,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
         keep_resampling=cfg.buffer.keep_resampling,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
-        buffer_path=cfg.paths.buffer,
+        samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
         store_fraction=cfg.buffer.get("store_fraction", 0.0),
         log_config=logging_cfg,
     )
@@ -619,7 +620,7 @@ def sample_mode(cfg, sample_type: str) -> None:
     """Sample mode: Generate samples using different sampling strategies.
 
     Samples are saved as individual NPZ files in:
-        {paths.samples}/{sample_type}/{batch_timestamp}/000000.npz, ...
+        {paths.samples}/{sample_type}/000000.npz, ...
     """
     from datetime import datetime
     import numpy as np

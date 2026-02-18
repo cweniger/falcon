@@ -2,10 +2,8 @@ import numpy as np
 import asyncio
 import sys
 from enum import IntEnum
-from datetime import datetime
 from pathlib import Path
 
-import joblib
 import ray
 from falcon.core.logger import Logger, set_logger, log, info, error
 
@@ -121,7 +119,7 @@ class DatasetManagerActor:
         simulate_chunk_size=0,
         initial_samples_path=None,
         keep_resampling=True,
-        buffer_path=None,
+        samples_path=None,
         store_fraction=0.0,
         log_config=None,
     ):
@@ -133,12 +131,11 @@ class DatasetManagerActor:
         self.resample_interval = resample_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
-        self.buffer_path = Path(buffer_path) if buffer_path else None
+        self.samples_path = Path(samples_path) if samples_path else None
         self.store_fraction = store_fraction
 
         # NPZ storage state
         self._sample_counter = 0
-        self._session_dir = None
 
         # Store
         self.ray_store = []
@@ -348,7 +345,7 @@ class DatasetManagerActor:
         info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
-        if self.store_fraction > 0 and self.buffer_path is not None:
+        if self.store_fraction > 0 and self.samples_path is not None:
             self._dump_refs(sample_refs)
 
     def _dump_refs(self, sample_refs: list):
@@ -362,16 +359,14 @@ class DatasetManagerActor:
                 self._save_sample(sample)
 
     def _save_sample(self, sample: dict):
-        """Save a single sample as NPZ file."""
-        if self._session_dir is None:
-            # Create session directory on first write
-            timestamp = datetime.now().strftime("%y%m%d-%H%M")
-            self._session_dir = self.buffer_path / timestamp
-            self._session_dir.mkdir(parents=True, exist_ok=True)
+        """Save a single sample as NPZ file to samples_path/buffer/."""
+        buffer_dir = self.samples_path / "buffer"
+        buffer_dir.mkdir(parents=True, exist_ok=True)
 
-        # Use counter for filename (0-indexed from session start)
-        sample_idx = self._sample_counter - 1  # counter already incremented
-        sample_path = self._session_dir / f"{sample_idx:06d}.npz"
+        # Find next index from existing files
+        existing = sorted(buffer_dir.glob("*.npz"))
+        next_idx = len(existing)
+        sample_path = buffer_dir / f"{next_idx:06d}.npz"
         np.savez(sample_path, **sample)
 
     def dump_store(self, samples: list):
@@ -380,7 +375,7 @@ class DatasetManagerActor:
         Args:
             samples: List of sample dicts to potentially store
         """
-        if self.store_fraction <= 0 or self.buffer_path is None:
+        if self.store_fraction <= 0 or self.samples_path is None:
             return
 
         interval = max(1, int(1.0 / self.store_fraction))
@@ -408,12 +403,29 @@ class DatasetManagerActor:
                 self.ray_store[i] = None
 
     def load_initial_samples(self):
-        """Load pre-existing samples from disk. Returns number loaded."""
+        """Load pre-existing samples from NPZ sample directory. Returns number loaded.
+
+        Expects initial_samples_path to point to a sample type directory
+        (e.g. samples_dir/prior) as produced by ``falcon sample prior``.
+        NPZ keys are remapped: ``key`` -> ``key.value`` with ``key.log_prob = 0.0``.
+        """
         if self.initial_samples_path is not None:
-            initial_samples = joblib.load(self.initial_samples_path)
-            if len(initial_samples) > 0:
-                self.append(initial_samples)
-            return len(initial_samples)
+            from falcon.core.samples_reader import SampleSetReader
+
+            reader = SampleSetReader(Path(self.initial_samples_path))
+            samples = []
+            for sample_dict in reader:
+                remapped = {}
+                for key, value in sample_dict.items():
+                    if key.startswith("_"):
+                        continue
+                    remapped[f"{key}.value"] = value
+                    remapped[f"{key}.log_prob"] = np.float64(0.0)
+                samples.append(remapped)
+            if samples:
+                self.append(samples)
+                info(f"Loaded {len(samples)} initial samples from {self.initial_samples_path}")
+            return len(samples)
         return 0
 
 
@@ -651,7 +663,7 @@ def get_ray_dataset_manager(
     simulate_chunk_size=0,
     initial_samples_path=None,
     keep_resampling=True,
-    buffer_path=None,
+    samples_path=None,
     store_fraction=0.0,
     log_config=None,
 ):
@@ -664,7 +676,7 @@ def get_ray_dataset_manager(
         simulate_chunk_size=simulate_chunk_size,
         keep_resampling=keep_resampling,
         initial_samples_path=initial_samples_path,
-        buffer_path=buffer_path,
+        samples_path=samples_path,
         store_fraction=store_fraction,
         log_config=log_config,
     )
