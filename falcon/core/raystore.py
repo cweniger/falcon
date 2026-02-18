@@ -5,7 +5,6 @@ from enum import IntEnum
 from datetime import datetime
 from pathlib import Path
 
-import joblib
 import ray
 from falcon.core.logger import Logger, set_logger, log, info, error
 
@@ -408,12 +407,29 @@ class DatasetManagerActor:
                 self.ray_store[i] = None
 
     def load_initial_samples(self):
-        """Load pre-existing samples from disk. Returns number loaded."""
+        """Load pre-existing samples from NPZ sample directory. Returns number loaded.
+
+        Expects initial_samples_path to point to a sample type directory
+        (e.g. samples_dir/prior) as produced by ``falcon sample prior``.
+        NPZ keys are remapped: ``key`` -> ``key.value`` with ``key.log_prob = 0.0``.
+        """
         if self.initial_samples_path is not None:
-            initial_samples = joblib.load(self.initial_samples_path)
-            if len(initial_samples) > 0:
-                self.append(initial_samples)
-            return len(initial_samples)
+            from falcon.core.samples_reader import SampleSetReader
+
+            reader = SampleSetReader(Path(self.initial_samples_path))
+            samples = []
+            for sample_dict in reader:
+                remapped = {}
+                for key, value in sample_dict.items():
+                    if key.startswith("_"):
+                        continue
+                    remapped[f"{key}.value"] = value
+                    remapped[f"{key}.log_prob"] = np.float64(0.0)
+                samples.append(remapped)
+            if samples:
+                self.append(samples)
+                info(f"Loaded {len(samples)} initial samples from {self.initial_samples_path}")
+            return len(samples)
         return 0
 
 
