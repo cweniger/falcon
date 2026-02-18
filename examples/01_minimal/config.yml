@@ -59,7 +59,7 @@ buffer:
   resample_batch_size: 128              # Number of new samples drawn per resampling step
   keep_resampling: true                 # Continue resampling after reaching max samples
   resample_interval: 10                 # Resample every N training epochs
-  # store_fraction: 1.0                 # Fraction of samples to store to disk (0=none, 1=all)
+  store_fraction: 0.1                   # Fraction of samples to dump to samples_dir/buffer/ (0=none, 1=all)
 
 # -----------------------------------------------------------------------------
 # Graph definition using declarative YAML
@@ -113,4 +113,4 @@ graph:
 sample:
   posterior:
     n: 1000                             # Number of posterior samples to draw
-    # Output: ${paths.samples}/posterior/{timestamp}/
+    # Output: ${paths.samples}/posterior/
