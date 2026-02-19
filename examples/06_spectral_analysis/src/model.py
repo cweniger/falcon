@@ -11,7 +11,8 @@ in config.yml via _target_ entries — no wrappers needed for those.
 """
 
 import os
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+if not os.environ.get("CUDA_VISIBLE_DEVICES", ""):
+    os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
 import torch
