@@ -47,10 +47,10 @@ paths:
 # Training buffer parameters (small — each sample is 100K floats)
 # -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 256
-  max_training_samples: 512
-  validation_window_size: 64
-  resample_batch_size: 64
+  min_training_samples: 10000
+  max_training_samples: 10000
+  validation_window_size: 512
+  resample_batch_size: 128
   keep_resampling: true
   resample_interval: 1
   store_fraction: 0.0
@@ -65,16 +65,19 @@ graph:
     simulator:
       _target_: falcon.priors.Product
       priors:
-        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
-        - ['uniform', 0.999996, 1.000004]             # chirp_mass
-        - ['uniform', 1.485, 1.515]                   # harmonic_decay
+        #        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
+        #        - ['uniform', 0.999996, 1.000004]             # chirp_mass
+        #        - ['uniform', 1.485, 1.515]                   # harmonic_decay
+        - ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
+        - ['uniform', 0.996, 1.004]             # chirp_mass
+        - ['uniform', 1.400, 1.600]                   # harmonic_decay
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
         num_epochs: 300
-        batch_size: 32
-        early_stop_patience: 32
+        batch_size: 64
+        early_stop_patience: 64
       network:
         hidden_dim: 128
         num_layers: 3
@@ -111,7 +114,7 @@ graph:
         log_ratio_threshold: -20.0
 
     ray:
-      num_gpus: 0
+      num_gpus: 1
 
   x:
     parents: [theta]
