@@ -10,6 +10,9 @@ The ToneTokenizer and TransformerEmbedding from fuge are referenced directly
 in config.yml via _target_ entries — no wrappers needed for those.
 """
 
+import os
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
+
 import numpy as np
 import torch
 import torch.nn as nn
