@@ -1,0 +1,129 @@
+# =============================================================================
+# Falcon Example Configuration: 06_spectral_analysis
+# -----------------------------------------------------------------------------
+# Demonstrates falcon + fuge integration for EMRI gravitational wave inference.
+#
+# Signal model: Chirping multi-harmonic EMRI waveform (fuge.emri_signal)
+# Parameters:   f0 (initial frequency), chirp_mass, harmonic_decay
+# Embedding:    ToneTokenizer -> ToneTokenEmbedding -> TransformerEmbedding
+#               (all from the fuge library, chained via nested _input_ config)
+# Posterior:    Gaussian (full covariance)
+#
+# Embedding dimension notes (from tokenizer settings):
+#   N=100000, k=1024, hop=512 -> n_windows = (100000-1024)//512 + 1 = 194
+#   n_peaks=3                 -> seq_len = 194 * 3 = 582
+#   phase_mode="center"       -> d_in = 5
+#
+# Usage:
+#   cd examples/06_spectral_analysis
+#   python data/generate_obs.py                    # Generate mock observation
+#   falcon launch --run-dir outputs/run            # Train the model
+#   falcon sample posterior --run-dir outputs/run   # Generate posterior samples
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Logging configuration
+# -----------------------------------------------------------------------------
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 06_spectral_analysis
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+# -----------------------------------------------------------------------------
+# Directory configuration
+# -----------------------------------------------------------------------------
+paths:
+  import: "./src"
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
+
+# -----------------------------------------------------------------------------
+# Training buffer parameters (small — each sample is 100K floats)
+# -----------------------------------------------------------------------------
+buffer:
+  min_training_samples: 256
+  max_training_samples: 512
+  validation_window_size: 64
+  resample_batch_size: 64
+  keep_resampling: true
+  resample_interval: 1
+  store_fraction: 0.0
+
+# -----------------------------------------------------------------------------
+# Graph definition
+# -----------------------------------------------------------------------------
+graph:
+  theta:
+    evidence: [x]
+
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
+        - ['uniform', 0.999996, 1.000004]             # chirp_mass
+        - ['uniform', 1.485, 1.515]                   # harmonic_decay
+
+    estimator:
+      _target_: falcon.estimators.Gaussian
+      loop:
+        num_epochs: 300
+        batch_size: 32
+        early_stop_patience: 32
+      network:
+        hidden_dim: 128
+        num_layers: 3
+        momentum: 0.10
+        min_var: 1.0e-20
+        eig_update_freq: 1
+      embedding:
+        _target_: fuge.TransformerEmbedding
+        d_in: 5
+        seq_len: 582
+        d_model: 64
+        n_heads: 4
+        n_layers: 3
+        d_ff: 256
+        dropout: 0.1
+        _input_:
+          _target_: model.TokenEmbed
+          phase_mode: center
+          _input_:
+            _target_: fuge.ToneTokenizer
+            k: 1024
+            n_peaks: 3
+            n_dlnf: 11
+            dlnf_min: 0.0
+            dlnf_max: 0.05
+            _input_: [x]
+      optimizer:
+        lr: 0.001
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 1.0
+        discard_samples: false
+        log_ratio_threshold: -20.0
+
+    ray:
+      num_gpus: 0
+
+  x:
+    parents: [theta]
+    simulator:
+      _target_: model.Simulator
+      noise_sigma: 1.0
+      N: 100000
+    observed: "./data/obs.npz['x']"
+
+# -----------------------------------------------------------------------------
+# Sampling configuration
+# -----------------------------------------------------------------------------
+sample:
+  posterior:
+    n: 1000
