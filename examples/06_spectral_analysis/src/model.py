@@ -11,6 +11,7 @@ in config.yml via _target_ entries — no wrappers needed for those.
 """
 
 import numpy as np
+import torch
 import torch.nn as nn
 from fuge import emri_signal, ToneTokenEmbedding
 
@@ -68,7 +69,8 @@ class TokenEmbed(nn.Module):
 
     ToneTokenEmbedding.forward returns (embedded, n_windows, n_peaks),
     but falcon's sequential embedding pipeline expects a single tensor.
-    This wrapper discards the auxiliary outputs.
+    This wrapper discards the auxiliary outputs and lazily computes
+    z-score normalization statistics from the first training batch.
 
     Args:
         phase_mode: "center" (n_embed=5) or "boundary" (n_embed=7).
@@ -78,9 +80,12 @@ class TokenEmbed(nn.Module):
     def __init__(self, phase_mode="center", mask_phases=False):
         super().__init__()
         self.embed = ToneTokenEmbedding(phase_mode=phase_mode, mask_phases=mask_phases)
+        self.register_buffer("_norm_initialized", torch.tensor(False))
 
     def forward(self, raw_tokens):
         """Embed raw tokens and return flattened sequence.
+
+        Computes normalization stats on the first training batch.
 
         Args:
             raw_tokens: Tensor of shape (B, W, K, 5) from ToneTokenizer.
@@ -88,5 +93,8 @@ class TokenEmbed(nn.Module):
         Returns:
             Tensor of shape (B, W*K, n_embed).
         """
+        if self.training and not self._norm_initialized:
+            self.embed.compute_normalization(raw_tokens)
+            self._norm_initialized.fill_(True)
         embedded, _, _ = self.embed(raw_tokens)
         return embedded
