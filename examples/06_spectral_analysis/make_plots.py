@@ -1,7 +1,7 @@
 #!/usr/bin/env python
 """Compare falcon posterior with Fisher/Cramér-Rao analytical bound.
 
-Usage: python make_plots.py RUN_PATH
+Usage: python make_plots.py [RUN_PATH]    (default: outputs/latest)
 
 Computes the 3-parameter Fisher information matrix for the EMRI signal
 at the ground-truth parameters using JAX autodiff, then plots the falcon
@@ -63,11 +63,7 @@ def compute_fisher(params, sigma):
 # =====================================================================
 
 def main():
-    if len(sys.argv) < 2:
-        print(__doc__)
-        sys.exit(1)
-
-    run_path = Path(sys.argv[1])
+    run_path = Path(sys.argv[1]) if len(sys.argv) > 1 else Path("outputs/latest")
     script_dir = Path(__file__).resolve().parent
 
     # ── Load falcon posterior ────────────────────────────────────────
