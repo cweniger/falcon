@@ -65,17 +65,17 @@ graph:
     simulator:
       _target_: falcon.priors.Product
       priors:
-        #        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
-        #        - ['uniform', 0.999996, 1.000004]             # chirp_mass
-        #        - ['uniform', 1.485, 1.515]                   # harmonic_decay
-        - ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
-        - ['uniform', 0.996, 1.004]             # chirp_mass
-        - ['uniform', 1.400, 1.600]                   # harmonic_decay
+        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
+        - ['uniform', 0.999996, 1.000004]             # chirp_mass
+        - ['uniform', 1.485, 1.515]                   # harmonic_decay
+          #- ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
+          #- ['uniform', 0.996, 1.004]             # chirp_mass
+          #- ['uniform', 1.400, 1.600]                   # harmonic_decay
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 300
+        num_epochs: 1
         batch_size: 64
         early_stop_patience: 64
       network:
@@ -115,6 +115,7 @@ graph:
 
     ray:
       num_gpus: 1
+      chunk_size: 64
 
   x:
     parents: [theta]
@@ -128,5 +129,7 @@ graph:
 # Sampling configuration
 # -----------------------------------------------------------------------------
 sample:
+  prior:
+    n: 100
   posterior:
-    n: 1000
+    n: 100
