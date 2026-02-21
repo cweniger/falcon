@@ -115,7 +115,7 @@ graph:
 
     sample_chunk_size: 64
     ray:
-      num_gpus: 1
+      num_gpus: 0.5
 
   x:
     parents: [theta]
@@ -124,6 +124,8 @@ graph:
       noise_sigma: 1.0
       N: 100000
     observed: "./data/obs.npz['x']"
+    ray:
+      num_gpus: 0.5
 
 # -----------------------------------------------------------------------------
 # Sampling configuration

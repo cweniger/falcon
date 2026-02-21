@@ -97,6 +97,7 @@ class TokenEmbed(nn.Module):
         Returns:
             Tensor of shape (B, W*K, n_embed).
         """
+        raw_tokens = raw_tokens.detach()  # no grad through STFT (no learnable params)
         if self.training and not self._norm_initialized:
             self.embed.compute_normalization(raw_tokens)
             self._norm_initialized.fill_(True)
