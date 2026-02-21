@@ -47,13 +47,13 @@ paths:
 # Training buffer parameters (small — each sample is 100K floats)
 # -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 10000
-  max_training_samples: 10000
-  validation_window_size: 512
-  resample_batch_size: 128
-  keep_resampling: true
-  resample_interval: 1
-  store_fraction: 0.0
+  min_samples: 4000
+  max_samples: 4000
+  validation_samples: 256
+  simulate_count: 512
+  simulate_when_full: true
+  simulate_interval: 2
+  store_fraction: 0.1
 
 # -----------------------------------------------------------------------------
 # Graph definition
@@ -65,17 +65,17 @@ graph:
     simulator:
       _target_: falcon.priors.Product
       priors:
-        - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
-        - ['uniform', 0.999996, 1.000004]             # chirp_mass
-        - ['uniform', 1.485, 1.515]                   # harmonic_decay
-          #- ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
-          #- ['uniform', 0.996, 1.004]             # chirp_mass
-          #- ['uniform', 1.400, 1.600]                   # harmonic_decay
+        # - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
+        # - ['uniform', 0.999996, 1.000004]             # chirp_mass
+        # - ['uniform', 1.485, 1.515]                   # harmonic_decay
+        - ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
+        - ['uniform', 0.996, 1.004]             # chirp_mass
+        - ['uniform', 1.400, 1.600]                   # harmonic_decay
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 1
+        num_epochs: 300
         batch_size: 64
         early_stop_patience: 64
       network:
@@ -113,9 +113,9 @@ graph:
         discard_samples: false
         log_ratio_threshold: -20.0
 
+    sample_chunk_size: 64
     ray:
       num_gpus: 1
-      chunk_size: 64
 
   x:
     parents: [theta]
@@ -130,6 +130,6 @@ graph:
 # -----------------------------------------------------------------------------
 sample:
   prior:
-    n: 100
+    n: 1000
   posterior:
-    n: 100
+    n: 1000
