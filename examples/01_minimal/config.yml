@@ -53,12 +53,12 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 4096            # Minimum samples before training starts
-  max_training_samples: 32768           # Maximum number of samples retained in buffer
-  validation_window_size: 256           # Size of validation split (for early stopping)
-  resample_batch_size: 128              # Number of new samples drawn per resampling step
-  keep_resampling: true                 # Continue resampling after reaching max samples
-  resample_interval: 10                 # Resample every N training epochs
+  min_samples: 4096                     # Minimum samples before training starts
+  max_samples: 32768                    # Maximum number of samples retained in buffer
+  validation_samples: 256               # Size of validation split (for early stopping)
+  simulate_count: 128                   # Number of new samples drawn per resampling step
+  simulate_when_full: true              # Continue resampling after reaching max samples
+  simulate_interval: 10                 # Resample every N training epochs
   store_fraction: 0.1                   # Fraction of samples to dump to samples_dir/buffer/ (0=none, 1=all)
 
 # -----------------------------------------------------------------------------

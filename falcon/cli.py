@@ -23,8 +23,8 @@ def render_git_graph_simple(graph):
 
     Shows DAG structure with cleaner visualization.
     """
-    sorted_names = graph.sorted_node_names
-    parents_dict = graph.parents_dict
+    sorted_names = graph.forward_order
+    parents_dict = graph.forward_deps
 
     # Build children dict to know which nodes have children
     children_dict = {name: [] for name in sorted_names}
@@ -489,13 +489,13 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
 
     # 2) Prepare dataset manager for deployed graph and store initial samples
     dataset_manager = falcon.get_ray_dataset_manager(
-        min_training_samples=cfg.buffer.min_training_samples,
-        max_training_samples=cfg.buffer.max_training_samples,
-        validation_window_size=cfg.buffer.validation_window_size,
-        resample_batch_size=cfg.buffer.resample_batch_size,
-        resample_interval=cfg.buffer.resample_interval,
+        min_samples=cfg.buffer.min_samples,
+        max_samples=cfg.buffer.max_samples,
+        validation_samples=cfg.buffer.validation_samples,
+        simulate_count=cfg.buffer.simulate_count,
+        simulate_interval=cfg.buffer.simulate_interval,
         simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
-        keep_resampling=cfg.buffer.keep_resampling,
+        simulate_when_full=cfg.buffer.simulate_when_full,
         initial_samples_path=cfg.buffer.get("initial_samples_path", None),
         samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
         store_fraction=cfg.buffer.get("store_fraction", 0.0),

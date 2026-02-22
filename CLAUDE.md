@@ -80,7 +80,7 @@ cd examples/01_minimal && falcon launch --run-dir outputs/run_01
 Uses OmegaConf for configuration management. Key YAML sections:
 - `logging`: WandB (`logging.wandb`) and local file (`logging.local`) logging
 - `paths`: import path, buffer directory, graph directory, samples directory
-- `buffer`: Sample management (min/max samples, resample interval, dump settings)
+- `buffer`: Sample management (min/max samples, simulate interval, dump settings)
 - `graph`: Node definitions with simulators, estimators, and dependencies
 - `sample`: Sampling parameters (prior, posterior, proposal)
 - `ray`: Ray initialization (CPU/GPU allocation per node)

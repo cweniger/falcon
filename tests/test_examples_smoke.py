@@ -58,10 +58,10 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         f"--config-name={config_name}",
         f"--run-dir={tmp_path}",
         # Reduce sample counts for faster testing
-        "buffer.min_training_samples=64",
-        "buffer.max_training_samples=128",
-        "buffer.validation_window_size=16",
-        "buffer.resample_batch_size=32",
+        "buffer.min_samples=64",
+        "buffer.max_samples=128",
+        "buffer.validation_samples=16",
+        "buffer.simulate_count=32",
     ] + epoch_overrides
 
     # Create a clean environment for the subprocess

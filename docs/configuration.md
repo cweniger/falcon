@@ -53,7 +53,7 @@ buffer:
   num_epochs: 500
   min_total_samples: 1000
   max_total_samples: 50000
-  resample_interval: 10
+  simulate_interval: 10
   dump_interval: 50
 ```
 
@@ -62,7 +62,7 @@ buffer:
 | `num_epochs` | int | `500` | Total training epochs |
 | `min_total_samples` | int | `1000` | Minimum samples before training |
 | `max_total_samples` | int | `50000` | Maximum samples in buffer |
-| `resample_interval` | int | `10` | Epochs between resampling |
+| `simulate_interval` | int | `10` | Epochs between simulation |
 | `dump_interval` | int | `50` | Epochs between buffer dumps |
 
 ### `graph`

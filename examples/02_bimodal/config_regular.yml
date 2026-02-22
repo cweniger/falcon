@@ -18,12 +18,12 @@ paths:
 
 # Training buffer parameters
 buffer:
-  min_training_samples: 2048
-  max_training_samples: 8192
-  validation_window_size: 256
-  resample_batch_size: 512
-  keep_resampling: false
-  resample_interval: 15
+  min_samples: 2048
+  max_samples: 8192
+  validation_samples: 256
+  simulate_count: 512
+  simulate_when_full: false
+  simulate_interval: 15
 
 # Graph definition using declarative YAML
 graph:
