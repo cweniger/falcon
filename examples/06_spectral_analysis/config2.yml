@@ -72,6 +72,7 @@ graph:
         _input_:
           _target_: falcon.embeddings.RunningNorm
           momentum: 0.01
+          dim: [0, 1]
           output_dtype: float32
           _input_:
             _target_: model.TokenEmbed
