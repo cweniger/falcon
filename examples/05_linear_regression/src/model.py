@@ -68,6 +68,7 @@ class E_fft_norm(nn.Module):
         self.gate = nn.Linear(n_modes * 2, n_features)
 
     def forward(self, x):
+        x = x.float()
         # Orthonormal FFT, truncate to n_modes
         f = torch.fft.rfft(x, norm='ortho')[..., :self.n_modes]
         # Stack real and imaginary parts
@@ -106,12 +107,14 @@ class E_fft_whiten(nn.Module):
         self.linear = nn.Linear(n_modes * 2, n_features)
 
     def forward(self, x):
+        x = x.float()
         # Update whitening stats during training
         if self.training:
             with torch.no_grad():
-                self._input_mean.lerp_(x.mean(dim=0), self.momentum)
+                m = self.momentum
+                self._input_mean = (1 - m) * self._input_mean + m * x.mean(dim=0)
                 batch_var = x.var(dim=0).clamp(min=self.min_var)
-                self._input_std.lerp_(batch_var.sqrt(), self.momentum)
+                self._input_std = (1 - m) * self._input_std + m * batch_var.sqrt()
 
         # Whiten, then FFT
         x_white = (x - self._input_mean.detach()) / self._input_std.detach()
@@ -133,4 +136,4 @@ class E_linear(nn.Module):
         self.linear = nn.Linear(n_bins, n_out)
 
     def forward(self, x):
-        return self.linear(x)
+        return self.linear(x.float())

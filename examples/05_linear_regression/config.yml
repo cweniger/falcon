@@ -47,13 +47,13 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 4096
-  max_training_samples: 4096
-  validation_window_size: 256
-  resample_batch_size: 1024
+  min_samples: 4096
+  max_samples: 4096
+  validation_samples: 256
+  simulate_count: 1024
   simulate_chunk_size: 128
-  keep_resampling: true
-  resample_interval: 5
+  simulate_when_full: true
+  simulate_interval: 5
   store_fraction: 0.0
 
 # -----------------------------------------------------------------------------
@@ -108,9 +108,9 @@ graph:
         discard_samples: false
         log_ratio_threshold: -20.0
 
+    sample_chunk_size: 128
     ray:
       num_gpus: 0.5
-      chunk_size: 128
 
   y:
     parents: [theta]
@@ -119,9 +119,9 @@ graph:
       sigma: 0.1
       n_bins: 1000000
     observed: "./data/mock_data.npz['y']"
+    sample_chunk_size: 128
     ray:
       num_gpus: 0.5
-      chunk_size: 128
 
 # -----------------------------------------------------------------------------
 # Sampling configuration

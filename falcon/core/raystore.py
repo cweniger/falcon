@@ -111,24 +111,24 @@ class SampleStatus(IntEnum):
 class DatasetManagerActor:
     def __init__(
         self,
-        max_training_samples=None,  # TODO: Maximum number of simulations to store
-        min_training_samples=None,  # TODO: Minimum number of simulations to train on
-        validation_window_size=None,  # TODO: Number of sliding validation sims
-        resample_batch_size=256,
-        resample_interval=5,
+        max_samples=None,  # TODO: Maximum number of simulations to store
+        min_samples=None,  # TODO: Minimum number of simulations to train on
+        validation_samples=None,  # TODO: Number of sliding validation sims
+        simulate_count=256,
+        simulate_interval=5,
         simulate_chunk_size=0,
         initial_samples_path=None,
-        keep_resampling=True,
+        simulate_when_full=True,
         samples_path=None,
         store_fraction=0.0,
         log_config=None,
     ):
-        self.max_training_samples = max_training_samples
-        self.min_training_samples = min_training_samples
-        self.validation_window_size = validation_window_size
-        self.resample_batch_size = resample_batch_size
-        self.keep_resampling = keep_resampling
-        self.resample_interval = resample_interval
+        self.max_samples = max_samples
+        self.min_samples = min_samples
+        self.validation_samples = validation_samples
+        self.simulate_count = simulate_count
+        self.simulate_when_full = simulate_when_full
+        self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
         self.samples_path = Path(samples_path) if samples_path else None
@@ -147,7 +147,7 @@ class DatasetManagerActor:
             logger = Logger("dataset", log_config, capture_exceptions=True)
             set_logger(logger)
 
-        info(f"Dataset manager initialized | max_train={max_training_samples} val_window={validation_window_size}")
+        info(f"Dataset manager initialized | max_samples={max_samples} validation_samples={validation_samples}")
 
         asyncio.create_task(self.monitor())
 
@@ -157,19 +157,19 @@ class DatasetManagerActor:
             await asyncio.sleep(10.0)
 
     def num_initial_samples(self):
-        return self.min_training_samples + self.validation_window_size
+        return self.min_samples + self.validation_samples
 
     def num_resims(self):
-        if self.keep_resampling:
-            return self.resample_batch_size
+        if self.simulate_when_full:
+            return self.simulate_count
         else:
             num_train_samples = sum(self.status == SampleStatus.TRAINING)
             return min(
-                self.resample_batch_size, self.max_training_samples - num_train_samples
+                self.simulate_count, self.max_samples - num_train_samples
             )
 
-    def get_resample_interval(self):
-        return self.resample_interval
+    def get_simulate_interval(self):
+        return self.simulate_interval
 
     def get_simulate_chunk_size(self):
         return self.simulate_chunk_size
@@ -193,21 +193,21 @@ class DatasetManagerActor:
         Keeps most recent samples for validation, older samples for training,
         and marks oldest samples as disfavoured and then tombstone for deletion.
         """
-        # 1) Maximum number of VALIDATION samples should be validation_window_size
+        # 1) Maximum number of VALIDATION samples should be validation_samples
         #    Move excess validation samples to training
         ids_validation = np.where(self.status == SampleStatus.VALIDATION)[0]
         num_val_samples = len(ids_validation)
-        if num_val_samples > self.validation_window_size:
-            ids_to_train = ids_validation[: -self.validation_window_size]
+        if num_val_samples > self.validation_samples:
+            ids_to_train = ids_validation[: -self.validation_samples]
             self.status[ids_to_train] = SampleStatus.TRAINING
 
-        # 2) Minimum number of TRAINING+DISFAVOURED samples should be min_training_samples
+        # 2) Minimum number of TRAINING+DISFAVOURED samples should be min_samples
         #    Move excess disfavoured samples to tombstone
         ids_disfavoured = np.where(self.status == SampleStatus.DISFAVOURED)[0]
         num_train_samples = sum(self.status == SampleStatus.TRAINING)
         num_disfavoured_samples = len(ids_disfavoured)
         num_disfavoured_samples_to_keep = max(
-            0, self.min_training_samples - num_train_samples
+            0, self.min_samples - num_train_samples
         )
         if num_disfavoured_samples_to_keep == 0:
             self.status[ids_disfavoured] = SampleStatus.TOMBSTONE
@@ -215,12 +215,12 @@ class DatasetManagerActor:
             ids_to_tombstone = ids_disfavoured[:-num_disfavoured_samples_to_keep]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-        # 3) Maximum number of TRAINING samples is max_training_samples
+        # 3) Maximum number of TRAINING samples is max_samples
         #    Move excess training samples to tombstone
         ids_training = np.where(self.status == SampleStatus.TRAINING)[0]
         num_train_samples = len(ids_training)
-        if num_train_samples > self.max_training_samples:
-            ids_to_tombstone = ids_training[: -self.max_training_samples]
+        if num_train_samples > self.max_samples:
+            ids_to_tombstone = ids_training[: -self.max_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
     def checkout_refs(self, status, keys, max_samples=0, already_cached_ids=None):
@@ -655,26 +655,26 @@ class BufferView:
 
 
 def get_ray_dataset_manager(
-    min_training_samples=None,
-    max_training_samples=None,
-    validation_window_size=None,
-    resample_batch_size=64,
-    resample_interval=5,
+    min_samples=None,
+    max_samples=None,
+    validation_samples=None,
+    simulate_count=64,
+    simulate_interval=5,
     simulate_chunk_size=0,
     initial_samples_path=None,
-    keep_resampling=True,
+    simulate_when_full=True,
     samples_path=None,
     store_fraction=0.0,
     log_config=None,
 ):
     dataset_manager_actor = DatasetManagerActor.remote(
-        min_training_samples=min_training_samples,
-        max_training_samples=max_training_samples,
-        validation_window_size=validation_window_size,
-        resample_batch_size=resample_batch_size,
-        resample_interval=resample_interval,
+        min_samples=min_samples,
+        max_samples=max_samples,
+        validation_samples=validation_samples,
+        simulate_count=simulate_count,
+        simulate_interval=simulate_interval,
         simulate_chunk_size=simulate_chunk_size,
-        keep_resampling=keep_resampling,
+        simulate_when_full=simulate_when_full,
         initial_samples_path=initial_samples_path,
         samples_path=samples_path,
         store_fraction=store_fraction,

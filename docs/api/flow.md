@@ -250,27 +250,27 @@ graph:
 
 ### Standard Training
 
-Default configuration with continuous resampling:
+Default configuration with continuous simulation:
 
 ```yaml
 buffer:
-  min_training_samples: 4096
-  max_training_samples: 32768
-  resample_batch_size: 128
-  keep_resampling: true
-  resample_interval: 10
+  min_samples: 4096
+  max_samples: 32768
+  simulate_count: 128
+  simulate_when_full: true
+  simulate_interval: 10
 ```
 
 ### Amortized Training
 
-Fixed dataset without resampling (for learning across many observations):
+Fixed dataset without simulation (for learning across many observations):
 
 ```yaml
 buffer:
-  min_training_samples: 32000
-  max_training_samples: 32000
-  resample_batch_size: 0       # No resampling
-  keep_resampling: false
+  min_samples: 32000
+  max_samples: 32000
+  simulate_count: 0       # No simulation
+  simulate_when_full: false
 
 # Higher gamma for amortization
 inference:
@@ -283,11 +283,11 @@ Large batch renewal for sequential refinement:
 
 ```yaml
 buffer:
-  min_training_samples: 8000
-  max_training_samples: 8000
-  resample_batch_size: 8000    # Full renewal
-  keep_resampling: true
-  resample_interval: 30        # Less frequent
+  min_samples: 8000
+  max_samples: 8000
+  simulate_count: 8000    # Full renewal
+  simulate_when_full: true
+  simulate_interval: 30        # Less frequent
 
 inference:
   discard_samples: true        # Remove poor samples

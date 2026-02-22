@@ -46,12 +46,12 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_training_samples: 4096
-  max_training_samples: 4096
-  validation_window_size: 256
-  resample_batch_size: 512
-  keep_resampling: true
-  resample_interval: 1
+  min_samples: 4096
+  max_samples: 4096
+  validation_samples: 256
+  simulate_count: 512
+  simulate_when_full: true
+  simulate_interval: 1
   store_fraction: 0.0
 
 # -----------------------------------------------------------------------------

@@ -14,13 +14,19 @@ from falcon.core.logger import Logger, set_logger, debug, info, warning, error, 
 from falcon.core.raystore import BufferView
 from .utils import LazyLoader
 
-# Keys in the ray: config section that are consumed by NodeWrapper, not by Ray itself
-_CUSTOM_ACTOR_KEYS = {'chunk_size'}
+_RAY_ACTOR_KEYS = {
+    "accelerator_type", "memory", "name", "num_cpus", "num_gpus",
+    "object_store_memory", "placement_group", "placement_group_bundle_index",
+    "placement_group_capture_child_tasks", "resources", "runtime_env",
+    "scheduling_strategy", "_metadata", "enable_task_events", "_labels",
+    "concurrency_groups", "lifetime", "max_concurrency", "max_restarts",
+    "max_task_retries", "max_pending_calls", "namespace", "get_if_exists",
+}
 
 
 def _ray_options(actor_config):
     """Filter actor_config to only valid Ray actor options."""
-    return {k: v for k, v in actor_config.items() if k not in _CUSTOM_ACTOR_KEYS}
+    return {k: v for k, v in actor_config.items() if k in _RAY_ACTOR_KEYS}
 
 
 @ray.remote
@@ -295,7 +301,7 @@ class NodeWrapper:
             List[Dict[str, ObjectRef]]: One dict per sample
         """
         conditions = self._resolve_refs(condition_refs)
-        chunk_size = self.node.actor_config.get('chunk_size', 0) or n_samples
+        chunk_size = getattr(self.node, 'sample_chunk_size', 0) or n_samples
         result = []
         for start in range(0, n_samples, chunk_size):
             end = min(start + chunk_size, n_samples)
@@ -379,6 +385,8 @@ class NodeWrapper:
         Returns:
             dict: {'value': ndarray, 'log_prob': ndarray}
         """
+        if self.estimator_instance is None:
+            return self._simulate(n_samples, conditions)
         return self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
 
     def _sample_proposal(self, n_samples, conditions=None):
@@ -387,6 +395,8 @@ class NodeWrapper:
         Returns:
             dict: {'value': ndarray, 'log_prob': ndarray}
         """
+        if self.estimator_instance is None:
+            return self._simulate(n_samples, conditions)
         return self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
 
     def save(self, node_dir):
@@ -581,14 +591,14 @@ class DeployedGraph:
                 result[node_name] = [d[key] for d in sample_refs]
         return result
 
-    def _execute_graph(self, num_samples, sorted_node_names, condition_refs, sample_method):
+    def _execute_graph(self, num_samples, node_order, condition_refs, sample_method):
         """Execute graph traversal with specified sampling method.
 
         All data flows as ObjectRefs - no array resolution at this layer.
 
         Args:
             num_samples: Number of samples to generate
-            sorted_node_names: Node names in execution order
+            node_order: Node names in execution order
             condition_refs: Dict[str, List[ObjectRef]] for pre-set nodes
             sample_method: One of "sample", "sample_posterior", "sample_proposal"
 
@@ -598,7 +608,7 @@ class DeployedGraph:
         ref_trace = dict(condition_refs)  # {name: [ObjectRef, ...]}
         sample_refs = []
 
-        for name in sorted_node_names:
+        for name in node_order:
             if name in ref_trace:
                 continue
 
@@ -634,7 +644,7 @@ class DeployedGraph:
         """
         condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples, self.graph.sorted_node_names, condition_refs, "sample",
+            num_samples, self.graph.forward_order, condition_refs, "sample",
         )
 
     def sample_posterior(self, num_samples, conditions=None):
@@ -649,7 +659,7 @@ class DeployedGraph:
         """
         condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples, self.graph.sorted_inference_node_names, condition_refs, "sample_posterior",
+            num_samples, self.graph.backward_order, condition_refs, "sample_posterior",
         )
 
     def sample_proposal(self, num_samples, conditions=None):
@@ -664,7 +674,7 @@ class DeployedGraph:
         """
         condition_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
         return self._execute_graph(
-            num_samples, self.graph.sorted_inference_node_names, condition_refs, "sample_proposal",
+            num_samples, self.graph.backward_order, condition_refs, "sample_proposal",
         )
 
     def _refs_to_arrays(self, sample_refs):
@@ -716,7 +726,7 @@ class DeployedGraph:
                 ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
 
         # Initial data generation: load from disk first, then generate remaining
-        # Nodes handle chunking internally based on their ray.chunk_size config
+        # Nodes handle chunking internally based on their sample_chunk_size config
         num_initial = ray.get(dataset_manager.num_initial_samples.remote())
         num_loaded = ray.get(dataset_manager.load_initial_samples.remote())
         num_to_generate = num_initial - num_loaded
@@ -742,8 +752,7 @@ class DeployedGraph:
                 info(f"[{name}] Training started")
                 time.sleep(1)
 
-        resample_interval = ray.get(dataset_manager.get_resample_interval.remote())
-        # time.sleep(60) # Wait sixty seconds before starting resampling
+        simulate_interval = ray.get(dataset_manager.get_simulate_interval.remote())
 
         # Track last status log time for periodic updates
         last_status_log = time.time()
@@ -767,9 +776,9 @@ class DeployedGraph:
                 train_future_list, num_returns=len(train_future_list), timeout=1
             )
 
-            # Skip resampling if stopping
+            # Skip simulation if stopping
             if not stop_requested:
-                time.sleep(resample_interval)
+                time.sleep(simulate_interval)
                 num_new_samples = ray.get(dataset_manager.num_resims.remote())
                 if num_new_samples > 0:
                     # sample_proposal interleaves with training via async yield points —
@@ -779,7 +788,7 @@ class DeployedGraph:
                     for key in observations:
                         condition_refs.pop(key, None)
                     sample_refs = self._execute_graph(
-                        num_new_samples, self.graph.sorted_node_names, condition_refs, "sample"
+                        num_new_samples, self.graph.forward_order, condition_refs, "sample"
                     )
                     for i, prop_ref in enumerate(proposal_refs):
                         sample_refs[i].update(prop_ref)

@@ -21,6 +21,7 @@ class Node:
         estimator_config=None,
         actor_config=None,
         num_actors=1,
+        sample_chunk_size=0,
     ):
         """Node definition for a graphical model.
 
@@ -50,6 +51,7 @@ class Node:
         self.estimator_config = estimator_config or {}
         self.actor_config = actor_config or {}
         self.num_actors = num_actors
+        self.sample_chunk_size = sample_chunk_size
 
 
 class Graph:
@@ -59,27 +61,59 @@ class Graph:
         self.node_dict = {node.name: node for node in node_list}
         self.simulator_cls_dict = {node.name: node.simulator_cls for node in node_list}
 
-        # Storing the model graph structure
+        # Raw config data
         self.name_list = [node.name for node in node_list]
-        self.parents_dict = {node.name: node.parents for node in node_list}
-        self.sorted_node_names = self._topological_sort(
-            self.name_list, self.parents_dict
-        )
-
-        # Storing the inference graph structure.
-        # Only observed nodes or nodes with evidence are included in the inference graph.
         self.evidence_dict = {node.name: node.evidence for node in node_list}
         self.scaffolds_dict = {node.name: node.scaffolds for node in node_list}
         self.observed_dict = {node.name: node.observed for node in node_list}
-        self.inference_name_list = [
+
+        # Forward graph (simulation): node -> [parent dependencies]
+        self.forward_deps = {node.name: node.parents for node in node_list}
+        self.forward_order = self._topological_sort(
+            self.name_list, self.forward_deps
+        )
+
+        # Backward graph (inference): node -> [dependencies for inference]
+        # Start with nodes that are observed or have evidence
+        backward_set = {
             node.name for node in node_list if node.observed or len(node.evidence) > 0
-        ]
-        self.sorted_inference_node_names = self._topological_sort(
-            self.inference_name_list, self.evidence_dict
+        }
+        # Expand: include deterministic ancestors reachable via evidence references
+        queue = []
+        for name in list(backward_set):
+            for ev in self.evidence_dict[name]:
+                if ev not in backward_set:
+                    queue.append(ev)
+        while queue:
+            name = queue.pop()
+            if name in backward_set:
+                continue
+            backward_set.add(name)
+            for parent in self.forward_deps[name]:
+                if parent not in backward_set:
+                    queue.append(parent)
+
+        backward_names = [n.name for n in node_list if n.name in backward_set]
+
+        # Build merged dependency dict:
+        # - Observed nodes: [] (leaf nodes, values provided externally)
+        # - Nodes with evidence: evidence_dict (inference direction)
+        # - Deterministic intermediates: forward_deps (simulation direction)
+        self.backward_deps = {}
+        for name in backward_names:
+            if self.observed_dict[name]:
+                self.backward_deps[name] = []
+            elif self.evidence_dict[name]:
+                self.backward_deps[name] = self.evidence_dict[name]
+            else:
+                self.backward_deps[name] = self.forward_deps[name]
+
+        self.backward_order = self._topological_sort(
+            backward_names, self.backward_deps
         )
 
     def get_parents(self, node_name):
-        return self.parents_dict[node_name]
+        return self.forward_deps[node_name]
 
     def get_evidence(self, node_name):
         return self.evidence_dict[node_name]
@@ -88,14 +122,14 @@ class Graph:
         return self.simulator_cls_dict[node_name]
 
     @staticmethod
-    def _topological_sort(name_list, parents_dict):
-        """Topological sort, based on parent structure. Should raise an error if there is a cycle."""
-        # Create a dictionary to track the number of parents (incoming edges) for each node
+    def _topological_sort(name_list, deps):
+        """Topological sort based on dependency structure. Raises ValueError on cycles."""
+        # Create a dictionary to track the number of dependencies (incoming edges) for each node
         num_parents = {node: 0 for node in name_list}
 
-        # Count the number of parents for each node (incoming edges)
+        # Count the number of dependencies for each node (incoming edges)
         for node in name_list:
-            for parent in parents_dict[node]:
+            for parent in deps[node]:
                 if parent in num_parents:
                     num_parents[node] += 1
 
@@ -109,9 +143,9 @@ class Graph:
             node = no_parents.pop()
             sorted_node_names.append(node)
 
-            # For each node, look at its children (nodes where it is a parent)
+            # For each node, look at its dependents
             for child in name_list:
-                if node in parents_dict[child]:
+                if node in deps[child]:
                     num_parents[child] -= 1
                     if num_parents[child] == 0:
                         no_parents.append(child)
@@ -135,7 +169,7 @@ class Graph:
         # - Include node names and their parents in the form NAME <- PARENT1, PARENT2, ... [MODULE]
         graph_str = "Falcon graph structure:\n"
         graph_str += f"  Node name          List of parents                                 Class name\n"
-        for node in self.sorted_node_names:
+        for node in self.forward_order:
             parents = self.get_parents(node)
             simulator_cls = self.get_simulator_cls(node)
             if hasattr(simulator_cls, "display_name"):
@@ -199,7 +233,7 @@ def _parse_observation_path(path: str) -> tuple:
 # Valid keys for node configuration
 _VALID_NODE_KEYS = frozenset({
     "parents", "evidence", "scaffolds", "observed", "resample",
-    "simulator", "estimator", "ray", "num_actors",
+    "simulator", "estimator", "ray", "num_actors", "sample_chunk_size",
 })
 
 
@@ -285,6 +319,7 @@ def create_graph_from_config(graph_config, _cfg=None):
         resample = node_config.get("resample", False)
         actor_config = node_config.get("ray", {})
         num_actors = node_config.get("num_actors", 1)
+        sample_chunk_size = node_config.get("sample_chunk_size", 0)
 
         if actor_config != {}:
             actor_config = OmegaConf.to_container(actor_config, resolve=True)
@@ -345,6 +380,7 @@ def create_graph_from_config(graph_config, _cfg=None):
             estimator_config=estimator_config,
             actor_config=actor_config,
             num_actors=num_actors,
+            sample_chunk_size=sample_chunk_size,
         )
 
         nodes.append(node)
