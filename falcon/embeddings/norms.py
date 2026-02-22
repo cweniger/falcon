@@ -5,11 +5,12 @@ from torch.nn.parameter import UninitializedParameter
 from falcon.core.logger import log
 
 
-class LazyOnlineNorm(nn.Module):
+class RunningNorm(nn.Module):
     def __init__(
         self,
         momentum=0.01,
         epsilon=1e-20,
+        output_dtype=None,
         log_prefix=None,
         adaptive_momentum=False,
         monotonic_variance=True,
@@ -18,8 +19,8 @@ class LazyOnlineNorm(nn.Module):
         super().__init__()
         self.momentum = momentum
         self.epsilon = epsilon
+        self.output_dtype = getattr(torch, output_dtype) if isinstance(output_dtype, str) else output_dtype
         self.log_prefix = log_prefix
-        #self.log_prefix = log_prefix + ":" if log_prefix else ""
         self.monotonic_variance = monotonic_variance
         self.use_log_update = use_log_update
         self.adaptive_momentum = adaptive_momentum
@@ -31,19 +32,21 @@ class LazyOnlineNorm(nn.Module):
         self.initialized = False
 
     def forward(self, x):
+        reduce_dims = tuple(range(x.dim() - 1))
+
         if not self.initialized:
             # Initialize running statistics based on the first minibatch
-            self.running_mean = x.mean(dim=0).detach()
+            self.running_mean = x.mean(dim=reduce_dims).detach()
             self.running_var = ((x - self.running_mean) ** 2).mean(
-                dim=0
+                dim=reduce_dims
             ).detach() + self.epsilon**2
             self.min_variance = self.running_var.clone()
             self.initialized = True
 
         if self.training:
-            # Compute batch mean and variance over batch dimension only
-            batch_mean = x.mean(dim=0)  # Mean over batch dimension
-            batch_var = ((x - self.running_mean) ** 2).mean(dim=0).detach()
+            # Compute batch mean and variance over all dims except last (per-feature)
+            batch_mean = x.mean(dim=reduce_dims)
+            batch_var = ((x - self.running_mean) ** 2).mean(dim=reduce_dims).detach()
 
             if self.adaptive_momentum:
                 threshold_ratio = 2
@@ -84,7 +87,10 @@ class LazyOnlineNorm(nn.Module):
         effective_var = (
             self.min_variance if self.monotonic_variance else self.running_var
         )
-        return (x - self.running_mean) / (effective_var.sqrt() + self.epsilon)
+        result = (x - self.running_mean) / (effective_var.sqrt() + self.epsilon)
+        if self.output_dtype is not None:
+            result = result.to(self.output_dtype)
+        return result
 
     def inverse(self, x):
         effective_var = (
@@ -97,6 +103,10 @@ class LazyOnlineNorm(nn.Module):
             self.min_variance if self.monotonic_variance else self.running_var
         )
         return effective_var.sqrt().prod()
+
+
+# Backwards compatibility alias
+LazyOnlineNorm = RunningNorm
 
 
 def hartley_transform(x):

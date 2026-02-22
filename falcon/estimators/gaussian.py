@@ -117,6 +117,18 @@ class GaussianPosterior(nn.Module):
         self.register_buffer("_residual_eigvals", torch.ones(param_dim))
         self.register_buffer("_residual_eigvecs", torch.eye(param_dim))
 
+    # ==================== Device/Dtype ====================
+
+    def to(self, *args, **kwargs):
+        """Move module, then restore float64 for parameter-space buffers."""
+        result = super().to(*args, **kwargs)
+        result._output_mean = result._output_mean.double()
+        result._output_std = result._output_std.double()
+        result._residual_cov = result._residual_cov.double()
+        result._residual_eigvals = result._residual_eigvals.double()
+        result._residual_eigvecs = result._residual_eigvecs.double()
+        return result
+
     # ==================== Posterior Contract ====================
 
     def loss(self, theta: torch.Tensor, conditions: torch.Tensor) -> torch.Tensor:
@@ -172,9 +184,14 @@ class GaussianPosterior(nn.Module):
     # ==================== Internal Methods ====================
 
     def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
-        """Predict mean using diagonal whitening."""
+        """Predict mean using diagonal whitening.
+
+        MLP runs in float32 for speed; output is cast to float64 for
+        parameter-space precision before de-whitening.
+        """
         x_norm = (conditions - self._input_mean.detach()) / self._input_std.detach()
-        r = self.net(x_norm)
+        r = self.net(x_norm)       # float32
+        r = r.double()             # → float64
         return self._output_mean.detach() + self._output_std.detach() * r
 
     def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:

@@ -443,18 +443,15 @@ class LossBasedEstimator(StepwiseEstimator):
 
         debug("Building model...")
 
-        # Infer dtype from theta (preserves numpy precision, e.g. float64)
-        dtype = theta.dtype
-
         # Transform theta to latent space if mode specified (matches _compute_loss)
         if self.latent_mode is not None:
             theta = self.simulator_instance.inverse(theta, mode=self.latent_mode)
 
-        # Create embedding and infer condition_dim
-        embedding = instantiate_embedding(self.embedding_config).to(self.device, dtype=dtype)
+        # Create embedding and infer condition_dim (each module keeps its default dtype)
+        embedding = instantiate_embedding(self.embedding_config).to(self.device)
         embedding.eval()
         with torch.no_grad():
-            conditions_device = {k: v.to(self.device, dtype=dtype) for k, v in conditions.items()}
+            conditions_device = {k: v.to(self.device).float() for k, v in conditions.items()}
             embedded = embedding(conditions_device)
 
         # Create posterior with inferred dimensions (uses latent dim if transformed)
@@ -462,9 +459,9 @@ class LossBasedEstimator(StepwiseEstimator):
             param_dim=theta.shape[1],
             condition_dim=embedded.shape[1],
             **self.posterior_config,
-        ).to(self.device, dtype=dtype)
+        ).to(self.device)
 
-        debug(f"Model built with param_dim={theta.shape[1]}, dtype={dtype}.")
+        debug(f"Model built with param_dim={theta.shape[1]}.")
         return EmbeddedPosterior(embedding, posterior)
 
     # ==================== Loss Computation ====================
@@ -474,7 +471,7 @@ class LossBasedEstimator(StepwiseEstimator):
         theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
         theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
-            k: self._to_tensor(batch[f"{k}.value"], self.device)
+            k: self._to_tensor(batch[f"{k}.value"], self.device).float()
             for k in self.condition_keys if f"{k}.value" in batch
         }
 
@@ -617,7 +614,7 @@ class LossBasedEstimator(StepwiseEstimator):
         assert conditions, "Conditions must be provided for sampling."
 
         conditions_device = {
-            k: self._to_tensor(v, self.device).expand(num_samples, *v.shape[1:])
+            k: self._to_tensor(v, self.device).float().expand(num_samples, *v.shape[1:])
             for k, v in conditions.items()
         }
 
