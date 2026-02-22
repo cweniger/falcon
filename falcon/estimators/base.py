@@ -451,7 +451,7 @@ class LossBasedEstimator(StepwiseEstimator):
         embedding = instantiate_embedding(self.embedding_config).to(self.device)
         embedding.eval()
         with torch.no_grad():
-            conditions_device = {k: v.to(self.device).float() for k, v in conditions.items()}
+            conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
             embedded = embedding(conditions_device)
 
         # Create posterior with inferred dimensions (uses latent dim if transformed)
@@ -471,7 +471,7 @@ class LossBasedEstimator(StepwiseEstimator):
         theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
         theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
-            k: self._to_tensor(batch[f"{k}.value"], self.device).float()
+            k: self._to_tensor(batch[f"{k}.value"], self.device)
             for k in self.condition_keys if f"{k}.value" in batch
         }
 
@@ -614,7 +614,7 @@ class LossBasedEstimator(StepwiseEstimator):
         assert conditions, "Conditions must be provided for sampling."
 
         conditions_device = {
-            k: self._to_tensor(v, self.device).float().expand(num_samples, *v.shape[1:])
+            k: self._to_tensor(v, self.device).expand(num_samples, *v.shape[1:])
             for k, v in conditions.items()
         }
 

@@ -11,6 +11,7 @@ class RunningNorm(nn.Module):
         momentum=0.01,
         epsilon=1e-20,
         output_dtype=None,
+        dim=(0,),
         log_prefix=None,
         adaptive_momentum=False,
         monotonic_variance=True,
@@ -20,6 +21,7 @@ class RunningNorm(nn.Module):
         self.momentum = momentum
         self.epsilon = epsilon
         self.output_dtype = getattr(torch, output_dtype) if isinstance(output_dtype, str) else output_dtype
+        self.dim = tuple(dim) if isinstance(dim, (list, tuple)) else (dim,)
         self.log_prefix = log_prefix
         self.monotonic_variance = monotonic_variance
         self.use_log_update = use_log_update
@@ -32,21 +34,21 @@ class RunningNorm(nn.Module):
         self.initialized = False
 
     def forward(self, x):
-        reduce_dims = tuple(range(x.dim() - 1))
+        dim = self.dim
 
         if not self.initialized:
             # Initialize running statistics based on the first minibatch
-            self.running_mean = x.mean(dim=reduce_dims).detach()
+            self.running_mean = x.mean(dim=dim, keepdim=True).detach()
             self.running_var = ((x - self.running_mean) ** 2).mean(
-                dim=reduce_dims
+                dim=dim, keepdim=True
             ).detach() + self.epsilon**2
             self.min_variance = self.running_var.clone()
             self.initialized = True
 
         if self.training:
-            # Compute batch mean and variance over all dims except last (per-feature)
-            batch_mean = x.mean(dim=reduce_dims)
-            batch_var = ((x - self.running_mean) ** 2).mean(dim=reduce_dims).detach()
+            # Compute batch mean and variance over specified dims
+            batch_mean = x.mean(dim=dim, keepdim=True)
+            batch_var = ((x - self.running_mean) ** 2).mean(dim=dim, keepdim=True).detach()
 
             if self.adaptive_momentum:
                 threshold_ratio = 2

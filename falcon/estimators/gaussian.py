@@ -120,13 +120,12 @@ class GaussianPosterior(nn.Module):
     # ==================== Device/Dtype ====================
 
     def to(self, *args, **kwargs):
-        """Move module, then restore float64 for parameter-space buffers."""
+        """Move module, preserving parameter-space buffer dtype."""
+        param_dtype = self._output_mean.dtype
         result = super().to(*args, **kwargs)
-        result._output_mean = result._output_mean.double()
-        result._output_std = result._output_std.double()
-        result._residual_cov = result._residual_cov.double()
-        result._residual_eigvals = result._residual_eigvals.double()
-        result._residual_eigvecs = result._residual_eigvecs.double()
+        for name in ('_output_mean', '_output_std', '_residual_cov',
+                     '_residual_eigvals', '_residual_eigvecs'):
+            setattr(result, name, getattr(result, name).to(param_dtype))
         return result
 
     # ==================== Posterior Contract ====================
@@ -186,25 +185,32 @@ class GaussianPosterior(nn.Module):
     def _forward_mean(self, conditions: torch.Tensor) -> torch.Tensor:
         """Predict mean using diagonal whitening.
 
-        MLP runs in float32 for speed; output is cast to float64 for
-        parameter-space precision before de-whitening.
+        Conditions are cast to MLP dtype for input whitening. MLP output
+        is cast to parameter-space dtype before de-whitening.
         """
-        x_norm = (conditions - self._input_mean.detach()) / self._input_std.detach()
-        r = self.net(x_norm)       # float32
-        r = r.double()             # → float64
+        c = conditions.to(self._input_mean.dtype)
+        x_norm = (c - self._input_mean.detach()) / self._input_std.detach()
+        r = self.net(x_norm)
+        r = r.to(self._output_mean.dtype)
         return self._output_mean.detach() + self._output_std.detach() * r
 
     def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
-        """Update running statistics using EMA."""
-        with torch.no_grad():
-            self._input_mean.lerp_(conditions.mean(dim=0), self.momentum)
-            self._output_mean.lerp_(theta.mean(dim=0), self.momentum)
+        """Update running statistics using EMA.
 
-            batch_input_std = self._compute_std(conditions, self._input_mean)
+        Uses non-in-place ops so output buffers auto-promote to theta's dtype.
+        Input buffers stay in MLP dtype; conditions are cast accordingly.
+        """
+        m = self.momentum
+        with torch.no_grad():
+            c = conditions.to(self._input_mean.dtype)
+            self._input_mean = (1 - m) * self._input_mean + m * c.mean(dim=0)
+            batch_input_std = self._compute_std(c, self._input_mean)
+            self._input_std = (1 - m) * self._input_std + m * batch_input_std
+
+            self._output_mean = (1 - m) * self._output_mean + m * theta.mean(dim=0)
             batch_output_std = self._compute_std(theta, self._output_mean)
-            self._input_std.lerp_(batch_input_std, self.momentum)
-            self._output_std.lerp_(batch_output_std, self.momentum)
-            self._output_std.clamp_(max=1.0)  # posterior std can't exceed prior std (latent space is N(0,I))
+            self._output_std = (1 - m) * self._output_std + m * batch_output_std
+            self._output_std = self._output_std.clamp(max=1.0)
 
 
     def _update_residual_cov(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
@@ -215,7 +221,7 @@ class GaussianPosterior(nn.Module):
 
             zero_mean = torch.zeros(self.param_dim, device=theta.device, dtype=theta.dtype)
             batch_cov = self._compute_cov(residuals, zero_mean)
-            self._residual_cov.lerp_(batch_cov, self.momentum)
+            self._residual_cov = (1 - self.momentum) * self._residual_cov + self.momentum * batch_cov
 
             self._step_counter += 1
             if self._step_counter % self.eig_update_freq == 0:
@@ -241,9 +247,8 @@ class GaussianPosterior(nn.Module):
     def _update_eigendecomp(self) -> None:
         """Update eigendecomposition of residual covariance."""
         eigvals, eigvecs = torch.linalg.eigh(self._residual_cov)
-        eigvals = eigvals.clamp(min=self.min_var)
-        self._residual_eigvals.copy_(eigvals)
-        self._residual_eigvecs.copy_(eigvecs)
+        self._residual_eigvals = eigvals.clamp(min=self.min_var)
+        self._residual_eigvecs = eigvecs
 
 
 # ==================== Factory Function ====================
