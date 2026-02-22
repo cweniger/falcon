@@ -90,10 +90,11 @@ class Tokenizer:
 class TokenEmbed(nn.Module):
     """Adapter for fuge.ToneTokenEmbedding that returns only the tensor.
 
-    ToneTokenEmbedding.forward returns (embedded, n_windows, n_peaks),
-    but falcon's sequential embedding pipeline expects a single tensor.
-    This wrapper discards the auxiliary outputs and lazily computes
-    z-score normalization statistics from the first training batch.
+    ToneTokenEmbedding._embed applies cos/sin/log1p feature transforms.
+    Normalization is handled by an explicit RunningNorm layer in the
+    embedding pipeline (configured in YAML), keeping feature transforms
+    separate from normalization — important for sequential SBI where
+    the data distribution shifts across rounds.
 
     Args:
         phase_mode: "center" (n_embed=5) or "boundary" (n_embed=7).
@@ -103,23 +104,21 @@ class TokenEmbed(nn.Module):
     def __init__(self, phase_mode="center", mask_phases=False):
         super().__init__()
         self.embed = ToneTokenEmbedding(phase_mode=phase_mode, mask_phases=mask_phases).double()
-        self.register_buffer("_norm_initialized", torch.tensor(False))
 
     def forward(self, raw_tokens):
         """Embed raw tokens and return flattened sequence.
 
-        Signal processing (normalization, feature extraction) runs in float64.
-        Output is cast to float32 for the downstream neural network.
+        Signal processing (feature extraction) runs in float64.
+        Output remains float64; dtype conversion is handled by
+        the downstream RunningNorm layer (output_dtype config).
 
         Args:
             raw_tokens: Tensor of shape (B, W, K, 5) from ToneTokenizer.
 
         Returns:
-            Tensor of shape (B, W*K, n_embed), float32.
+            Tensor of shape (B, W*K, n_embed), float64.
         """
         raw_tokens = raw_tokens.detach().double()
-        if self.training and not self._norm_initialized:
-            self.embed.compute_normalization(raw_tokens)
-            self._norm_initialized.fill_(True)
-        embedded, _, _ = self.embed(raw_tokens)
-        return embedded
+        embedded = self.embed._embed(raw_tokens)  # (B, W, K, n_embed)
+        B, W, K, n_embed = embedded.shape
+        return embedded.reshape(B, W * K, n_embed)

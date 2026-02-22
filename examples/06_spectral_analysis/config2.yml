@@ -51,7 +51,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 3
+        num_epochs: 300
         batch_size: 64
         early_stop_patience: 64
       network:
@@ -70,9 +70,13 @@ graph:
         d_ff: 256
         dropout: 0.1
         _input_:
-          _target_: model.TokenEmbed
-          phase_mode: center
-          _input_: [tokens]
+          _target_: falcon.embeddings.RunningNorm
+          momentum: 0.01
+          output_dtype: float32
+          _input_:
+            _target_: model.TokenEmbed
+            phase_mode: center
+            _input_: [tokens]
       optimizer:
         lr: 0.001
         lr_decay_factor: 0.5
