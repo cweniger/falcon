@@ -11,13 +11,12 @@ in config.yml via _target_ entries — no wrappers needed for those.
 """
 
 import os
-if not os.environ.get("CUDA_VISIBLE_DEVICES", ""):
-    os.environ.setdefault("JAX_PLATFORMS", "cpu")
+os.environ.setdefault("JAX_PLATFORMS", "cpu")
 
 import numpy as np
 import torch
 import torch.nn as nn
-from fuge import emri_signal, ToneTokenEmbedding
+from fuge import emri_signal, ToneTokenizer, ToneTokenEmbedding
 
 
 class Simulator:
@@ -68,6 +67,26 @@ class Simulator:
         return signals
 
 
+class Tokenizer:
+    """Simulator wrapper around fuge.ToneTokenizer for use as a falcon node.
+
+    Takes raw signals (numpy) and returns spectral tokens (numpy).
+    Used as a deterministic intermediate node between x and theta.
+    """
+
+    def __init__(self, k=1024, n_peaks=3, n_dlnf=11, dlnf_min=0.0, dlnf_max=0.05):
+        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
+        self.tokenizer = ToneTokenizer(k=k, n_peaks=n_peaks, n_dlnf=n_dlnf,
+                                       dlnf_min=dlnf_min, dlnf_max=dlnf_max
+                                       ).to(self.device).double()
+
+    def simulate_batch(self, batch_size, x):
+        x_tensor = torch.as_tensor(x, dtype=torch.float64, device=self.device)
+        with torch.no_grad():
+            tokens = self.tokenizer(x_tensor)
+        return tokens.cpu().numpy()
+
+
 class TokenEmbed(nn.Module):
     """Adapter for fuge.ToneTokenEmbedding that returns only the tensor.
 
@@ -83,21 +102,22 @@ class TokenEmbed(nn.Module):
 
     def __init__(self, phase_mode="center", mask_phases=False):
         super().__init__()
-        self.embed = ToneTokenEmbedding(phase_mode=phase_mode, mask_phases=mask_phases)
+        self.embed = ToneTokenEmbedding(phase_mode=phase_mode, mask_phases=mask_phases).double()
         self.register_buffer("_norm_initialized", torch.tensor(False))
 
     def forward(self, raw_tokens):
         """Embed raw tokens and return flattened sequence.
 
-        Computes normalization stats on the first training batch.
+        Signal processing (normalization, feature extraction) runs in float64.
+        Output is cast to float32 for the downstream neural network.
 
         Args:
             raw_tokens: Tensor of shape (B, W, K, 5) from ToneTokenizer.
 
         Returns:
-            Tensor of shape (B, W*K, n_embed).
+            Tensor of shape (B, W*K, n_embed), float32.
         """
-        raw_tokens = raw_tokens.detach()  # no grad through STFT (no learnable params)
+        raw_tokens = raw_tokens.detach().double()
         if self.training and not self._norm_initialized:
             self.embed.compute_normalization(raw_tokens)
             self._norm_initialized.fill_(True)
