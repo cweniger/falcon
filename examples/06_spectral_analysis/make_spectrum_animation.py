@@ -32,19 +32,15 @@ dump_files = sorted(buffer_dir.glob("*.npz"))
 n_dumps = len(dump_files)
 print(f"Found {n_dumps} buffer dumps in {buffer_dir}")
 
-# Fixed signal parameters (must match config.yml / model.py)
-T_C = 1e6
-A0 = 5.0
-N_HARMONICS = 4
-N_SIG = 100_000
-NOISE_SIGMA = 1.0  # default, overridden from config if available
-
-try:
-    from omegaconf import OmegaConf
-    cfg = OmegaConf.load(run_path / "config.yml")
-    NOISE_SIGMA = float(cfg.graph.x.simulator.get("noise_sigma", NOISE_SIGMA))
-except Exception:
-    pass
+# Signal parameters from config (with defaults matching model.py)
+from omegaconf import OmegaConf
+cfg = OmegaConf.load(run_path / "config.yml")
+sim_cfg = cfg.graph.x.simulator
+T_C = float(sim_cfg.get("t_c", 1e6))
+A0 = float(sim_cfg.get("A0", 5.0))
+N_HARMONICS = int(sim_cfg.get("n_harmonics", 4))
+N_SIG = int(sim_cfg.get("N", 100_000))
+NOISE_SIGMA = float(sim_cfg.get("noise_sigma", 1.0))
 
 # ---------------------------------------------------------------------------
 # Load observation and true spectrum

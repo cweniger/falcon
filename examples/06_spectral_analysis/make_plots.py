@@ -21,13 +21,6 @@ import corner
 import falcon
 from fuge.emri import _emri_impl
 
-# ── Fixed signal parameters (must match config.yml / model.py) ──────
-T_C = 1e6
-A0 = 5.0
-N_HARMONICS = 4
-N = 100_000
-T_OBS = 0.9 * T_C
-
 PARAM_NAMES = [r"$f_0$", r"$\mathcal{M}$", r"$\alpha$"]
 PARAM_UNITS = ["Hz", "", ""]
 
@@ -36,26 +29,32 @@ PARAM_UNITS = ["Hz", "", ""]
 # Fisher information matrix (3-parameter)
 # =====================================================================
 
-@jax.jit
-def compute_fisher(params, sigma):
-    """Full 3x3 Fisher matrix at given parameter values.
+def make_fisher_fn(t_c, A0, n_harmonics, N):
+    """Create a JIT-compiled Fisher matrix function for given signal parameters."""
+    T_OBS = 0.9 * t_c
 
-    Parameters
-    ----------
-    params : jnp.ndarray, shape (3,)
-        [f0, chirp_mass, harmonic_decay]
-    sigma : float
-        Noise standard deviation.
+    @jax.jit
+    def compute_fisher(params, sigma):
+        """Full 3x3 Fisher matrix at given parameter values.
 
-    Returns
-    -------
-    fisher : jnp.ndarray, shape (3, 3)
-    """
-    def signal(p):
-        return _emri_impl(p[0], p[1], T_C, A0, p[2], N_HARMONICS, N, T_OBS)
+        Parameters
+        ----------
+        params : jnp.ndarray, shape (3,)
+            [f0, chirp_mass, harmonic_decay]
+        sigma : float
+            Noise standard deviation.
 
-    J = jax.jacfwd(signal)(params)      # (N, 3)
-    return J.T @ J / sigma ** 2         # (3, 3)
+        Returns
+        -------
+        fisher : jnp.ndarray, shape (3, 3)
+        """
+        def signal(p):
+            return _emri_impl(p[0], p[1], t_c, A0, p[2], n_harmonics, N, T_OBS)
+
+        J = jax.jacfwd(signal)(params)      # (N, 3)
+        return J.T @ J / sigma ** 2         # (3, 3)
+
+    return compute_fisher
 
 
 # =====================================================================
@@ -78,11 +77,17 @@ def main():
     print(f"Ground truth: f0={true_theta[0]:.6e}, M={true_theta[1]:.6f}, "
           f"alpha={true_theta[2]:.4f}")
 
-    # ── Noise sigma from config ─────────────────────────────────────
-    sigma = float(run.config.graph.x.simulator.get("noise_sigma", 1.0))
+    # ── Signal parameters from config ────────────────────────────────
+    sim_cfg = run.config.graph.x.simulator
+    sigma = float(sim_cfg.get("noise_sigma", 1.0))
+    N = int(sim_cfg.get("N", 100_000))
+    t_c = float(sim_cfg.get("t_c", 1e6))
+    A0 = float(sim_cfg.get("A0", 5.0))
+    n_harmonics = int(sim_cfg.get("n_harmonics", 4))
 
     # ── Fisher matrix ───────────────────────────────────────────────
     print(f"\nComputing Fisher matrix (JAX autodiff, N={N:,})...")
+    compute_fisher = make_fisher_fn(t_c, A0, n_harmonics, N)
     params_jax = jnp.array(true_theta, dtype=jnp.float64)
     F = np.array(compute_fisher(params_jax, sigma))
     cov_crb = np.linalg.inv(F)
