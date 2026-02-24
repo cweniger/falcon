@@ -1,29 +1,17 @@
 # =============================================================================
-# Falcon Example Configuration: 06_spectral_analysis
+# Falcon Example Configuration: 06_spectral_analysis (tokenized variant)
 # -----------------------------------------------------------------------------
-# Demonstrates falcon + fuge integration for EMRI gravitational wave inference.
+# Same as config.yml but with an intermediate "tokens" node that caches the
+# expensive STFT tokenization. Training operates on compact token tensors
+# instead of re-running the STFT every epoch.
 #
-# Signal model: Chirping multi-harmonic EMRI waveform (fuge.emri_signal)
-# Parameters:   f0 (initial frequency), chirp_mass, harmonic_decay
-# Embedding:    ToneTokenizer -> ToneTokenEmbedding -> TransformerEmbedding
-#               (all from the fuge library, chained via nested _input_ config)
-# Posterior:    Gaussian (full covariance)
+# Graph: theta -> x -> tokens   (theta uses evidence: [tokens])
 #
-# Embedding dimension notes (from tokenizer settings):
-#   N=100000, k=1024, hop=512 -> n_windows = (100000-1024)//512 + 1 = 194
-#   n_peaks=3                 -> seq_len = 194 * 3 = 582
-#   phase_mode="center"       -> d_in = 5
-#
-# Usage:
-#   cd examples/06_spectral_analysis
-#   python data/generate_obs.py                    # Generate mock observation
-#   falcon launch --run-dir outputs/run            # Train the model
-#   falcon sample posterior --run-dir outputs/run   # Generate posterior samples
+# NOTE: This config will currently FAIL during proposal/posterior sampling
+# because falcon's inference graph does not include intermediate deterministic
+# nodes (tokens has no estimator and no evidence).
 # =============================================================================
 
-# -----------------------------------------------------------------------------
-# Logging configuration
-# -----------------------------------------------------------------------------
 logging:
   wandb:
     enabled: false
@@ -34,55 +22,43 @@ logging:
     enabled: true
     dir: ${paths.graph}
 
-# -----------------------------------------------------------------------------
-# Directory configuration
-# -----------------------------------------------------------------------------
 paths:
   import: "./src"
   buffer: ${run_dir}/sim_dir
   graph: ${run_dir}/graph_dir
   samples: ${run_dir}/samples_dir
 
-# -----------------------------------------------------------------------------
-# Training buffer parameters (small — each sample is 100K floats)
-# -----------------------------------------------------------------------------
 buffer:
-  min_samples: 4000
-  max_samples: 4000
+  min_samples: 4096
+  max_samples: 4096
   validation_samples: 256
-  simulate_count: 512
+  simulate_count: 1024
   simulate_when_full: true
-  simulate_interval: 2
+  simulate_interval: 1
   store_fraction: 0.1
 
-# -----------------------------------------------------------------------------
-# Graph definition
-# -----------------------------------------------------------------------------
 graph:
   theta:
-    evidence: [x]
+    evidence: [tokens]
 
     simulator:
       _target_: falcon.priors.Product
       priors:
-        # - ['uniform', 2.7499975e-3, 2.7500025e-3]   # f0 (Hz)
-        # - ['uniform', 0.999996, 1.000004]             # chirp_mass
-        # - ['uniform', 1.485, 1.515]                   # harmonic_decay
-        - ['uniform', 2.749e-3, 2.751e-3]   # f0 (Hz)
-        - ['uniform', 0.996, 1.004]             # chirp_mass
-        - ['uniform', 1.400, 1.600]                   # harmonic_decay
+        - ['uniform', 2.749e-3, 2.751e-3]
+        - ['uniform', 0.996, 1.004]
+        - ['uniform', 1.400, 1.600]
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 300
-        batch_size: 64
-        early_stop_patience: 64
+        num_epochs: 200
+        batch_size: 128
+        early_stop_patience: 32
       network:
         hidden_dim: 128
         num_layers: 3
         momentum: 0.10
-        min_var: 1.0e-20
+        min_var: 1.0e-25
         eig_update_freq: 1
       embedding:
         _target_: fuge.TransformerEmbedding
@@ -101,14 +77,7 @@ graph:
           _input_:
             _target_: model.TokenEmbed
             phase_mode: center
-            _input_:
-              _target_: fuge.ToneTokenizer
-              k: 1024
-              n_peaks: 3
-              n_dlnf: 11
-              dlnf_min: 0.0
-              dlnf_max: 0.05
-              _input_: [x]
+            _input_: [tokens]
       optimizer:
         lr: 0.001
         lr_decay_factor: 0.5
@@ -129,12 +98,20 @@ graph:
       noise_sigma: 1.0
       N: 100000
     observed: "./data/obs.npz['x']"
+
+  tokens:
+    parents: [x]
+    simulator:
+      _target_: model.Tokenizer
+      k: 1024
+      n_peaks: 3
+      n_dlnf: 11
+      dlnf_min: 0.0
+      dlnf_max: 0.05
+    sample_chunk_size: 64
     ray:
       num_gpus: 0.5
 
-# -----------------------------------------------------------------------------
-# Sampling configuration
-# -----------------------------------------------------------------------------
 sample:
   prior:
     n: 1000
