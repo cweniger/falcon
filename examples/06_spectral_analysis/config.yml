@@ -32,27 +32,31 @@ buffer:
   min_samples: 4096
   max_samples: 4096
   validation_samples: 256
-  simulate_count: 1024
-  simulate_when_full: true
+  simulate_count: 128
+  simulate_when_full: false
   simulate_interval: 1
   store_fraction: 0.1
 
 graph:
   theta:
     evidence: [tokens]
+    sample_chunk_size: 8
 
     simulator:
       _target_: falcon.priors.Product
       priors:
-        - ['uniform', 2.749e-3, 2.751e-3]
-        - ['uniform', 0.996, 1.004]
-        - ['uniform', 1.400, 1.600]
+        #- ['uniform', 2.749e-3, 2.751e-3]
+        #- ['uniform', 0.996, 1.004]
+        #- ['uniform', 1.400, 1.600]
+        - ['uniform', 2.5e-3, 3.0e-3]
+        - ['uniform', 0.8, 1.2]
+        - ['uniform', 1.200, 1.800]
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 200
-        batch_size: 128
+        num_epochs: 500
+        batch_size: 16
         early_stop_patience: 32
       network:
         hidden_dim: 128
@@ -63,10 +67,9 @@ graph:
       embedding:
         _target_: fuge.TransformerEmbedding
         d_in: 5
-        seq_len: 582
         d_model: 64
         n_heads: 4
-        n_layers: 3
+        n_layers: 2
         d_ff: 256
         dropout: 0.1
         _input_:
@@ -87,30 +90,32 @@ graph:
         discard_samples: false
         log_ratio_threshold: -20.0
 
-    sample_chunk_size: 64
     ray:
-      num_gpus: 0.5
+      num_gpus: 0.3
 
   x:
     parents: [theta]
+    sample_chunk_size: 8
     simulator:
       _target_: model.Simulator
       noise_sigma: 1.0
-      N: 100000
-    observed: "./data/obs.npz['x']"
+      N: 1000000
+    observed: "./data/obs_1M.npz['x']"
+    ray:
+      num_gpus: 0.3
 
   tokens:
     parents: [x]
+    sample_chunk_size: 8
     simulator:
       _target_: model.Tokenizer
-      k: 1024
+      k: 20240
       n_peaks: 3
       n_dlnf: 11
       dlnf_min: 0.0
       dlnf_max: 0.05
-    sample_chunk_size: 64
     ray:
-      num_gpus: 0.5
+      num_gpus: 0.3
 
 sample:
   prior:

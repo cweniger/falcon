@@ -10,13 +10,15 @@ The ToneTokenizer and TransformerEmbedding from fuge are referenced directly
 in config.yml via _target_ entries — no wrappers needed for those.
 """
 
-import os
-os.environ.setdefault("JAX_PLATFORMS", "cpu")
+import functools
 
+import jax
+import jax.numpy as jnp
 import numpy as np
 import torch
 import torch.nn as nn
-from fuge import emri_signal, ToneTokenizer, ToneTokenEmbedding
+from fuge import ToneTokenizer, ToneTokenEmbedding
+from fuge.emri import _emri_impl
 
 
 class Simulator:
@@ -40,6 +42,19 @@ class Simulator:
         self.t_c = t_c
         self.A0 = A0
         self.n_harmonics = n_harmonics
+        self._rng = jax.random.PRNGKey(0)
+
+        # Vectorized signal generation + noise in one JIT-compiled call
+        @functools.partial(jax.jit, static_argnums=(5, 6))
+        def _generate_batch(f0, chirp_mass, harmonic_decay, t_c, A0,
+                            n_harmonics, N, T_obs, noise_sigma, rng_key):
+            signals = jax.vmap(
+                lambda f, m, d: _emri_impl(f, m, t_c, A0, d, n_harmonics, N, T_obs)
+            )(f0, chirp_mass, harmonic_decay)
+            noise = jax.random.normal(rng_key, signals.shape) * noise_sigma
+            return signals + noise
+
+        self._generate_batch = _generate_batch
 
     def simulate_batch(self, batch_size, theta):
         """Generate a batch of noisy EMRI signals.
@@ -52,19 +67,14 @@ class Simulator:
         Returns:
             np.ndarray of shape (batch_size, N) containing noisy signals.
         """
-        signals = np.empty((batch_size, self.N))
-        for i in range(batch_size):
-            signals[i] = emri_signal(
-                f0=float(theta[i, 0]),
-                chirp_mass=float(theta[i, 1]),
-                t_c=self.t_c,
-                A0=self.A0,
-                harmonic_decay=float(theta[i, 2]),
-                n_harmonics=self.n_harmonics,
-                N=self.N,
-            )
-        signals += np.random.randn(batch_size, self.N) * self.noise_sigma
-        return signals
+        T_obs = 0.9 * self.t_c
+        self._rng, subkey = jax.random.split(self._rng)
+        signals = self._generate_batch(
+            jnp.asarray(theta[:, 0]), jnp.asarray(theta[:, 1]),
+            jnp.asarray(theta[:, 2]), self.t_c, self.A0,
+            self.n_harmonics, self.N, T_obs, self.noise_sigma, subkey,
+        )
+        return np.asarray(signals)
 
 
 class Tokenizer:

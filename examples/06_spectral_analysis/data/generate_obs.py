@@ -19,7 +19,7 @@ signal = emri_signal(
     A0=5.0,
     harmonic_decay=TRUE_HARMONIC_DECAY,
     n_harmonics=4,
-    N=100_000,
+    N=1000_000,
 )
 
 rng = np.random.default_rng(42)
@@ -27,7 +27,7 @@ noise = rng.standard_normal(len(signal))
 observation = signal + noise
 
 np.savez(
-    "obs.npz",
+    "obs_1M.npz",
     x=observation,
     true_theta=np.array([TRUE_F0, TRUE_CHIRP_MASS, TRUE_HARMONIC_DECAY]),
 )
