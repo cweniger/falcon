@@ -19,7 +19,8 @@ import matplotlib.pyplot as plt
 import corner
 
 import falcon
-from fuge.emri import _emri_impl
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from chirp import _chirp_impl
 
 PARAM_NAMES = [r"$f_0$", r"$\mathcal{M}$", r"$\alpha$"]
 PARAM_UNITS = ["Hz", "", ""]
@@ -49,7 +50,7 @@ def make_fisher_fn(t_c, A0, n_harmonics, N):
         fisher : jnp.ndarray, shape (3, 3)
         """
         def signal(p):
-            return _emri_impl(p[0], p[1], t_c, A0, p[2], n_harmonics, N, T_OBS)
+            return _chirp_impl(p[0], p[1], t_c, A0, p[2], n_harmonics, N, T_OBS)
 
         J = jax.jacfwd(signal)(params)      # (N, 3)
         return J.T @ J / sigma ** 2         # (3, 3)
