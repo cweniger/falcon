@@ -109,13 +109,14 @@ class GaussianPosterior(nn.Module):
         self.register_buffer("_input_std", torch.ones(condition_dim))
 
         # Output statistics (theta) - diagonal whitening
-        self.register_buffer("_output_mean", torch.zeros(param_dim))
-        self.register_buffer("_output_std", torch.ones(param_dim))
+        # Always float64 for precision; results are cast to input dtype on output.
+        self.register_buffer("_output_mean", torch.zeros(param_dim, dtype=torch.float64))
+        self.register_buffer("_output_std", torch.ones(param_dim, dtype=torch.float64))
 
         # Residual covariance (prediction error) - full covariance
-        self.register_buffer("_residual_cov", torch.eye(param_dim))
-        self.register_buffer("_residual_eigvals", torch.ones(param_dim))
-        self.register_buffer("_residual_eigvecs", torch.eye(param_dim))
+        self.register_buffer("_residual_cov", torch.eye(param_dim, dtype=torch.float64))
+        self.register_buffer("_residual_eigvals", torch.ones(param_dim, dtype=torch.float64))
+        self.register_buffer("_residual_eigvecs", torch.eye(param_dim, dtype=torch.float64))
 
     # ==================== Device/Dtype ====================
 
@@ -150,22 +151,26 @@ class GaussianPosterior(nn.Module):
         r_proj = V.T @ residuals.T
         mahal = (r_proj**2 / d.unsqueeze(1)).sum(dim=0)
 
-        return -0.5 * (self.param_dim * np.log(2 * np.pi) + log_det + mahal)
+        return (-0.5 * (self.param_dim * np.log(2 * np.pi) + log_det + mahal)).to(theta.dtype)
 
     def sample(self, conditions: torch.Tensor, gamma: Optional[float] = None) -> torch.Tensor:
         """Sample from posterior, optionally tempered.
+
+        Internal computation is float64 (output buffer precision).
+        Result is cast to conditions' dtype on return.
 
         Args:
             conditions: Condition tensor of shape (batch, condition_dim)
             gamma: Tempering parameter. None = untempered, <1 = widened.
         """
+        out_dtype = conditions.dtype
         mean = self._forward_mean(conditions)
         V = self._residual_eigvecs
         d = self._residual_eigvals
 
         if gamma is None:
             eps = torch.randn_like(mean)
-            return mean + (V @ (torch.sqrt(d).unsqueeze(1) * eps.T)).T
+            return (mean + (V @ (torch.sqrt(d).unsqueeze(1) * eps.T)).T).to(out_dtype)
 
         # Tempered sampling
         a = gamma / (1 + gamma)
@@ -178,7 +183,7 @@ class GaussianPosterior(nn.Module):
         mean_prop = (V @ (alpha.unsqueeze(1) * mean_proj)).T
 
         eps = torch.randn_like(mean)
-        return mean_prop + (V @ (torch.sqrt(var_prop).unsqueeze(1) * eps.T)).T
+        return (mean_prop + (V @ (torch.sqrt(var_prop).unsqueeze(1) * eps.T)).T).to(out_dtype)
 
     # ==================== Internal Methods ====================
 
@@ -197,8 +202,8 @@ class GaussianPosterior(nn.Module):
     def _update_stats(self, theta: torch.Tensor, conditions: torch.Tensor) -> None:
         """Update running statistics using EMA.
 
-        Uses non-in-place ops so output buffers auto-promote to theta's dtype.
-        Input buffers stay in MLP dtype; conditions are cast accordingly.
+        Output buffers are float64 for precision. Input buffers stay in MLP
+        dtype (float32); conditions are cast accordingly.
         """
         m = self.momentum
         with torch.no_grad():
