@@ -32,13 +32,13 @@ paths:
   samples: ${run_dir}/samples_dir
 
 buffer:
-  min_samples: 8096
-  max_samples: 8096
-  validation_samples: 128
-  simulate_count: 0
-  simulate_when_full: false
+  min_samples: 4092
+  max_samples: 4092
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
   simulate_interval: 1
-  store_fraction: 0.1
+  store_fraction: 0.0
 
 graph:
   theta:
@@ -48,9 +48,9 @@ graph:
     simulator:
       _target_: falcon.priors.Product
       priors:  # 10x CRB at N=100k
-        - ['uniform', 2.7499951116e-3, 2.7500048884e-3]  # f0
-        - ['uniform', 0.9999926305, 1.0000073695]          # chirp_mass
-        - ['uniform', 1.4705761, 1.5294239]                 # harmonic_decay
+        - ['normal', 2.75e-3, 1e-7]  # f0
+        - ['normal', 1.0,     1e-5]  # chirp_mass
+        - ['normal', 1.5,     1e-1]  # harmonic_decay
 
     estimator:
       _target_: falcon.estimators.Gaussian
@@ -67,7 +67,7 @@ graph:
       embedding:
         _target_: embeddings.SVDEmbedding
         N: 100000
-        n_components: 32
+        n_components: 64
         buffer_size: 256
         momentum: 0.1
         _input_: [x, y, n]
