@@ -16,7 +16,8 @@ import numpy as np
 import matplotlib.pyplot as plt
 from matplotlib.animation import FuncAnimation, PillowWriter
 from matplotlib.patches import Ellipse
-from fuge import emri_signal
+sys.path.insert(0, str(Path(__file__).resolve().parent / "src"))
+from chirp import chirp_signal
 
 # ---------------------------------------------------------------------------
 # Resolve run path and config
@@ -50,7 +51,7 @@ true_theta = obs["true_theta"]
 
 # Compute true (noise-free) spectrum — first call triggers JIT
 print("Computing reference spectrum (JIT warmup)...")
-true_signal = emri_signal(
+true_signal = chirp_signal(
     f0=float(true_theta[0]), chirp_mass=float(true_theta[1]), t_c=T_C, A0=A0,
     harmonic_decay=float(true_theta[2]), n_harmonics=N_HARMONICS, N=N_SIG,
 )
@@ -75,7 +76,7 @@ print(f"Computing {N_FRAMES} noise-free spectra...")
 all_psd = np.empty((N_FRAMES, len(freqs)))
 for idx in range(N_FRAMES):
     theta = all_thetas[idx]
-    sig = emri_signal(
+    sig = chirp_signal(
         f0=float(theta[0]), chirp_mass=float(theta[1]), t_c=T_C, A0=A0,
         harmonic_decay=float(theta[2]), n_harmonics=N_HARMONICS, N=N_SIG,
     )
@@ -100,14 +101,14 @@ try:
     import jax
     jax.config.update("jax_enable_x64", True)
     import jax.numpy as jnp
-    from fuge.emri import _emri_impl
+    from chirp import _chirp_impl
 
     T_OBS = 0.9 * T_C
 
     @jax.jit
     def compute_fisher(params, sigma):
         def signal(p):
-            return _emri_impl(p[0], p[1], T_C, A0, p[2], N_HARMONICS, N_SIG, T_OBS)
+            return _chirp_impl(p[0], p[1], T_C, A0, p[2], N_HARMONICS, N_SIG, T_OBS)
         J = jax.jacfwd(signal)(params)
         return J.T @ J / sigma ** 2
 

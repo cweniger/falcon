@@ -212,7 +212,7 @@ class NodeWrapper:
         elif hasattr(self.estimator_instance, 'history'):
             losses = self.estimator_instance.history.get('val_loss', [])
             if losses:
-                final_loss = losses[-1]
+                final_loss = min(losses)
 
         if final_loss is not None:
             info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
