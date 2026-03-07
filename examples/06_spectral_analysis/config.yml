@@ -33,13 +33,13 @@ paths:
   samples: ${run_dir}/samples_dir
 
 buffer:
-  min_samples: 4096
-  max_samples: 4096
+  min_samples: 4092
+  max_samples: 4092
   validation_samples: 256
-  simulate_count: 128
-  simulate_when_full: false
+  simulate_count: 256
+  simulate_when_full: true
   simulate_interval: 1
-  store_fraction: 0.1
+  store_fraction: 0.0
 
 graph:
   theta:
@@ -48,42 +48,42 @@ graph:
 
     simulator:
       _target_: falcon.priors.Product
-      priors:
-        - ['uniform', 2.7499951116e-3, 2.7500048884e-3]  # f0: 10x CRB
-        - ['uniform', 0.9999926305, 1.0000073695]          # chirp_mass: 10x CRB
-        - ['uniform', 1.4705761, 1.5294239]                 # harmonic_decay: 10x CRB
+      priors:  # 10x CRB at N=100k
+        - ['normal', 2.75e-3, 1e-7]  # f0
+        - ['normal', 1.0,     1e-5]  # chirp_mass
+        - ['normal', 1.5,     1e-1]  # harmonic_decay
 
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
         num_epochs: 500
-        batch_size: 16
+        batch_size: 64
         early_stop_patience: 32
       network:
-        hidden_dim: 128
+        hidden_dim: 512
         num_layers: 3
-        momentum: 0.10
+        momentum: 0.1
         min_var: 1.0e-25
         eig_update_freq: 1
       embedding:
-        _target_: fuge.TransformerEmbedding
-        d_in: 5
+        _target_: fuge.nn.TransformerEmbedding
         d_model: 64
         n_heads: 4
         n_layers: 2
         d_ff: 256
-        dropout: 0.1
+        dropout: 0.0
         _input_:
           _target_: falcon.embeddings.RunningNorm
           momentum: 0.01
           dim: [0, 1]
           output_dtype: float32
           _input_:
-            _target_: embeddings.TokenEmbed
-            phase_mode: center
+            _target_: embeddings.SpectralTokenEmbed
+            n_freq: 10
+            phase_mode: boundary
             _input_: [tokens]
       optimizer:
-        lr: 0.001
+        lr: 0.005
         lr_decay_factor: 0.5
         scheduler_patience: 16
       inference:
@@ -123,7 +123,7 @@ graph:
     sample_chunk_size: 8
     simulator:
       _target_: embeddings.Tokenizer
-      k: 20240
+      k: 10000  # 2024
       n_peaks: 3
       n_dlnf: 11
       dlnf_min: 0.0

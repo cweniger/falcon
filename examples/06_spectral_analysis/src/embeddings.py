@@ -3,8 +3,10 @@
 - SVDEmbedding: Scaffolded streaming SVD embedding using fuge.StreamingPCA
 - Tokenizer: Simulator wrapper around fuge.ToneTokenizer for use as a falcon node
 - TokenEmbed: Adapter for fuge.ToneTokenEmbedding that returns only the tensor
+- SpectralTokenEmbed: Spectral (Fourier feature) embedding for token frequencies
 """
 
+import math
 import torch
 import torch.nn as nn
 from fuge.spectral import ToneTokenizer, ToneTokenEmbedding
@@ -104,3 +106,93 @@ class TokenEmbed(nn.Module):
         embedded = self.embed._embed(raw_tokens)  # (B, W, K, n_embed)
         B, W, K, n_embed = embedded.shape
         return embedded.reshape(B, W * K, n_embed)
+
+
+class SpectralTokenEmbed(nn.Module):
+    """Spectral (Fourier feature) embedding for tone tokens.
+
+    Replaces z-score normalized raw frequencies with multi-scale Fourier
+    features, enabling the transformer to distinguish frequencies at
+    multiple resolutions — from coarse harmonic structure down to fine
+    spectral splitting.
+
+    Feature layout per token:
+      - f_start spectral: sin/cos at n_freq scales  -> 2 * n_freq
+      - f_end   spectral: sin/cos at n_freq scales  -> 2 * n_freq
+      - amplitude: log1p(amp)                        -> 1
+      - phase_start: cos(ps), sin(ps)                -> 2
+      - phase_end:   cos(pe), sin(pe)                -> 2
+      Total n_embed = 4 * n_freq + 5
+
+    Args:
+        n_freq: Number of Fourier scales for frequency embedding.
+            Scales are pi * 2^i for i = 0..n_freq-1. Default 8.
+        phase_mode: "boundary" keeps both phase endpoints (default),
+            "center" averages them (n_embed = 4 * n_freq + 3).
+    """
+
+    def __init__(self, n_freq=8, phase_mode="boundary", amp_scale=10.0):
+        super().__init__()
+        self.n_freq = n_freq
+        self.phase_mode = phase_mode
+        self.amp_scale = amp_scale
+        # Geometrically spaced scales: pi, 2pi, 4pi, ..., pi*2^(n_freq-1)
+        scales = math.pi * (2.0 ** torch.arange(n_freq, dtype=torch.float64))
+        self.register_buffer("scales", scales)
+        # raw f_start + f_end (2) + spectral (4*n_freq) + amp (1) + phases + time (1)
+        self.n_embed = 4 * n_freq + (8 if phase_mode == "boundary" else 6)
+
+    def _freq_embed(self, f):
+        """Fourier features for a frequency value in [-1, 1].
+
+        Args:
+            f: (...) shaped tensor.
+        Returns:
+            (..., 2*n_freq) shaped tensor of [sin, cos] pairs.
+        """
+        # f: (...) -> (..., n_freq)
+        scaled = f.unsqueeze(-1) * self.scales
+        return torch.cat([torch.sin(scaled), torch.cos(scaled)], dim=-1)
+
+    def forward(self, raw_tokens):
+        """Embed raw tokens with spectral frequency features.
+
+        Args:
+            raw_tokens: (B, W, K, 5) from ToneTokenizer.
+                Features: f_start[-1,1], f_end[-1,1], amp, ps[-pi,pi], pe[-pi,pi]
+
+        Returns:
+            (B, W*K, n_embed) float64 tensor.
+        """
+        raw_tokens = raw_tokens.detach().double()
+        B, W, K, _ = raw_tokens.shape
+
+        f_start = raw_tokens[..., 0]
+        f_end = raw_tokens[..., 1]
+        amp = torch.log1p(raw_tokens[..., 2]) / self.amp_scale
+        ps = raw_tokens[..., 3]
+        pe = raw_tokens[..., 4]
+
+        t = torch.linspace(-1.0, 1.0, W, device=raw_tokens.device, dtype=raw_tokens.dtype)
+        t = t[None, :, None].expand(B, W, K)  # (B, W, K)
+
+        parts = [
+            f_start.unsqueeze(-1),        # (B,W,K, 1) raw frequency
+            f_end.unsqueeze(-1),          # (B,W,K, 1) raw frequency
+            self._freq_embed(f_start),    # (B,W,K, 2*n_freq)
+            self._freq_embed(f_end),      # (B,W,K, 2*n_freq)
+            amp.unsqueeze(-1),            # (B,W,K, 1)
+            t.unsqueeze(-1),              # (B,W,K, 1) time position
+        ]
+
+        if self.phase_mode == "boundary":
+            parts += [
+                torch.stack([torch.cos(ps), torch.sin(ps)], dim=-1),
+                torch.stack([torch.cos(pe), torch.sin(pe)], dim=-1),
+            ]
+        else:
+            phi = (ps + pe) / 2
+            parts.append(torch.stack([torch.cos(phi), torch.sin(phi)], dim=-1))
+
+        embedded = torch.cat(parts, dim=-1)  # (B, W, K, n_embed)
+        return embedded.reshape(B, W * K, self.n_embed)
