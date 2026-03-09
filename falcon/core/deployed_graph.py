@@ -610,6 +610,9 @@ class DeployedGraph:
 
         for name in node_order:
             if name in ref_trace:
+                # FIXME: conditioned nodes are skipped, so their refs are missing
+                # from sample_refs. Callers must manually merge them back (see
+                # training loop). _execute_graph should insert them directly.
                 continue
 
             # Build condition refs for this node (parents always, evidence for inference)
