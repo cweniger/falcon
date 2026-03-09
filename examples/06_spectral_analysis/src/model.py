@@ -43,7 +43,7 @@ class Signal:
             jnp.asarray(theta[:, 2]),
             self.n_harmonics, self.N, self.t_c, self.A0, T_obs,
         )
-        return np.asarray(signals)
+        return np.asarray(signals, dtype=np.float64)
 
 
 class Noise:
@@ -54,7 +54,7 @@ class Noise:
         self.sigma = sigma
 
     def simulate(self):
-        return np.float32(np.random.randn(self.N) * self.sigma)
+        return np.float64(np.random.randn(self.N) * self.sigma)
 
 
 class Data:
