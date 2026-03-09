@@ -43,11 +43,7 @@ class SVDEmbedding(nn.Module):
             white_y = self.whitener(y)
             self.projector.update(white_y)
         x1 = self.whitener(x)
-        if self.projector.components.numel() > 0:
-            coeffs = self.projector(x1)  # (batch, n_components)
-        else:
-            coeffs = torch.zeros(x1.shape[0], self.n_components,
-                                 dtype=x1.dtype, device=x1.device)
+        coeffs = self.projector(x1)  # (batch, n_components)
         return self.mlp(coeffs)
 
 
