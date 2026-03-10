@@ -98,13 +98,13 @@ np.savez("data/obs.npz", x=obs)
 ### 4. Run Training
 
 ```bash
-falcon launch --run-dir outputs/run_01
+falcon launch -o outputs/run_01
 ```
 
 ### 5. Sample from Posterior
 
 ```bash
-falcon sample posterior --run-dir outputs/run_01
+falcon sample posterior -o outputs/run_01
 ```
 
 ## CLI Commands

@@ -32,7 +32,7 @@ graph:
 ```
 
 ```bash
-falcon launch --run-dir outputs/run_01
+falcon launch -o outputs/run_01
 ```
 
 ## Installation
