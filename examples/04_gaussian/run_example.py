@@ -118,7 +118,7 @@ def main():
 
     # Step 1: Run falcon launch
     if not run_command(
-        ["falcon", "launch", f"--run-dir={RUN_DIR}"],
+        ["falcon", "launch", f"--output={RUN_DIR}"],
         "Step 1: Running falcon launch",
         cwd=script_dir
     ):
@@ -126,7 +126,7 @@ def main():
 
     # Step 2: Generate posterior samples
     if not run_command(
-        ["falcon", "sample", "posterior", f"--run-dir={RUN_DIR}"],
+        ["falcon", "sample", "posterior", f"--output={RUN_DIR}"],
         "Step 2: Generating posterior samples",
         cwd=script_dir
     ):

@@ -1,18 +1,19 @@
 #!/usr/bin/env python3
 """
 Falcon Adaptive Training - Standalone CLI Tool
-Usage: falcon launch [--run-dir DIR] [--config-name FILE] [key=value ...]
-       falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]
-       falcon graph [--config-name FILE]
+Usage: falcon launch [--output DIR] [--config FILE] [key=value ...]
+       falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]
+       falcon graph [--config FILE]
 
 Run directory behavior:
-  - If --run-dir not specified, generates: outputs/adj-noun-YYMMDD-HHMM
-  - If --run-dir exists with config.yml, resumes from saved config
-  - Otherwise, loads ./config.yml and saves resolved config to run_dir
+  - If --output not specified, generates: outputs/adj-noun-YYMMDD-HHMM
+  - If --output exists with config.yml, resumes from saved config
+  - Otherwise, loads ./config.yml and saves resolved config to output dir
 """
 
 import sys
 import os
+import warnings
 from pathlib import Path
 
 BANNER = "falcon \x1b[2m\u2581\u2582\u2585\u2587\u2588\u2586\u2583\u2582\u2581\u2581\x1b[0m"
@@ -732,13 +733,13 @@ def parse_args():
         print(f"{BANNER} v{_get_version()}")
         print()
         print("Usage:")
-        print("  falcon launch [--run-dir DIR] [--config-name FILE] [--no-interactive] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--run-dir DIR] [--config-name FILE] [key=value ...]")
-        print("  falcon graph [--config-name FILE]")
+        print("  falcon launch [--output DIR] [--config FILE] [--no-interactive] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]")
+        print("  falcon graph [--config FILE]")
         print()
         print("Options:")
-        print("  --run-dir DIR          Run directory (default: auto-generated)")
-        print("  --config-name FILE     Config file (default: config.yml)")
+        print("  -o, --output DIR       Output directory (default: auto-generated)")
+        print("  -c, --config FILE      Config file (default: config.yml)")
         print("  --no-interactive       Disable interactive TUI (plain output)")
         print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
         print("  --no-posterior-sample  Skip posterior sampling after training")
@@ -775,7 +776,7 @@ def parse_args():
             sys.exit(1)
         sample_type = args.pop(0)
 
-    # Extract --run-dir, --config-name, --interactive, --log-lines and collect overrides
+    # Extract --output, --config, --interactive, --log-lines and collect overrides
     run_dir = None
     config_name = "config.yml"
     # Interactive mode: default to True if stdout is a TTY
@@ -787,15 +788,29 @@ def parse_args():
     i = 0
     while i < len(args):
         arg = args[i]
-        if arg == "--run-dir" and i + 1 < len(args):
+        if arg in ("--output", "-o") and i + 1 < len(args):
+            run_dir = args[i + 1]
+            i += 1
+        elif arg.startswith("--output="):
+            run_dir = arg.split("=", 1)[1]
+        elif arg == "--run-dir" and i + 1 < len(args):
+            warnings.warn("--run-dir is deprecated, use --output or -o instead", FutureWarning, stacklevel=2)
             run_dir = args[i + 1]
             i += 1
         elif arg.startswith("--run-dir="):
+            warnings.warn("--run-dir is deprecated, use --output or -o instead", FutureWarning, stacklevel=2)
             run_dir = arg.split("=", 1)[1]
+        elif arg in ("--config", "-c") and i + 1 < len(args):
+            config_name = args[i + 1]
+            i += 1
+        elif arg.startswith("--config="):
+            config_name = arg.split("=", 1)[1]
         elif arg == "--config-name" and i + 1 < len(args):
+            warnings.warn("--config-name is deprecated, use --config or -c instead", FutureWarning, stacklevel=2)
             config_name = args[i + 1]
             i += 1
         elif arg.startswith("--config-name="):
+            warnings.warn("--config-name is deprecated, use --config or -c instead", FutureWarning, stacklevel=2)
             config_name = arg.split("=", 1)[1]
         elif arg in ("--interactive", "-i"):
             interactive = True

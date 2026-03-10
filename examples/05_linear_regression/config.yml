@@ -15,8 +15,8 @@
 # Usage:
 #   cd examples/05_linear_regression
 #   python data/gen_mock_data.py
-#   falcon launch --run-dir outputs/run
-#   falcon sample posterior --run-dir outputs/run
+#   falcon launch -o outputs/run
+#   falcon sample posterior -o outputs/run
 # =============================================================================
 
 # -----------------------------------------------------------------------------
