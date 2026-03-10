@@ -4,6 +4,7 @@
 - Tokenizer: Simulator wrapper around fuge.ToneTokenizer for use as a falcon node
 - TokenEmbed: Adapter for fuge.ToneTokenEmbedding that returns only the tensor
 - SpectralTokenEmbed: Spectral (Fourier feature) embedding for token frequencies
+- Concat: Concatenation along last dimension for combining embedding streams
 """
 
 import math
@@ -192,3 +193,10 @@ class SpectralTokenEmbed(nn.Module):
 
         embedded = torch.cat(parts, dim=-1)  # (B, W, K, n_embed)
         return embedded.reshape(B, W * K, self.n_embed)
+
+
+class Concat(nn.Module):
+    """Concatenate multiple inputs along the last dimension."""
+
+    def forward(self, *inputs):
+        return torch.cat(inputs, dim=-1)
