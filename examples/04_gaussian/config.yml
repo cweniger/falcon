@@ -16,8 +16,8 @@
 # Usage:
 #   cd examples/04_gaussian
 #   python data/gen_mock_data.py          # Generate mock observation data
-#   falcon launch --run-dir outputs/run   # Train the model
-#   falcon sample posterior --run-dir outputs/run  # Generate posterior samples
+#   falcon launch -o outputs/run           # Train the model
+#   falcon sample posterior -o outputs/run # Generate posterior samples
 # =============================================================================
 
 # -----------------------------------------------------------------------------

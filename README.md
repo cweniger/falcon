@@ -31,8 +31,8 @@ Run the minimal example (a 3-parameter Gaussian inference problem):
 
 ```bash
 cd examples/01_minimal
-falcon launch --run-dir outputs/run_01
-falcon sample posterior --run-dir outputs/run_01
+falcon launch -o outputs/run_01
+falcon sample posterior -o outputs/run_01
 ```
 
 This trains a neural posterior estimator on simulated data, then draws 1000 posterior samples. Results are saved under `outputs/run_01/`.
@@ -62,8 +62,8 @@ graph:
 ## CLI
 
 ```bash
-falcon launch [--run-dir DIR] [--config-name NAME] [key=value ...]
-falcon sample prior|posterior|proposal --run-dir DIR
+falcon launch [-o DIR] [-c CONFIG] [key=value ...]
+falcon sample prior|posterior|proposal -o DIR
 falcon graph                            # Visualize graph structure
 falcon monitor                          # Real-time TUI dashboard (requires pip install "falcon[monitor]")
 ```
