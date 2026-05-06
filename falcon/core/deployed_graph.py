@@ -114,11 +114,10 @@ class MultiplexNodeWrapper:
         return []
 
 
-# TODO: NodeWrapper is async solely because train() needs to yield for pause/resume.
+# TODO: NodeWrapper is async solely because train() uses asyncio.sleep(0) to yield.
 # This makes every ray.get inside the actor (e.g. CachedDataLoader) block the event
 # loop and trigger warnings. Consider splitting into separate training and sampling
-# actors — sampling reads best_model which is independent of training state, so it
-# doesn't actually need to pause training. Weight sync on validation improvement only.
+# actors — sampling reads best_model which is independent of training state.
 @ray.remote
 class NodeWrapper:
     def __init__(self, node, graph, model_path=None, log_config=None):
@@ -408,18 +407,6 @@ class NodeWrapper:
         if self.estimator_instance is not None:
             node_dir.mkdir(parents=True, exist_ok=True)
             return self.estimator_instance.load(node_dir)
-
-    def pause(self):
-        if self.estimator_instance is not None:
-            return self.estimator_instance.pause()
-
-    def resume(self):
-        if self.estimator_instance is not None:
-            return self.estimator_instance.resume()
-
-    def interrupt(self):
-        if self.estimator_instance is not None:
-            return self.estimator_instance.interrupt()
 
     def get_status(self) -> dict:
         """Return current status for monitoring."""
@@ -872,26 +859,3 @@ class DeployedGraph:
             load_futures.append(load_future)
         ray.get(load_futures)
 
-    def pause(self):
-        """Pause all nodes in the deployed graph."""
-        pause_futures = []
-        for _, node in self.wrapped_nodes_dict.items():
-            pause_future = node.pause.remote()
-            pause_futures.append(pause_future)
-        ray.get(pause_futures)
-
-    def resume(self):
-        """Resume all nodes in the deployed graph."""
-        resume_futures = []
-        for _, node in self.wrapped_nodes_dict.items():
-            resume_future = node.resume.remote()
-            resume_futures.append(resume_future)
-        ray.get(resume_futures)
-
-    def interrupt(self):
-        """Interrupt all nodes in the deployed graph."""
-        interrupt_futures = []
-        for _, node in self.wrapped_nodes_dict.items():
-            interrupt_future = node.interrupt.remote()
-            interrupt_futures.append(interrupt_future)
-        ray.get(interrupt_futures)

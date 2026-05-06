@@ -100,16 +100,6 @@ class BaseEstimator(ABC):
         pass
 
     @abstractmethod
-    def pause(self) -> None:
-        """Pause training loop."""
-        pass
-
-    @abstractmethod
-    def resume(self) -> None:
-        """Resume training loop."""
-        pass
-
-    @abstractmethod
     def interrupt(self) -> None:
         """Terminate training loop."""
         pass

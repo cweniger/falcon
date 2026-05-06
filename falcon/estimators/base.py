@@ -25,7 +25,6 @@ class TrainingLoopConfig:
     num_epochs: int = 100
     batch_size: int = 128
     early_stop_patience: int = 16
-    reset_network_after_pause: bool = False
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
     max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
     cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
@@ -56,7 +55,7 @@ class StepwiseEstimator(BaseEstimator):
 
     Provides concrete implementations for:
     - train() with epoch iteration and early stopping
-    - pause/resume/interrupt
+    - interrupt
 
     Subclasses must implement:
     - train_step() / val_step() / on_epoch_end()
@@ -89,11 +88,7 @@ class StepwiseEstimator(BaseEstimator):
         self.theta_key = theta_key
         self.condition_keys = condition_keys or []
 
-        # Async control
-        self._pause_event = asyncio.Event()
-        self._pause_event.set()
         self._terminated = False
-        self._break_flag = False
 
         # Networks initialized flag (managed by subclass)
         self.networks_initialized = False
@@ -229,10 +224,6 @@ class StepwiseEstimator(BaseEstimator):
                     log({f"train:{k}": v})
 
                 await asyncio.sleep(0)
-                await self._pause_event.wait()
-                if self._break_flag:
-                    self._break_flag = False
-                    break
 
             train_metrics_avg = {
                 k: v / num_train_batches for k, v in train_metrics_sum.items()
@@ -253,10 +244,6 @@ class StepwiseEstimator(BaseEstimator):
                 num_val_samples += bs
 
                 await asyncio.sleep(0)
-                await self._pause_event.wait()
-                if self._break_flag:
-                    self._break_flag = False
-                    break
 
             val_metrics_avg = {
                 k: v / num_val_samples for k, v in val_metrics_sum.items()
@@ -307,7 +294,6 @@ class StepwiseEstimator(BaseEstimator):
                 info("Early stopping triggered.")
                 break
 
-            await self._pause_event.wait()
             if self._terminated:
                 break
 
@@ -329,23 +315,9 @@ class StepwiseEstimator(BaseEstimator):
         except Exception:
             pass
 
-    # ==================== Pause/Resume/Interrupt ====================
-
-    def pause(self) -> None:
-        """Pause training loop."""
-        self._pause_event.clear()
-
-    def resume(self) -> None:
-        """Resume training loop."""
-        if self.loop_config.reset_network_after_pause:
-            self.networks_initialized = False
-            self._break_flag = True
-        self._pause_event.set()
-
     def interrupt(self) -> None:
         """Terminate training loop."""
         self._terminated = True
-        self._pause_event.set()
 
 
 # ==================== LossBasedEstimator ====================
