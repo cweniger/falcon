@@ -47,7 +47,7 @@ class RunningNorm(nn.Module):
 
         if self.training:
             # Compute batch mean and variance over specified dims
-            batch_mean = x.mean(dim=dim, keepdim=True)
+            batch_mean = x.mean(dim=dim, keepdim=True).detach()
             batch_var = ((x - self.running_mean) ** 2).mean(dim=dim, keepdim=True).detach()
 
             if self.adaptive_momentum:

@@ -212,7 +212,7 @@ class NodeWrapper:
         elif hasattr(self.estimator_instance, 'history'):
             losses = self.estimator_instance.history.get('val_loss', [])
             if losses:
-                final_loss = losses[-1]
+                final_loss = min(losses)
 
         if final_loss is not None:
             info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
@@ -610,6 +610,9 @@ class DeployedGraph:
 
         for name in node_order:
             if name in ref_trace:
+                # FIXME: conditioned nodes are skipped, so their refs are missing
+                # from sample_refs. Callers must manually merge them back (see
+                # training loop). _execute_graph should insert them directly.
                 continue
 
             # Build condition refs for this node (parents always, evidence for inference)
@@ -785,13 +788,25 @@ class DeployedGraph:
                     # no pause needed. Forward simulation runs on separate actors concurrently.
                     proposal_refs = self.sample_proposal(num_new_samples, observations)
                     condition_refs = self._extract_value_refs(proposal_refs)
-                    for key in observations:
-                        condition_refs.pop(key, None)
+                    # Only keep latent nodes (with estimators) from proposal.
+                    # Deterministic intermediates and observed nodes must be
+                    # re-simulated to maintain data consistency.
+                    latent_nodes = {n.name for n in self.graph.node_list
+                                    if n.estimator_cls is not None}
+                    condition_refs = {k: v for k, v in condition_refs.items()
+                                      if k in latent_nodes}
                     sample_refs = self._execute_graph(
                         num_new_samples, self.graph.forward_order, condition_refs, "sample"
                     )
+                    # Only merge latent node values from proposal into
+                    # sample_refs.  Deterministic intermediates (e.g. tokens)
+                    # were correctly re-simulated in _execute_graph above and
+                    # must not be overwritten with observation-based values.
                     for i, prop_ref in enumerate(proposal_refs):
-                        sample_refs[i].update(prop_ref)
+                        sample_refs[i].update(
+                            {k: v for k, v in prop_ref.items()
+                             if k.split(".")[0] in latent_nodes}
+                        )
                     ray.get(dataset_manager.append_refs.remote(sample_refs))
 
             # Periodic status update (every ~60 seconds)
