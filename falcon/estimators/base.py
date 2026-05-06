@@ -632,7 +632,10 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from the posterior distribution q(theta|x)."""
-        return self._sample(num_samples, conditions, gamma=None)
+        # TODO: refactor — this corrects for the bias from training on proposal data.
+        gamma = self.inference_config.gamma
+        gamma_correct = (1 + gamma) / gamma if gamma is not None else None
+        return self._sample(num_samples, conditions, gamma=gamma_correct)
 
     def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from widened proposal distribution for adaptive resampling."""
