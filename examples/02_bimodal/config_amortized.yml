@@ -48,7 +48,6 @@ graph:
         num_epochs: 300
         batch_size: 128
         early_stop_patience: 32
-        reset_network_after_pause: false
       network:
         net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
         theta_norm: true
