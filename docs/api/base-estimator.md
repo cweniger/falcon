@@ -10,7 +10,7 @@ methods for:
 - Training (`train`)
 - Sampling (`sample_prior`, `sample_posterior`, `sample_proposal`)
 - Persistence (`save`, `load`)
-- Control flow (`pause`, `resume`, `interrupt`)
+- Control flow (`interrupt`)
 
 ## Class Reference
 
@@ -24,6 +24,4 @@ methods for:
         - sample_proposal
         - save
         - load
-        - pause
-        - resume
         - interrupt
