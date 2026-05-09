@@ -6,12 +6,10 @@ along with base classes for building custom estimators.
 Flow requires the sbi package: pip install falcon-sbi[sbi]
 """
 
-from falcon.estimators.base import (
+from falcon.estimators.stepwise_base import (
     StepwiseEstimator,
     LossBasedEstimator,
     TrainingLoopConfig,
-    OptimizerConfig,
-    InferenceConfig,
 )
 from falcon.estimators.gaussian import (
     Gaussian,
@@ -31,8 +29,6 @@ __all__ = [
     "StepwiseEstimator",
     "LossBasedEstimator",
     "TrainingLoopConfig",
-    "OptimizerConfig",
-    "InferenceConfig",
 ]
 
 # Lazy imports for sbi-dependent classes
