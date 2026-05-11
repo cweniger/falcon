@@ -53,7 +53,7 @@ buffer:
   min_samples: 4096
   max_samples: 32768
   validation_samples: 256
-  simulate_count: 128
+  simulate_count: 64
   simulate_interval: 10
   simulate_when_full: true
   store_fraction: 0.0
@@ -64,7 +64,7 @@ buffer:
 | `min_samples` | int | — | Minimum training samples required before training starts |
 | `max_samples` | int | — | Maximum training samples retained; older samples are disfavoured once this is exceeded |
 | `validation_samples` | int | — | Number of samples held out for validation (used for early stopping) |
-| `simulate_count` | int | `256` | Number of new samples generated per simulation round |
+| `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
 | `store_fraction` | float | `0.0` | Fraction of simulated samples written to `samples_dir/buffer/` for inspection (0 = none, 1 = all) |

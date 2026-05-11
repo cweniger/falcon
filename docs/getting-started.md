@@ -61,7 +61,7 @@ buffer:
   min_samples: 1000
   max_samples: 10000
   validation_samples: 256
-  simulate_count: 128
+  simulate_count: 64
   simulate_interval: 10
 
 graph:
