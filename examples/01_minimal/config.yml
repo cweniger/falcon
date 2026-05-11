@@ -58,7 +58,7 @@ buffer:
   validation_samples: 256               # Size of validation split (for early stopping)
   simulate_count: 64                    # Number of new samples generated per simulation round
   simulate_when_full: true              # If true, keep simulating when buffer is full (old samples disfavoured); if false, stop at max_samples
-  simulate_interval: 10                 # Seconds between simulation rounds
+  simulate_interval: 1                  # Seconds between simulation rounds
   store_fraction: 0.1                   # Fraction of samples to dump to samples_dir/buffer/ (0=none, 1=all)
 
 # -----------------------------------------------------------------------------

@@ -54,7 +54,7 @@ buffer:
   max_samples: 32768
   validation_samples: 256
   simulate_count: 64
-  simulate_interval: 10
+  simulate_interval: 1
   simulate_when_full: true
   store_fraction: 0.0
 ```

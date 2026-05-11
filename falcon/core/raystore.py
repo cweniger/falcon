@@ -659,7 +659,7 @@ def get_ray_dataset_manager(
     max_samples=None,
     validation_samples=None,
     simulate_count=64,
-    simulate_interval=5,
+    simulate_interval=1,
     simulate_chunk_size=0,
     initial_samples_path=None,
     simulate_when_full=True,

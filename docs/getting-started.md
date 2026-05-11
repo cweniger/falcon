@@ -62,7 +62,7 @@ buffer:
   max_samples: 10000
   validation_samples: 256
   simulate_count: 64
-  simulate_interval: 10
+  simulate_interval: 1
 
 graph:
   theta:
