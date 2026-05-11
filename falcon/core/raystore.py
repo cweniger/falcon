@@ -115,7 +115,7 @@ class DatasetManagerActor:
         min_samples=None,  # TODO: Minimum number of simulations to train on
         validation_samples=None,  # TODO: Number of sliding validation sims
         simulate_count=256,
-        simulate_interval=5,
+        simulate_interval=1,
         simulate_chunk_size=0,
         initial_samples_path=None,
         simulate_when_full=True,

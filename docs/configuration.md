@@ -65,7 +65,7 @@ buffer:
 | `max_samples` | int | — | Maximum training samples retained; older samples are disfavoured once this is exceeded |
 | `validation_samples` | int | — | Number of samples held out for validation (used for early stopping) |
 | `simulate_count` | int | `256` | Number of new samples generated per simulation round |
-| `simulate_interval` | float | `5` | Seconds between simulation rounds |
+| `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
 | `store_fraction` | float | `0.0` | Fraction of simulated samples written to `samples_dir/buffer/` for inspection (0 = none, 1 = all) |
 

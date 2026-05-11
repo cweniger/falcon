@@ -30,25 +30,6 @@ from falcon.estimators.stepwise_base import (
     LossBasedEstimator,
     TrainingLoopConfig,
 )
-
-
-@dataclass
-class OptimizerConfig:
-    """Optimizer and scheduler parameters."""
-
-    lr: float = 1e-3
-    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
-    lr_decay_factor: float = 0.1
-    scheduler_patience: int = 8
-
-
-@dataclass
-class InferenceConfig:
-    """Inference and sampling parameters."""
-
-    gamma: float = 0.5
-    discard_samples: bool = False
-    log_ratio_threshold: float = -20.0
 from falcon.core.logger import log, debug, info, warning, error
 
 
@@ -66,8 +47,23 @@ class NetworkConfig:
     eig_update_freq: int = 1
 
 
-def _default_optimizer_config():
-    return OptimizerConfig(lr=1e-2)
+@dataclass
+class OptimizerConfig:
+    """Optimizer and scheduler parameters."""
+
+    lr: float = 1e-2
+    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
+    lr_decay_factor: float = 0.1
+    scheduler_patience: int = 8
+
+
+@dataclass
+class InferenceConfig:
+    """Inference and sampling parameters."""
+
+    gamma: float = 0.5
+    discard_samples: bool = False
+    log_ratio_threshold: float = -20.0
 
 
 @dataclass
@@ -76,7 +72,7 @@ class GaussianConfig:
 
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
     network: NetworkConfig = field(default_factory=NetworkConfig)
-    optimizer: OptimizerConfig = field(default_factory=_default_optimizer_config)
+    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     embedding: Optional[Any] = None
     device: Optional[str] = None
