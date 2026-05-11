@@ -14,17 +14,14 @@ from falcon.estimators.stepwise_base import (
 from falcon.estimators.gaussian import (
     Gaussian,
     GaussianConfig,
-    GaussianPosteriorConfig,
     GaussianPosterior,
 )
 
 __all__ = [
     "Flow",
     "FlowConfig",
-    "NetworkConfig",
     "Gaussian",
     "GaussianConfig",
-    "GaussianPosteriorConfig",
     "GaussianPosterior",
     "StepwiseEstimator",
     "LossBasedEstimator",
@@ -35,7 +32,6 @@ __all__ = [
 _LAZY_IMPORTS = {
     "Flow": "falcon.estimators.flow",
     "FlowConfig": "falcon.estimators.flow",
-    "NetworkConfig": "falcon.estimators.flow",
 }
 
 

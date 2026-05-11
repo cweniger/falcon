@@ -56,7 +56,7 @@ from falcon.core.logger import log, debug, info, warning, error
 
 
 @dataclass
-class GaussianPosteriorConfig:
+class NetworkConfig:
     """Configuration for GaussianPosterior network."""
 
     hidden_dim: int = 128
@@ -75,7 +75,7 @@ class GaussianConfig:
     """Top-level Gaussian estimator configuration."""
 
     loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
-    network: GaussianPosteriorConfig = field(default_factory=GaussianPosteriorConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
     optimizer: OptimizerConfig = field(default_factory=_default_optimizer_config)
     inference: InferenceConfig = field(default_factory=InferenceConfig)
     embedding: Optional[Any] = None
@@ -293,7 +293,7 @@ def Gaussian(
         condition_keys: Keys for condition data in batch
         config: Configuration dict with sections:
             - loop: TrainingLoopConfig options
-            - network: GaussianPosteriorConfig options
+            - network: NetworkConfig options
             - optimizer: OptimizerConfig options
             - inference: InferenceConfig options
             - embedding: Embedding configuration with _target_
