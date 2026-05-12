@@ -1,11 +1,29 @@
 import numpy as np
 import asyncio
 import sys
+from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
+from typing import Optional
 
 import ray
+from omegaconf import MISSING
 from falcon.core.logger import Logger, set_logger, log, info, error
+
+
+@dataclass
+class BufferConfig:
+    """Configuration for the rolling sample buffer."""
+
+    min_samples: int = MISSING
+    max_samples: int = MISSING
+    validation_samples: int = MISSING
+    simulate_count: int = 64
+    simulate_interval: float = 1.0
+    simulate_chunk_size: int = 0
+    simulate_when_full: bool = True
+    initial_samples_path: Optional[str] = None
+    store_fraction: float = 0.0
 
 
 class Batch:
@@ -111,16 +129,16 @@ class SampleStatus(IntEnum):
 class DatasetManagerActor:
     def __init__(
         self,
-        max_samples=None,  # TODO: Maximum number of simulations to store
-        min_samples=None,  # TODO: Minimum number of simulations to train on
-        validation_samples=None,  # TODO: Number of sliding validation sims
-        simulate_count=256,
-        simulate_interval=5,
-        simulate_chunk_size=0,
-        initial_samples_path=None,
-        simulate_when_full=True,
-        samples_path=None,
-        store_fraction=0.0,
+        max_samples,
+        min_samples,
+        validation_samples,
+        simulate_count,
+        simulate_interval,
+        simulate_chunk_size,
+        initial_samples_path,
+        simulate_when_full,
+        samples_path,
+        store_fraction,
         log_config=None,
     ):
         self.max_samples = max_samples
@@ -655,30 +673,15 @@ class BufferView:
 
 
 def get_ray_dataset_manager(
-    min_samples=None,
-    max_samples=None,
-    validation_samples=None,
-    simulate_count=64,
-    simulate_interval=5,
-    simulate_chunk_size=0,
-    initial_samples_path=None,
-    simulate_when_full=True,
+    config: BufferConfig,
     samples_path=None,
-    store_fraction=0.0,
     log_config=None,
 ):
+    from omegaconf import OmegaConf
+    cfg = OmegaConf.to_container(config, resolve=True) if not isinstance(config, dict) else config
     dataset_manager_actor = DatasetManagerActor.remote(
-        min_samples=min_samples,
-        max_samples=max_samples,
-        validation_samples=validation_samples,
-        simulate_count=simulate_count,
-        simulate_interval=simulate_interval,
-        simulate_chunk_size=simulate_chunk_size,
-        simulate_when_full=simulate_when_full,
-        initial_samples_path=initial_samples_path,
+        **cfg,
         samples_path=samples_path,
-        store_fraction=store_fraction,
         log_config=log_config,
     )
-    dataset_manager = DatasetManager(dataset_manager_actor)
-    return dataset_manager
+    return DatasetManager(dataset_manager_actor)

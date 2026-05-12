@@ -48,20 +48,18 @@ Controls the training process.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `num_epochs` | int | 300 | Maximum training epochs |
+| `num_epochs` | int | 100 | Maximum training epochs |
 | `batch_size` | int | 128 | Training batch size |
-| `early_stop_patience` | int | 32 | Epochs without improvement before stopping |
-| `reset_network_after_pause` | bool | false | Reset network weights when training resumes after pause |
+| `early_stop_patience` | int | 16 | Epochs without improvement before stopping |
 | `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
 | `max_cache_samples` | int | 0 | Maximum samples to cache (0 = cache all available) |
 | `cache_on_device` | bool | false | Keep cached training data on the estimator's device (e.g. GPU) |
 
 ```yaml
 loop:
-  num_epochs: 300
+  num_epochs: 100
   batch_size: 128
-  early_stop_patience: 32
-  reset_network_after_pause: false
+  early_stop_patience: 16
   cache_sync_every: 0
   max_cache_samples: 0
   cache_on_device: false
@@ -81,17 +79,17 @@ Defines the neural network structure.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `net_type` | str | `nsf` | Flow architecture (see [FlowDensity](flow-density.md) for all types) |
+| `net_type` | str | `zuko_nice` | Flow architecture (see [FlowDensity](flow-density.md) for all types) |
 | `theta_norm` | bool | true | Normalize parameter space |
-| `norm_momentum` | float | 0.003 | Momentum for online normalization updates |
+| `norm_momentum` | float | 0.01 | Momentum for online normalization updates |
 | `use_log_update` | bool | false | Use log-space variance updates |
 | `adaptive_momentum` | bool | false | Sample-dependent momentum |
 
 ```yaml
 network:
-  net_type: nsf
+  net_type: zuko_nice
   theta_norm: true
-  norm_momentum: 0.003
+  norm_momentum: 0.01
   use_log_update: false
   adaptive_momentum: false
 ```
@@ -115,14 +113,14 @@ Controls learning rate and scheduling.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `lr` | float | 0.01 | Initial learning rate |
-| `lr_decay_factor` | float | 0.5 | LR multiplier when plateau detected |
-| `scheduler_patience` | int | 16 | Epochs without improvement before LR decay |
+| `lr_decay_factor` | float | 0.1 | LR multiplier when plateau detected |
+| `scheduler_patience` | int | 8 | Epochs without improvement before LR decay |
 
 ```yaml
 optimizer:
   lr: 0.01
-  lr_decay_factor: 0.5
-  scheduler_patience: 16
+  lr_decay_factor: 0.1
+  scheduler_patience: 8
 ```
 
 ### Inference (`inference`)
@@ -132,7 +130,7 @@ Controls posterior sampling and amortization.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `gamma` | float | 0.5 | Amortization mixing coefficient (0=focused, 1=amortized) |
-| `discard_samples` | bool | false | Discard low-likelihood samples during training |
+| `discard_samples` | bool | true | Discard low-likelihood samples during training |
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
 | `use_best_models_during_inference` | bool | true | Use best validation model for sampling |
@@ -140,7 +138,7 @@ Controls posterior sampling and amortization.
 ```yaml
 inference:
   gamma: 0.5
-  discard_samples: false
+  discard_samples: true
   log_ratio_threshold: -20
   sample_reference_posterior: false
   use_best_models_during_inference: true
@@ -211,16 +209,16 @@ graph:
       _target_: falcon.estimators.Flow
 
       loop:
-        num_epochs: 300
+        num_epochs: 100
         batch_size: 128
-        early_stop_patience: 32
+        early_stop_patience: 16
         cache_sync_every: 0
         max_cache_samples: 0
 
       network:
-        net_type: nsf
+        net_type: zuko_nice
         theta_norm: true
-        norm_momentum: 0.003
+        norm_momentum: 0.01
 
       embedding:
         _target_: model.E
@@ -228,12 +226,12 @@ graph:
 
       optimizer:
         lr: 0.01
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
+        lr_decay_factor: 0.1
+        scheduler_patience: 8
 
       inference:
         gamma: 0.5
-        discard_samples: false
+        discard_samples: true
         log_ratio_threshold: -20
 
     ray:

@@ -4,7 +4,7 @@ import asyncio
 import copy
 import time
 from abc import abstractmethod
-from dataclasses import dataclass, field
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any, Callable, Dict, List, Optional, Tuple, Type
 
@@ -28,25 +28,6 @@ class TrainingLoopConfig:
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
     max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
     cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
-
-
-@dataclass
-class OptimizerConfig:
-    """Optimizer and scheduler parameters."""
-
-    lr: float = 1e-3
-    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
-    lr_decay_factor: float = 0.1
-    scheduler_patience: int = 8
-
-
-@dataclass
-class InferenceConfig:
-    """Inference and sampling parameters."""
-
-    gamma: float = 0.5
-    discard_samples: bool = False
-    log_ratio_threshold: float = -20.0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -344,8 +325,8 @@ class LossBasedEstimator(StepwiseEstimator):
         posterior_cls: Type[nn.Module],
         embedding_config: dict,
         loop_config: TrainingLoopConfig,
-        optimizer_config: OptimizerConfig,
-        inference_config: InferenceConfig,
+        optimizer_config: Any,
+        inference_config: Any,
         posterior_config: Optional[dict] = None,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,

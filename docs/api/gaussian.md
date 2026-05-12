@@ -129,4 +129,4 @@ sample:
 
 ::: falcon.estimators.gaussian.GaussianConfig
 
-::: falcon.estimators.gaussian.GaussianPosteriorConfig
+::: falcon.estimators.gaussian.NetworkConfig

@@ -489,17 +489,12 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     )
 
     # 2) Prepare dataset manager for deployed graph and store initial samples
+    from omegaconf import OmegaConf
+    from falcon.core.raystore import BufferConfig
+    buffer_cfg = OmegaConf.merge(OmegaConf.structured(BufferConfig), cfg.buffer)
     dataset_manager = falcon.get_ray_dataset_manager(
-        min_samples=cfg.buffer.min_samples,
-        max_samples=cfg.buffer.max_samples,
-        validation_samples=cfg.buffer.validation_samples,
-        simulate_count=cfg.buffer.simulate_count,
-        simulate_interval=cfg.buffer.simulate_interval,
-        simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
-        simulate_when_full=cfg.buffer.simulate_when_full,
-        initial_samples_path=cfg.buffer.get("initial_samples_path", None),
+        buffer_cfg,
         samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
-        store_fraction=cfg.buffer.get("store_fraction", 0.0),
         log_config=logging_cfg,
     )
 
