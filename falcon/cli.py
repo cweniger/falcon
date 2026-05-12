@@ -294,6 +294,51 @@ class _GracefulShutdown:
         return self._stopping
 
 
+def _build_run_summary(status, output_dir, cfg, deployed_graph):
+    """Build a compact end-of-run summary as a list of text lines.
+
+    Always returns something printable even if the monitor bridge is
+    unreachable; per-node details are best-effort.
+    """
+    lines = []
+    lines.append("=" * 60)
+    lines.append(f"falcon launch {status}")
+    lines.append(f"Output:  {output_dir}")
+    lines.append(f"Graph:   {cfg.paths.graph}")
+    samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    lines.append(f"Samples: {samples_path}")
+    try:
+        import ray
+        bridge = getattr(deployed_graph, "monitor_bridge", None) if deployed_graph else None
+        if bridge is not None:
+            status_dict = ray.get(bridge.get_status.remote(), timeout=5.0)
+            nodes = status_dict.get("nodes", {})
+            if nodes:
+                lines.append("Nodes:")
+                for name, ns in nodes.items():
+                    parts = [str(ns.get("status", "?"))]
+                    total_epochs = ns.get("total_epochs", 0)
+                    if total_epochs:
+                        parts.append(f"{ns.get('current_epoch', 0)}/{total_epochs} epochs")
+                    loss = ns.get("loss")
+                    if loss is not None:
+                        parts.append(f"loss={loss:.4g}")
+                    sims = ns.get("samples", 0)
+                    if sims:
+                        parts.append(f"{sims} sims")
+                    lines.append(f"  {name}: {' | '.join(parts)}")
+            buf = status_dict.get("buffer", {})
+            if isinstance(buf, dict) and ("training" in buf or "validation" in buf):
+                lines.append(
+                    f"Buffer:  {buf.get('training', 0)} training, "
+                    f"{buf.get('validation', 0)} validation"
+                )
+    except Exception:
+        pass  # Best-effort; the path lines above are the essential receipt
+    lines.append("=" * 60)
+    return lines
+
+
 def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     """Save generated samples to disk.
 
@@ -568,6 +613,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 return True
         return False
 
+    run_status = "completed"
     try:
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
@@ -595,14 +641,38 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 info_fn=info,
             )
 
+    except KeyboardInterrupt:
+        run_status = "interrupted"
+        raise
+    except Exception as e:
+        run_status = f"failed ({type(e).__name__}: {e})"
+        raise
     finally:
         ##########################
         ### Clean up resources ###
         ##########################
 
+        # A graceful Ctrl+C / timeout exits the launch normally, not via an
+        # exception, so reflect that here.
+        if run_status == "completed":
+            if (display and display.stop_requested) or (
+                shutdown_handler and shutdown_handler.stop_requested
+            ):
+                run_status = "interrupted"
+
+        # Build the end-of-run summary and route it through the driver logger
+        # so it lands in driver/output.log (and, in plain mode, on stdout).
+        summary_lines = _build_run_summary(run_status, output_dir, cfg, deployed_graph)
+        for line in summary_lines:
+            info(line)
+
         # Stop interactive display first (restores terminal)
         if display:
             display.stop()
+            # The TUI used the alternate screen buffer, so nothing the user
+            # saw survives. Echo the summary to real stdout as the receipt.
+            for line in summary_lines:
+                print(line)
 
         # Uninstall shutdown handler
         if shutdown_handler:
