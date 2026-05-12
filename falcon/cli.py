@@ -304,9 +304,17 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph):
     lines.append("=" * 60)
     lines.append(f"falcon launch {status}")
     lines.append(f"Output:  {output_dir}")
-    lines.append(f"Graph:   {cfg.paths.graph}")
     samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
     lines.append(f"Samples: {samples_path}")
+    graph_path = Path(cfg.paths.graph)
+    lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
+    try:
+        node_names = list(cfg.graph.keys())
+    except Exception:
+        node_names = []
+    if node_names:
+        node_glob = "{" + ",".join(node_names) + "}" if len(node_names) > 1 else node_names[0]
+        lines.append(f"         {graph_path / node_glob / 'output.log'}  (per-node)")
     try:
         import ray
         bridge = getattr(deployed_graph, "monitor_bridge", None) if deployed_graph else None
