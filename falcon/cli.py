@@ -327,8 +327,12 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
     except Exception:
         node_names = []
     if node_names:
-        node_glob = "{" + ",".join(node_names) + "}" if len(node_names) > 1 else node_names[0]
-        lines.append(f"         {graph_path / node_glob / 'output.log'}  (per-node)")
+        n = len(node_names)
+        if n <= 6:
+            suffix = f"(per-node: {', '.join(node_names)})"
+        else:
+            suffix = f"(per-node, {n} nodes)"
+        lines.append(f"         {graph_path / '<node>' / 'output.log'}  {suffix}")
     if start_time is not None:
         lines.append(f"Started: {datetime.fromtimestamp(start_time):%Y-%m-%d %H:%M:%S}")
     if end_time is not None:
