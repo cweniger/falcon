@@ -1,8 +1,8 @@
 # Falcon
 
-**A Python framework for simulation-based inference with adaptive learning.**
+**Factorized Adaptive Learning of Conditional Orchestrated Networks**
 
-Falcon enables adaptive learning of complex conditional distributions through a declarative YAML-based approach. Built on PyTorch, Ray, and the sbi library, it provides automatic parallelization and experiment tracking.
+Falcon is a Python framework for simulation-based inference (SBI) with adaptive learning. It enables learning of complex conditional distributions through a declarative YAML-based approach, with distributed network training orchestrated via Ray.
 
 ## Key Features
 

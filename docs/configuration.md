@@ -31,18 +31,18 @@ Configure file paths:
 
 ```yaml
 paths:
-  import_path: "."
-  buffer_dir: "sim_dir"
-  graph_dir: "graph_dir"
-  samples_dir: "samples_dir"
+  import: "."
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `import_path` | str | `"."` | Path to import custom modules |
-| `buffer_dir` | str | `"sim_dir"` | Simulation buffer directory |
-| `graph_dir` | str | `"graph_dir"` | Trained models directory |
-| `samples_dir` | str | `"samples_dir"` | Output samples directory |
+| `import` | str | `"."` | Path to import custom modules |
+| `buffer` | str | `${run_dir}/sim_dir` | Simulation buffer directory |
+| `graph` | str | `${run_dir}/graph_dir` | Trained models directory |
+| `samples` | str | `${run_dir}/samples_dir` | Output samples directory |
 
 ### `buffer`
 
