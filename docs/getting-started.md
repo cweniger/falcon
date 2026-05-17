@@ -37,8 +37,7 @@ import numpy as np
 class Simulator:
     """Simple Gaussian simulator."""
 
-    def sample(self, batch_dim, parent_conditions=[]):
-        theta = parent_conditions[0]  # Parameters from parent node
+    def simulate_batch(self, batch_size, theta):
         noise = np.random.randn(*theta.shape) * 0.1
         return theta + noise
 ```
@@ -55,7 +54,7 @@ logging:
     enabled: true
 
 paths:
-  import_path: "."
+  import: "."
 
 buffer:
   min_samples: 1000

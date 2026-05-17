@@ -134,6 +134,11 @@ Controls posterior sampling and amortization.
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
 | `use_best_models_during_inference` | bool | true | Use best validation model for sampling |
+| `num_proposals` | int | 256 | Candidate samples drawn from the flow for importance sampling |
+| `reference_samples` | int | 128 | Samples used to evaluate the reference posterior |
+| `hypercube_bound` | float | 2.0 | Out-of-bounds threshold in hypercube space |
+| `out_of_bounds_penalty` | float | 100.0 | Log-weight penalty applied to out-of-bounds proposals |
+| `nan_replacement` | float | -100.0 | Log-weight substituted for NaN values during importance sampling |
 
 ```yaml
 inference:
