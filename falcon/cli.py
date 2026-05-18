@@ -497,7 +497,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
             display = InteractiveDisplay(footer_height=log_lines + 4)
             display.start()
         except ImportError:
-            print("Interactive display unavailable (pip install blessed to enable it)")
+            print("Interactive display unavailable (install falcon-sbi[blessed] to enable it)")
     if display is None:
         # Non-interactive mode: install double Ctrl+C handler
         shutdown_handler = _GracefulShutdown()
@@ -842,7 +842,7 @@ def monitor_mode(address: str = "auto", refresh: float = 1.0):
     try:
         from falcon.monitor import init_ray_for_monitor, FalconMonitor
     except ImportError:
-        print("falcon monitor requires textual. Install with: pip install 'falcon-sbi[monitor]'")
+        print("falcon monitor requires falcon-sbi[monitor]")
         sys.exit(1)
     if not init_ray_for_monitor(address):
         sys.exit(1)
