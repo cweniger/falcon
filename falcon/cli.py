@@ -497,7 +497,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
             display = InteractiveDisplay(footer_height=log_lines + 4)
             display.start()
         except ImportError:
-            print("Install blessed to get a blessed experience: pip install blessed")
+            print("Interactive display unavailable (pip install blessed to enable it)")
     if display is None:
         # Non-interactive mode: install double Ctrl+C handler
         shutdown_handler = _GracefulShutdown()
