@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "falcon-sbi"
-version = "0.4.0"
+version = "0.4.1"
 description = "CLI-driven framework for simulation-based inference with large simulators"
 readme = "README.md"
 license = "Apache-2.0"
@@ -29,7 +29,8 @@ dependencies = [
 sbi = ["sbi>=0.18"]
 wandb = ["wandb>=0.15.0"]
 monitor = ["textual>=0.40.0"]
-all = ["sbi>=0.18", "wandb>=0.15.0", "textual>=0.40.0"]
+blessed = ["blessed>=1.20"]
+all = ["sbi>=0.18", "wandb>=0.15.0", "textual>=0.40.0", "blessed>=1.20"]
 docs = [
     "mkdocs>=1.5",
     "mkdocs-material>=9.0",
