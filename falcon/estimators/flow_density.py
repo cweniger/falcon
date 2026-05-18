@@ -16,7 +16,7 @@ def _get_net_builders():
         from sbi.neural_nets import net_builders
     except ImportError:
         raise ImportError(
-            "sbi is required for flow-based estimators (falcon-sbi[sbi])"
+            "python module sbi is required for flow-based estimators (falcon-sbi[sbi])"
         )
     return {
         "nsf": net_builders.build_nsf,
