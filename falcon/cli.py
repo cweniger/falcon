@@ -583,24 +583,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     ### Run analysis ###
     ####################
 
-    # 1) Deploy graph (pass logging config)
-    deployed_graph = falcon.DeployedGraph(
-        graph,
-        model_path=cfg.paths.get("import"),
-        log_config=logging_cfg,
-    )
-
-    # 2) Prepare dataset manager for deployed graph and store initial samples
-    from omegaconf import OmegaConf
-    from falcon.core.raystore import BufferConfig
-    buffer_cfg = OmegaConf.merge(OmegaConf.structured(BufferConfig), cfg.buffer)
-    dataset_manager = falcon.get_ray_dataset_manager(
-        buffer_cfg,
-        samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
-        log_config=logging_cfg,
-    )
-
-    # 3) Start status polling thread for interactive mode
+    # Start status polling thread for interactive mode
     status_thread = None
     graph_path = Path(cfg.paths.graph)
     if display:
@@ -647,7 +630,6 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         status_thread = threading.Thread(target=poll_status, daemon=True)
         status_thread.start()
 
-    # 4) Launch training & simulations
     # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
     _start_time = _time.time()
     _timeout_logged = False
@@ -670,7 +652,25 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         return False
 
     run_status = "completed"
+    deployed_graph = None
     try:
+        # 1) Deploy graph (pass logging config)
+        deployed_graph = falcon.DeployedGraph(
+            graph,
+            model_path=cfg.paths.get("import"),
+            log_config=logging_cfg,
+        )
+
+        # 2) Prepare dataset manager for deployed graph and store initial samples
+        from omegaconf import OmegaConf as _OmegaConf
+        from falcon.core.raystore import BufferConfig as _BufferConfig
+        buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        dataset_manager = falcon.get_ray_dataset_manager(
+            buffer_cfg,
+            samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
+            log_config=logging_cfg,
+        )
+
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
         #############################
@@ -737,7 +737,8 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         if shutdown_handler:
             shutdown_handler.uninstall()
 
-        deployed_graph.shutdown()
+        if deployed_graph is not None:
+            deployed_graph.shutdown()
         driver_logger.shutdown()
 
 
