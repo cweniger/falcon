@@ -491,11 +491,14 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     display = None
     shutdown_handler = None
     if interactive:
-        from falcon.interactive import InteractiveDisplay
-        # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
-        display = InteractiveDisplay(footer_height=log_lines + 4)
-        display.start()
-    else:
+        try:
+            from falcon.interactive import InteractiveDisplay
+            # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
+            display = InteractiveDisplay(footer_height=log_lines + 4)
+            display.start()
+        except ImportError:
+            print("Install blessed to get a blessed experience: pip install blessed")
+    if display is None:
         # Non-interactive mode: install double Ctrl+C handler
         shutdown_handler = _GracefulShutdown()
         shutdown_handler.install()
@@ -836,7 +839,11 @@ def sample_mode(cfg, sample_type: str) -> None:
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
     """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
-    from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    try:
+        from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    except ImportError:
+        print("falcon monitor requires textual. Install with: pip install 'falcon-sbi[monitor]'")
+        sys.exit(1)
     if not init_ray_for_monitor(address):
         sys.exit(1)
     app = FalconMonitor(ray_address=address, refresh_interval=refresh)
