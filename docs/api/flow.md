@@ -344,4 +344,4 @@ Flow logs the following metrics during training:
 
 ::: falcon.estimators.flow.InferenceConfig
 
-::: falcon.estimators.base.TrainingLoopConfig
+::: falcon.estimators.stepwise_base.TrainingLoopConfig
