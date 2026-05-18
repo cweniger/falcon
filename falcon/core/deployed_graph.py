@@ -486,9 +486,43 @@ class DeployedGraph:
             warning(f"Could not create monitor bridge: {e}")
             self.monitor_bridge = None
 
+    def _check_resource_budget(self):
+        """Raise if node GPU/CPU requests exceed cluster capacity."""
+        cluster = ray.cluster_resources()
+        available_gpus = cluster.get("GPU", 0)
+        available_cpus = cluster.get("CPU", 0)
+
+        total_gpus = sum(
+            node.actor_config.get("num_gpus", 0) * node.num_actors
+            for node in self.graph.node_list
+        )
+        total_cpus = sum(
+            node.actor_config.get("num_cpus", 1) * node.num_actors
+            for node in self.graph.node_list
+        )
+
+        if total_gpus > available_gpus:
+            node_summary = ", ".join(
+                f"{n.name}: {n.actor_config.get('num_gpus', 0)} GPU"
+                for n in self.graph.node_list
+                if n.actor_config.get("num_gpus", 0) > 0
+            )
+            warning(
+                f"GPU over-subscription: nodes request {total_gpus:.1f} GPUs "
+                f"but only {available_gpus:.1f} available. "
+                f"Actors may hang — reduce ray.num_gpus in your config or increase "
+                f"available GPUs. ({node_summary})"
+            )
+        if total_cpus > available_cpus:
+            warning(
+                f"CPU over-subscription: nodes request {total_cpus} CPUs "
+                f"but only {available_cpus:.0f} available — actors may queue."
+            )
+
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
         info("Spinning up graph...")
+        self._check_resource_budget()
 
         # Create all actors (non-blocking)
         for node in self.graph.node_list:
@@ -511,9 +545,18 @@ class DeployedGraph:
             try:
                 # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
                 if hasattr(actor, 'wait_ready'):
-                    ray.get(actor.wait_ready.remote())
+                    ready_ref = actor.wait_ready.remote()
                 else:
-                    ray.get(actor.__ray_ready__.remote())
+                    ready_ref = actor.__ray_ready__.remote()
+                done, _ = ray.wait([ready_ref], timeout=60.0)
+                if not done:
+                    raise RuntimeError(
+                        f"Node '{name}' did not initialize within 60 s. "
+                        "This usually means Ray cannot schedule the actor — "
+                        "check that ray.num_gpus/num_cpus in your config do not "
+                        "exceed available cluster resources."
+                    )
+                ray.get(done[0])  # re-raise any actor-side exception
                 info(f"  ✓ {name}")
 
                 # Register node with monitor bridge
