@@ -1,8 +1,8 @@
 """Embedding modules for the spectral analysis example.
 
 - SVDEmbedding: Scaffolded streaming SVD embedding using fuge.StreamingPCA
-- Tokenizer: Simulator wrapper around fuge.ToneTokenizer for use as a falcon node
-- TokenEmbed: Adapter for fuge.ToneTokenEmbedding that returns only the tensor
+- Tokenizer: Simulator wrapper around fuge.ChirpTokenizer for use as a falcon node
+- TokenEmbed: Adapter for fuge.ChirpTokenEmbedding that returns only the tensor
 - SpectralTokenEmbed: Spectral (Fourier feature) embedding for token frequencies
 - Concat: Concatenation along last dimension for combining embedding streams
 """
@@ -10,7 +10,7 @@
 import math
 import torch
 import torch.nn as nn
-from fuge.spectral import ToneTokenizer, ToneTokenEmbedding
+from fuge.spectral import ChirpTokenizer, ChirpTokenEmbedding
 
 
 class SVDEmbedding(nn.Module):
@@ -49,94 +49,107 @@ class SVDEmbedding(nn.Module):
 
 
 class Tokenizer:
-    """Simulator wrapper around fuge.ToneTokenizer for use as a falcon node.
+    """Simulator wrapper around fuge.ChirpTokenizer for use as a falcon node.
 
     Takes raw signals (numpy) and returns spectral tokens (numpy).
     Used as a deterministic intermediate node between x and theta.
+    Output shape: (B, N, 9) where N = n_windows * n_peaks.
+    Fields: score, t_start, t_end, f_start, f_end, A_start, A_end, phase_start, phase_end.
     """
 
     def __init__(self, k=1024, n_peaks=3, n_dlnf=11, dlnf_min=0.0, dlnf_max=0.05):
-        self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-        self.tokenizer = ToneTokenizer(k=k, n_peaks=n_peaks, n_dlnf=n_dlnf,
-                                       dlnf_min=dlnf_min, dlnf_max=dlnf_max
-                                       ).to(self.device).double()
+        self.tokenizer = ChirpTokenizer(k=k, n_peaks=n_peaks, n_dlnf=n_dlnf,
+                                        dlnf_min=dlnf_min, dlnf_max=dlnf_max
+                                        ).cpu().double()
 
     def simulate_batch(self, batch_size, x):
-        x_tensor = torch.as_tensor(x, dtype=torch.float64, device=self.device)
+        x_tensor = torch.tensor(x, dtype=torch.float64, device="cpu")
         with torch.no_grad():
             tokens = self.tokenizer(x_tensor)
-        return tokens.cpu().numpy()
+        return tokens.data.numpy()
 
 
 class TokenEmbed(nn.Module):
-    """Adapter for fuge.ToneTokenEmbedding that returns only the tensor.
+    """Adapter for fuge.ChirpTokenEmbedding.
 
-    ToneTokenEmbedding._embed applies cos/sin/log1p feature transforms.
-    Normalization is handled by an explicit RunningNorm layer in the
-    embedding pipeline (configured in YAML), keeping feature transforms
-    separate from normalization — important for sequential SBI where
-    the data distribution shifts across rounds.
+    Wraps ChirpTokenEmbedding with sensible defaults for the spectral
+    analysis example. Normalization is handled by an explicit RunningNorm
+    layer in the embedding pipeline (configured in YAML).
 
     Args:
-        phase_mode: "center" (n_embed=5) or "boundary" (n_embed=7).
-        mask_phases: Zero out phase features (for ablation).
+        time_range: (t_min, t_max) sample-index bounds for time embedding.
+        freq_resolution: frequency resolution in cycles/sample.
+        amp_range: (A_min, A_max) for amplitude embedding.
+        phase_range: max unwrapped phase extent (radians).
     """
 
-    def __init__(self, phase_mode="center", mask_phases=False):
+    def __init__(self, time_range=(0, 100000), freq_resolution=1e-4,
+                 amp_range=(0.0, 10.0), phase_range=1000.0):
         super().__init__()
-        self.embed = ToneTokenEmbedding(phase_mode=phase_mode, mask_phases=mask_phases).double()
+        from fuge.spectral.embedding import (
+            HarmonicEmbeddingConfig, HarmonicPhaseEmbeddingConfig,
+        )
+        t_min, t_max = time_range
+        self.embed = ChirpTokenEmbedding(
+            time=HarmonicEmbeddingConfig(t_min, t_max, resolution=(t_max - t_min) / 100),
+            freq=HarmonicEmbeddingConfig(0.0, 0.5, resolution=freq_resolution),
+            amp=HarmonicEmbeddingConfig(amp_range[0], amp_range[1],
+                                        resolution=(amp_range[1] - amp_range[0]) / 20),
+            phase=HarmonicPhaseEmbeddingConfig(phi_max=phase_range, phi_resolution=0.01),
+        ).double()
 
     def forward(self, raw_tokens):
-        """Embed raw tokens and return flattened sequence.
-
-        Signal processing (feature extraction) runs in float64.
-        Output remains float64; dtype conversion is handled by
-        the downstream RunningNorm layer (output_dtype config).
+        """Embed chirp tokens.
 
         Args:
-            raw_tokens: Tensor of shape (B, W, K, 5) from ToneTokenizer.
+            raw_tokens: Tensor of shape (B, N, 9) from ChirpTokenizer.
 
         Returns:
-            Tensor of shape (B, W*K, n_embed), float64.
+            Tensor of shape (B, N, n_embed), float64.
         """
-        raw_tokens = raw_tokens.detach().double()
-        embedded = self.embed._embed(raw_tokens)  # (B, W, K, n_embed)
-        B, W, K, n_embed = embedded.shape
-        return embedded.reshape(B, W * K, n_embed)
+        return self.embed(raw_tokens.detach().double())
 
 
 class SpectralTokenEmbed(nn.Module):
-    """Spectral (Fourier feature) embedding for tone tokens.
+    """Spectral (Fourier feature) embedding for chirp tokens.
 
-    Replaces z-score normalized raw frequencies with multi-scale Fourier
-    features, enabling the transformer to distinguish frequencies at
-    multiple resolutions — from coarse harmonic structure down to fine
-    spectral splitting.
+    Converts raw ChirpTokenizer output (B, N, 9) into per-token feature
+    vectors suitable for a transformer. Frequencies are mapped to
+    Fourier features; phases are encoded as cos/sin pairs; SNR and time
+    are appended as scalars.
 
-    Feature layout per token:
-      - f_start spectral: sin/cos at n_freq scales  -> 2 * n_freq
-      - f_end   spectral: sin/cos at n_freq scales  -> 2 * n_freq
-      - amplitude: log1p(amp)                        -> 1
-      - phase_start: cos(ps), sin(ps)                -> 2
-      - phase_end:   cos(pe), sin(pe)                -> 2
-      Total n_embed = 4 * n_freq + 5
+    Input field layout (ChirpTokenizer, 9 fields):
+      score, t_start, t_end, f_start, f_end, A_start, A_end, phase_start, phase_end
+
+    Feature layout per token (output):
+      - f_start raw (normalized to [-1,1])         -> 1
+      - f_end   raw (normalized to [-1,1])         -> 1
+      - f_start spectral: sin/cos at n_freq scales -> 2 * n_freq
+      - f_end   spectral: sin/cos at n_freq scales -> 2 * n_freq
+      - log-SNR (log1p(score) / amp_scale)         -> 1
+      - time position (t_start / N_signal * 2 - 1) -> 1
+      - phase_start: cos(ps), sin(ps)              -> 2
+      - phase_end:   cos(pe), sin(pe)              -> 2  (boundary mode)
+      Total n_embed = 4 * n_freq + 8 (boundary) or 4 * n_freq + 6 (center)
 
     Args:
-        n_freq: Number of Fourier scales for frequency embedding.
-            Scales are pi * 2^i for i = 0..n_freq-1. Default 8.
+        n_freq: Number of Fourier scales for frequency embedding. Default 8.
         phase_mode: "boundary" keeps both phase endpoints (default),
-            "center" averages them (n_embed = 4 * n_freq + 3).
+            "center" averages them.
+        amp_scale: Divisor for log1p(score) normalization.
+        N_signal: Total signal length in samples, used to normalize t_start.
     """
 
-    def __init__(self, n_freq=8, phase_mode="boundary", amp_scale=10.0):
+    def __init__(self, n_freq=8, phase_mode="boundary", amp_scale=10.0, N_signal=100000):
         super().__init__()
         self.n_freq = n_freq
         self.phase_mode = phase_mode
         self.amp_scale = amp_scale
+        self.N_signal = N_signal
         # Geometrically spaced scales: pi, 2pi, 4pi, ..., pi*2^(n_freq-1)
         scales = math.pi * (2.0 ** torch.arange(n_freq, dtype=torch.float64))
         self.register_buffer("scales", scales)
-        # raw f_start + f_end (2) + spectral (4*n_freq) + amp (1) + phases + time (1)
+        # raw f_start + f_end (2) + spectral (4*n_freq) + snr (1) + time (1) + phases
         self.n_embed = 4 * n_freq + (8 if phase_mode == "boundary" else 6)
 
     def _freq_embed(self, f):
@@ -147,39 +160,39 @@ class SpectralTokenEmbed(nn.Module):
         Returns:
             (..., 2*n_freq) shaped tensor of [sin, cos] pairs.
         """
-        # f: (...) -> (..., n_freq)
         scaled = f.unsqueeze(-1) * self.scales
         return torch.cat([torch.sin(scaled), torch.cos(scaled)], dim=-1)
 
     def forward(self, raw_tokens):
-        """Embed raw tokens with spectral frequency features.
+        """Embed chirp tokens with spectral frequency features.
 
         Args:
-            raw_tokens: (B, W, K, 5) from ToneTokenizer.
-                Features: f_start[-1,1], f_end[-1,1], amp, ps[-pi,pi], pe[-pi,pi]
+            raw_tokens: (B, N, 9) from ChirpTokenizer (already flat).
+                Fields: score, t_start, t_end, f_start, f_end,
+                        A_start, A_end, phase_start, phase_end.
 
         Returns:
-            (B, W*K, n_embed) float64 tensor.
+            (B, N, n_embed) float64 tensor.
         """
         raw_tokens = raw_tokens.detach().double()
-        B, W, K, _ = raw_tokens.shape
+        B, N, _ = raw_tokens.shape
 
-        f_start = raw_tokens[..., 0]
-        f_end = raw_tokens[..., 1]
-        amp = torch.log1p(raw_tokens[..., 2]) / self.amp_scale
-        ps = raw_tokens[..., 3]
-        pe = raw_tokens[..., 4]
-
-        t = torch.linspace(-1.0, 1.0, W, device=raw_tokens.device, dtype=raw_tokens.dtype)
-        t = t[None, :, None].expand(B, W, K)  # (B, W, K)
+        # f_start/f_end in cycles/sample [0, 0.5] -> normalize to [-1, 1]
+        f_start = raw_tokens[..., 3] * 4 - 1
+        f_end = raw_tokens[..., 4] * 4 - 1
+        snr = torch.log1p(raw_tokens[..., 0]) / self.amp_scale
+        # t_start in sample indices -> normalize to [-1, 1]
+        t = raw_tokens[..., 1] / self.N_signal * 2 - 1
+        ps = raw_tokens[..., 7]
+        pe = raw_tokens[..., 8]
 
         parts = [
-            f_start.unsqueeze(-1),        # (B,W,K, 1) raw frequency
-            f_end.unsqueeze(-1),          # (B,W,K, 1) raw frequency
-            self._freq_embed(f_start),    # (B,W,K, 2*n_freq)
-            self._freq_embed(f_end),      # (B,W,K, 2*n_freq)
-            amp.unsqueeze(-1),            # (B,W,K, 1)
-            t.unsqueeze(-1),              # (B,W,K, 1) time position
+            f_start.unsqueeze(-1),        # (B, N, 1) normalized frequency
+            f_end.unsqueeze(-1),          # (B, N, 1) normalized frequency
+            self._freq_embed(f_start),    # (B, N, 2*n_freq)
+            self._freq_embed(f_end),      # (B, N, 2*n_freq)
+            snr.unsqueeze(-1),            # (B, N, 1) log-SNR
+            t.unsqueeze(-1),              # (B, N, 1) time position
         ]
 
         if self.phase_mode == "boundary":
@@ -191,8 +204,7 @@ class SpectralTokenEmbed(nn.Module):
             phi = (ps + pe) / 2
             parts.append(torch.stack([torch.cos(phi), torch.sin(phi)], dim=-1))
 
-        embedded = torch.cat(parts, dim=-1)  # (B, W, K, n_embed)
-        return embedded.reshape(B, W * K, self.n_embed)
+        return torch.cat(parts, dim=-1)  # (B, N, n_embed)
 
 
 class Concat(nn.Module):

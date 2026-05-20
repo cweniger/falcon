@@ -137,8 +137,6 @@ graph:
       n_dlnf: 11
       dlnf_min: 0.0
       dlnf_max: 0.05
-    ray:
-      num_gpus: 0.2
 
 sample:
   prior:
