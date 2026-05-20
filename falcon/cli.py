@@ -294,6 +294,105 @@ class _GracefulShutdown:
         return self._stopping
 
 
+def _fmt_duration(seconds):
+    """Format a duration in seconds as e.g. '4m 23s' or '1h 02m 05s'."""
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None, end_time=None):
+    """Build a compact end-of-run summary as a list of text lines.
+
+    Always returns something printable even if the monitor bridge is
+    unreachable; per-node details and counts are best-effort.
+    """
+    from datetime import datetime
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append(f"falcon launch {status}")
+    lines.append(f"Output:  {output_dir}")
+    samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    lines.append(f"Samples: {samples_path}")
+    graph_path = Path(cfg.paths.graph)
+    lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
+    try:
+        node_names = list(cfg.graph.keys())
+    except Exception:
+        node_names = []
+    if node_names:
+        n = len(node_names)
+        if n <= 6:
+            suffix = f"(per-node: {', '.join(node_names)})"
+        else:
+            suffix = f"(per-node, {n} nodes)"
+        lines.append(f"         {graph_path / '<node>' / 'output.log'}  {suffix}")
+    if start_time is not None:
+        lines.append(f"Started: {datetime.fromtimestamp(start_time):%Y-%m-%d %H:%M:%S}")
+    if end_time is not None:
+        lines.append(f"Ended:   {datetime.fromtimestamp(end_time):%Y-%m-%d %H:%M:%S}")
+    if start_time is not None and end_time is not None:
+        lines.append(f"Runtime: {_fmt_duration(end_time - start_time)}")
+    try:
+        import ray
+        if ray.is_initialized():
+            res = ray.cluster_resources()
+            cpu = int(res.get("CPU", 0))
+            gpu = int(res.get("GPU", 0))
+            mem_gb = res.get("memory", 0) / (1024 ** 3)
+            n_alive = sum(1 for n in ray.nodes() if n.get("Alive"))
+            lines.append(
+                f"Ray:     {n_alive} node(s) | {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB"
+            )
+    except Exception:
+        pass
+    try:
+        import ray
+        bridge = getattr(deployed_graph, "monitor_bridge", None) if deployed_graph else None
+        if bridge is not None:
+            status_dict = ray.get(bridge.get_status.remote(), timeout=5.0)
+            nodes = status_dict.get("nodes", {})
+            if nodes:
+                lines.append("Nodes:")
+                for name, ns in nodes.items():
+                    parts = [str(ns.get("status", "?"))]
+                    total_epochs = ns.get("total_epochs", 0)
+                    if total_epochs:
+                        parts.append(f"{ns.get('current_epoch', 0)}/{total_epochs} epochs")
+                    loss = ns.get("loss")
+                    if loss is not None:
+                        parts.append(f"loss={loss:.4g}")
+                    sims = ns.get("samples", 0)
+                    if sims:
+                        parts.append(f"{sims} sims")
+                    lines.append(f"  {name}: {' | '.join(parts)}")
+            buf = status_dict.get("buffer", {})
+            if isinstance(buf, dict):
+                total_generated = buf.get("total_length")
+                if total_generated is not None:
+                    live = buf.get("training", 0) + buf.get("validation", 0)
+                    lines.append(
+                        f"Samples generated: {total_generated} total | "
+                        f"{buf.get('training', 0)} train, {buf.get('validation', 0)} val "
+                        f"({live} live in buffer)"
+                    )
+                elif "training" in buf or "validation" in buf:
+                    lines.append(
+                        f"Buffer:  {buf.get('training', 0)} training, "
+                        f"{buf.get('validation', 0)} validation"
+                    )
+    except Exception:
+        pass  # Best-effort; the path lines above are the essential receipt
+    lines.append("=" * 60)
+    return lines
+
+
 def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     """Save generated samples to disk.
 
@@ -378,6 +477,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
+    import time as _time
     import torch
     import ray
     from omegaconf import OmegaConf
@@ -385,15 +485,20 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     from falcon.core.graph import create_graph_from_config
     from falcon.core.logger import Logger, set_logger, info
 
+    launch_start = _time.time()
+
     # Initialize interactive display or graceful shutdown handler
     display = None
     shutdown_handler = None
     if interactive:
-        from falcon.interactive import InteractiveDisplay
-        # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
-        display = InteractiveDisplay(footer_height=log_lines + 4)
-        display.start()
-    else:
+        try:
+            from falcon.interactive import InteractiveDisplay
+            # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
+            display = InteractiveDisplay(footer_height=log_lines + 4)
+            display.start()
+        except ImportError:
+            print("Interactive display unavailable (install falcon-sbi[blessed] to enable it)")
+    if display is None:
         # Non-interactive mode: install double Ctrl+C handler
         shutdown_handler = _GracefulShutdown()
         shutdown_handler.install()
@@ -481,29 +586,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     ### Run analysis ###
     ####################
 
-    # 1) Deploy graph (pass logging config)
-    deployed_graph = falcon.DeployedGraph(
-        graph,
-        model_path=cfg.paths.get("import"),
-        log_config=logging_cfg,
-    )
-
-    # 2) Prepare dataset manager for deployed graph and store initial samples
-    dataset_manager = falcon.get_ray_dataset_manager(
-        min_samples=cfg.buffer.min_samples,
-        max_samples=cfg.buffer.max_samples,
-        validation_samples=cfg.buffer.validation_samples,
-        simulate_count=cfg.buffer.simulate_count,
-        simulate_interval=cfg.buffer.simulate_interval,
-        simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
-        simulate_when_full=cfg.buffer.simulate_when_full,
-        initial_samples_path=cfg.buffer.get("initial_samples_path", None),
-        samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
-        store_fraction=cfg.buffer.get("store_fraction", 0.0),
-        log_config=logging_cfg,
-    )
-
-    # 3) Start status polling thread for interactive mode
+    # Start status polling thread for interactive mode
     status_thread = None
     graph_path = Path(cfg.paths.graph)
     if display:
@@ -550,9 +633,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         status_thread = threading.Thread(target=poll_status, daemon=True)
         status_thread.start()
 
-    # 4) Launch training & simulations
     # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
-    import time as _time
     _start_time = _time.time()
     _timeout_logged = False
 
@@ -573,7 +654,26 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 return True
         return False
 
+    run_status = "completed"
+    deployed_graph = None
     try:
+        # 1) Deploy graph (pass logging config)
+        deployed_graph = falcon.DeployedGraph(
+            graph,
+            model_path=cfg.paths.get("import"),
+            log_config=logging_cfg,
+        )
+
+        # 2) Prepare dataset manager for deployed graph and store initial samples
+        from omegaconf import OmegaConf as _OmegaConf
+        from falcon.core.raystore import BufferConfig as _BufferConfig
+        buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        dataset_manager = falcon.get_ray_dataset_manager(
+            buffer_cfg,
+            samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
+            log_config=logging_cfg,
+        )
+
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
         #############################
@@ -600,20 +700,48 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 info_fn=info,
             )
 
+    except KeyboardInterrupt:
+        run_status = "interrupted"
+        raise
+    except Exception as e:
+        run_status = f"failed ({type(e).__name__}: {e})"
+        raise
     finally:
         ##########################
         ### Clean up resources ###
         ##########################
 
+        # A graceful Ctrl+C / timeout exits the launch normally, not via an
+        # exception, so reflect that here.
+        if run_status == "completed":
+            if (display and display.stop_requested) or (
+                shutdown_handler and shutdown_handler.stop_requested
+            ):
+                run_status = "interrupted"
+
+        # Build the end-of-run summary and route it through the driver logger
+        # so it lands in driver/output.log (and, in plain mode, on stdout).
+        summary_lines = _build_run_summary(
+            run_status, output_dir, cfg, deployed_graph,
+            start_time=launch_start, end_time=_time.time(),
+        )
+        for line in summary_lines:
+            info(line)
+
         # Stop interactive display first (restores terminal)
         if display:
             display.stop()
+            # The TUI used the alternate screen buffer, so nothing the user
+            # saw survives. Echo the summary to real stdout as the receipt.
+            for line in summary_lines:
+                print(line)
 
         # Uninstall shutdown handler
         if shutdown_handler:
             shutdown_handler.uninstall()
 
-        deployed_graph.shutdown()
+        if deployed_graph is not None:
+            deployed_graph.shutdown()
         driver_logger.shutdown()
 
 
@@ -711,7 +839,11 @@ def sample_mode(cfg, sample_type: str) -> None:
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
     """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
-    from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    try:
+        from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    except ImportError:
+        print("falcon monitor requires falcon-sbi[monitor]")
+        sys.exit(1)
     if not init_ray_for_monitor(address):
         sys.exit(1)
     app = FalconMonitor(ray_address=address, refresh_interval=refresh)

@@ -37,8 +37,7 @@ import numpy as np
 class Simulator:
     """Simple Gaussian simulator."""
 
-    def sample(self, batch_dim, parent_conditions=[]):
-        theta = parent_conditions[0]  # Parameters from parent node
+    def simulate_batch(self, batch_size, theta):
         noise = np.random.randn(*theta.shape) * 0.1
         return theta + noise
 ```
@@ -55,12 +54,14 @@ logging:
     enabled: true
 
 paths:
-  import_path: "."
+  import: "."
 
 buffer:
-  num_epochs: 100
-  min_total_samples: 1000
-  max_total_samples: 10000
+  min_samples: 1000
+  max_samples: 10000
+  validation_samples: 256
+  simulate_count: 64
+  simulate_interval: 1
 
 graph:
   theta:
@@ -74,7 +75,7 @@ graph:
       loop:
         num_epochs: 100
       network:
-        net_type: nsf
+        net_type: zuko_nice
 
   x:
     parents: [theta]

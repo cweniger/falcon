@@ -4,7 +4,7 @@
 [![codecov](https://codecov.io/gh/cweniger/falcon/branch/main/graph/badge.svg)](https://codecov.io/gh/cweniger/falcon)
 [![Documentation](https://img.shields.io/badge/docs-cweniger.github.io%2Ffalcon-blue)](https://cweniger.github.io/falcon/)
 
-Falcon (Factorized adaptive learning of conditional networks) is a CLI-driven Python framework for **simulation-based inference (SBI)** with large, expensive simulators. Born in astrophysics, built for any domain with complex forward models — break your model into components and Falcon jointly infers their parameters.
+Falcon (Factorized Adaptive Learning of Conditional Orchestrated Networks) is a CLI-driven Python framework for **simulation-based inference (SBI)** with large, expensive simulators. Born in astrophysics, built for any domain with complex forward models — break your model into components and Falcon jointly infers their parameters.
 
 - **Composable** — define multi-component models as a graph of simulators in YAML, each wrapped with a thin Python interface, regardless of framework.
 - **Adaptive** — steers simulations toward high-posterior regions as training progresses, focusing compute where it matters.

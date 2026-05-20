@@ -1,6 +1,6 @@
 """Flow networks for density estimation.
 
-Requires the sbi package: pip install falcon-sbi[sbi]
+Requires the sbi package: falcon-sbi[sbi]
 """
 
 import numpy as np
@@ -16,8 +16,7 @@ def _get_net_builders():
         from sbi.neural_nets import net_builders
     except ImportError:
         raise ImportError(
-            "sbi is required for flow-based estimators.\n"
-            "Install it with: pip install falcon-sbi[sbi]"
+            "python module sbi is required for flow-based estimators (falcon-sbi[sbi])"
         )
     return {
         "nsf": net_builders.build_nsf,

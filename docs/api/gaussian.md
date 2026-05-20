@@ -57,7 +57,7 @@ estimator:
 |-----------|------|---------|-------------|
 | `hidden_dim` | int | 128 | MLP hidden layer dimension |
 | `num_layers` | int | 3 | Number of hidden layers |
-| `momentum` | float | 0.10 | EMA momentum for running statistics |
+| `momentum` | float | 0.01 | EMA momentum for running statistics |
 | `min_var` | float | 1e-20 | Minimum variance for numerical stability |
 | `eig_update_freq` | int | 1 | Eigendecomposition update frequency |
 
@@ -129,4 +129,4 @@ sample:
 
 ::: falcon.estimators.gaussian.GaussianConfig
 
-::: falcon.estimators.gaussian.GaussianPosteriorConfig
+::: falcon.estimators.gaussian.NetworkConfig

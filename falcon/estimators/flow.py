@@ -14,7 +14,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.logger import log, debug, info, warning, error
 from falcon.estimators.flow_density import FlowDensity
-from falcon.estimators.base import StepwiseEstimator, TrainingLoopConfig
+from falcon.estimators.stepwise_base import StepwiseEstimator, TrainingLoopConfig
 from falcon.embeddings import instantiate_embedding
 
 
@@ -37,6 +37,7 @@ class OptimizerConfig:
     """Optimizer parameters (training-time)."""
 
     lr: float = 1e-2
+    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
     lr_decay_factor: float = 0.1
     scheduler_patience: int = 8
 
@@ -189,7 +190,7 @@ class Flow(StepwiseEstimator):
             + list(self._marginal_flow.parameters())
             + list(self._embedding.parameters())
         )
-        self._optimizer = AdamW(parameters, lr=cfg_opt.lr)
+        self._optimizer = AdamW(parameters, lr=cfg_opt.lr, betas=cfg_opt.betas)
         self._scheduler = ReduceLROnPlateau(
             self._optimizer,
             mode="min",
