@@ -2,7 +2,7 @@
 """
 Falcon Adaptive Training - Standalone CLI Tool
 Usage: falcon launch [--output DIR] [--config FILE] [key=value ...]
-       falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]
+       falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]
        falcon graph [--config FILE]
 
 Run directory behavior:
@@ -399,7 +399,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     Args:
         samples: Dict of sample arrays (keys like 'theta.value', 'x.value')
         sample_cfg: Config for this sample type (with exclude_keys, add_keys)
-        sample_type: 'prior', 'posterior', or 'proposal'
+        sample_type: 'prior', 'posterior', 'proposal', or 'ppd'
         graph: The Graph object (for determining default keys)
         cfg: Full config (for paths)
         info_fn: Function to use for info logging
@@ -410,7 +410,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     # Build key selection based on node names (strip .value/.log_prob suffixes)
     node_keys = {k for k in samples.keys() if k.endswith('.value')}
 
-    if sample_type in ["prior", "proposal"]:
+    if sample_type in ["prior", "proposal", "ppd"]:
         # Default: save all .value keys
         default_keys = set(node_keys)
     elif sample_type == "posterior":
@@ -473,7 +473,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
 
-def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_sample: bool = True, timeout: float = None) -> None:
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample: bool = True, timeout: float = None) -> None:
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
@@ -684,7 +684,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         sample_cfg = cfg.get("sample", {}).get("posterior", {})
         num_posterior_samples = sample_cfg.get("n", 0)
 
-        if posterior_sample and num_posterior_samples > 0:
+        if auto_sample and num_posterior_samples > 0:
             info(f"Generating {num_posterior_samples} posterior samples...")
 
             sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
@@ -695,6 +695,25 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 samples=samples,
                 sample_cfg=sample_cfg,
                 sample_type="posterior",
+                graph=graph,
+                cfg=cfg,
+                info_fn=info,
+            )
+
+        # Check if PPD sampling is configured and enabled
+        ppd_cfg = cfg.get("sample", {}).get("ppd", {})
+        num_ppd_samples = ppd_cfg.get("n", 0)
+
+        if auto_sample and num_ppd_samples > 0:
+            info(f"Generating {num_ppd_samples} PPD samples...")
+
+            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
+            samples = deployed_graph._refs_to_arrays(sample_refs)
+
+            _save_samples(
+                samples=samples,
+                sample_cfg=ppd_cfg,
+                sample_type="ppd",
                 graph=graph,
                 cfg=cfg,
                 info_fn=info,
@@ -789,6 +808,8 @@ def sample_mode(cfg, sample_type: str) -> None:
         sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
         sample_cfg = cfg.sample.get("proposal", None)
+    elif sample_type == "ppd":
+        sample_cfg = cfg.sample.get("ppd", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
@@ -817,6 +838,10 @@ def sample_mode(cfg, sample_type: str) -> None:
     elif sample_type == "proposal":
         deployed_graph.load(Path(cfg.paths.graph))
         sample_refs = deployed_graph.sample_proposal(num_samples, observations)
+
+    elif sample_type == "ppd":
+        deployed_graph.load(Path(cfg.paths.graph))
+        sample_refs = deployed_graph.sample_ppd(num_samples, observations)
 
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
@@ -866,7 +891,7 @@ def parse_args():
         print()
         print("Usage:")
         print("  falcon launch [--output DIR] [--config FILE] [--no-interactive] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]")
         print("  falcon graph [--config FILE]")
         print()
         print("Options:")
@@ -874,7 +899,7 @@ def parse_args():
         print("  -c, --config FILE      Config file (default: config.yml)")
         print("  --no-interactive       Disable interactive TUI (plain output)")
         print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
-        print("  --no-posterior-sample  Skip posterior sampling after training")
+        print("  --no-auto-sample       Skip automatic sampling after training")
         print("  --timeout SECONDS      Stop training after SECONDS (graceful stop)")
         sys.exit(0)
 
@@ -903,8 +928,8 @@ def parse_args():
 
     sample_type = None
     if mode == "sample":
-        if not args or args[0] not in ["prior", "posterior", "proposal"]:
-            print("Error: sample requires type: prior, posterior, or proposal")
+        if not args or args[0] not in ["prior", "posterior", "proposal", "ppd"]:
+            print("Error: sample requires type: prior, posterior, proposal, or ppd")
             sys.exit(1)
         sample_type = args.pop(0)
 
@@ -914,7 +939,7 @@ def parse_args():
     # Interactive mode: default to True if stdout is a TTY
     interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
-    posterior_sample = True  # Sample posteriors after training if configured
+    auto_sample = True  # Run configured sample types after training
     timeout = None  # Training timeout in seconds
     overrides = []
     i = 0
@@ -948,8 +973,8 @@ def parse_args():
             interactive = True
         elif arg == "--no-interactive":
             interactive = False
-        elif arg == "--no-posterior-sample":
-            posterior_sample = False
+        elif arg == "--no-auto-sample":
+            auto_sample = False
         elif arg == "--timeout" and i + 1 < len(args):
             timeout = float(args[i + 1])
             i += 1
@@ -964,12 +989,12 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, address, refresh = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
@@ -983,7 +1008,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg, interactive=interactive, log_lines=log_lines, posterior_sample=posterior_sample, timeout=timeout)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines, auto_sample=auto_sample, timeout=timeout)
     elif mode == "graph":
         graph_mode(cfg)
     else:
