@@ -704,7 +704,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         ppd_cfg = cfg.get("sample", {}).get("ppd", {})
         num_ppd_samples = ppd_cfg.get("n", 0)
 
-        if posterior_sample and num_ppd_samples > 0:
+        if num_ppd_samples > 0:
             info(f"Generating {num_ppd_samples} PPD samples...")
 
             sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
