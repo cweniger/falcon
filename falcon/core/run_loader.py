@@ -66,7 +66,7 @@ class Run:
         """Access training buffer samples stored during training.
 
         Returns a SampleSetReader for buffer/snapshots.
-        Samples are stored when buffer.store_fraction > 0.
+        Samples are stored when buffer.snapshot_fraction > 0.
 
         Usage:
             run.buffer[0]           # First stored sample
