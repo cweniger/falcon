@@ -414,11 +414,15 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         # Default: save all .value keys
         default_keys = set(node_keys)
     elif sample_type == "posterior":
-        # Default: save only posterior nodes (nodes with evidence)
-        default_keys = {
-            f"{k}.value" for k, node in graph.node_dict.items()
-            if node.evidence and f"{k}.value" in samples
-        }
+        if sample_cfg.get("resimulate", False):
+            # resimulate=True: save all nodes (latent + forward-simulated)
+            default_keys = set(node_keys)
+        else:
+            # Default: save only posterior nodes (nodes with evidence)
+            default_keys = {
+                f"{k}.value" for k, node in graph.node_dict.items()
+                if node.evidence and f"{k}.value" in samples
+            }
     else:
         default_keys = set(node_keys)
 
@@ -688,6 +692,9 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
             info(f"Generating {num_posterior_samples} posterior samples...")
 
             sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
+            if sample_cfg.get("resimulate", False):
+                info("Resimulating forward model from posterior samples...")
+                sample_refs = deployed_graph.resimulate_posterior(sample_refs)
             samples = deployed_graph._refs_to_arrays(sample_refs)
 
             # Save posterior samples
@@ -813,6 +820,9 @@ def sample_mode(cfg, sample_type: str) -> None:
     elif sample_type == "posterior":
         deployed_graph.load(Path(cfg.paths.graph))
         sample_refs = deployed_graph.sample_posterior(num_samples, observations)
+        if sample_cfg.get("resimulate", False):
+            info("Resimulating forward model from posterior samples...")
+            sample_refs = deployed_graph.resimulate_posterior(sample_refs)
 
     elif sample_type == "proposal":
         deployed_graph.load(Path(cfg.paths.graph))
