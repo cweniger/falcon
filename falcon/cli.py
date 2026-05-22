@@ -700,6 +700,25 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 info_fn=info,
             )
 
+        # Check if PPD sampling is configured and enabled
+        ppd_cfg = cfg.get("sample", {}).get("ppd", {})
+        num_ppd_samples = ppd_cfg.get("n", 0)
+
+        if posterior_sample and num_ppd_samples > 0:
+            info(f"Generating {num_ppd_samples} PPD samples...")
+
+            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
+            samples = deployed_graph._refs_to_arrays(sample_refs)
+
+            _save_samples(
+                samples=samples,
+                sample_cfg=ppd_cfg,
+                sample_type="ppd",
+                graph=graph,
+                cfg=cfg,
+                info_fn=info,
+            )
+
     except KeyboardInterrupt:
         run_status = "interrupted"
         raise
