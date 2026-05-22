@@ -87,7 +87,7 @@ graph:
     estimator:                     # Posterior learner (optional)
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 300
+        max_epochs: 300
       network:
         net_type: nsf
       embedding:
@@ -129,7 +129,7 @@ estimator:
   _target_: falcon.estimators.Flow
 
   loop:
-    num_epochs: 300
+    max_epochs: 300
     batch_size: 128
     early_stop_patience: 50
     cache_sync_every: 0
@@ -190,5 +190,5 @@ observed: "./data/obs.npz['x']"
 Override any parameter via CLI:
 
 ```bash
-falcon launch buffer.num_epochs=1000 graph.theta.estimator.optimizer.lr=0.001
+falcon launch buffer.max_epochs=1000 graph.theta.estimator.optimizer.lr=0.001
 ```

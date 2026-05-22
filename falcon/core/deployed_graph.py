@@ -429,7 +429,7 @@ class NodeWrapper:
                     status["loss"] = status["loss_history"][-1]
                 status["current_epoch"] = len(est.history.get("epochs", []))
             if hasattr(est, "loop_config"):
-                status["total_epochs"] = est.loop_config.num_epochs
+                status["total_epochs"] = est.loop_config.max_epochs
             if hasattr(est, "history") and est.history.get("n_samples"):
                 status["samples"] = est.history["n_samples"][-1]
 

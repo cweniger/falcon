@@ -77,7 +77,7 @@ graph:
     estimator:                          # Posterior estimator network
       _target_: falcon.estimators.Flow   # Flow-based posterior estimation
       loop:                             # Training loop parameters
-        num_epochs: 300
+        max_epochs: 300
         batch_size: 128
         early_stop_patience: 32         # Early stopping patience
       network:                          # Neural network architecture
