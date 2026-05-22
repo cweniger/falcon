@@ -131,15 +131,18 @@ graph:
 
 ```
 {run_dir}/
-├── sim_dir/                    # Simulation buffer (samples_*.pt)
-├── graph_dir/                  # Trained models and logs
+├── graph/                      # Trained models and logs
 │   ├── graph.pkl               # Serialized graph structure
 │   ├── {node_name}/            # Per-node directories
 │   │   └── estimator.pt        # Network weights
 │   ├── output.log              # Training logs
 │   └── metrics/                # Metric history (chunk_*.npz)
-├── samples_dir/                # Generated samples
-│   └── posterior/{timestamp}/  # Timestamped sample batches
+├── samples/                    # Generated samples
+│   └── posterior/              # Posterior sample files
+│       ├── 000000.npz
+│       └── 000001.npz
+├── buffer/
+│   └── snapshots/              # Buffer snapshots (when store_fraction > 0)
 │       └── 000000.npz
 └── config.yml                 # Saved configuration
 ```
