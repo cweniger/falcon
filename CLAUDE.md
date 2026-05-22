@@ -15,7 +15,7 @@ pip install .
 # Training
 falcon launch                                    # Run with default config
 falcon launch -o outputs/exp01                   # Specify output directory
-falcon launch buffer.num_epochs=500              # Override config parameters
+falcon launch buffer.max_epochs=500              # Override config parameters
 falcon launch -c config_amortized                # Use alternate config file
 
 # Sampling (after training)
@@ -98,7 +98,7 @@ graph:
     estimator:                    # Posterior network
       _target_: falcon.estimators.Flow
       loop:                       # Training loop config
-        num_epochs: 300
+        max_epochs: 300
         batch_size: 128
       network:                    # Network config
         net_type: nsf

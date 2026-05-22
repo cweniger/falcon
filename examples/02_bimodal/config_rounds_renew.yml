@@ -44,7 +44,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 600
+        max_epochs: 600
         batch_size: 128
         early_stop_patience: 32
       network:

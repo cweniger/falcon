@@ -22,7 +22,7 @@ from falcon.core.logger import log, debug, info, warning, error
 class TrainingLoopConfig:
     """Generic training loop parameters."""
 
-    num_epochs: int = 100
+    max_epochs: int = 100
     batch_size: int = 128
     early_stop_patience: int = 16
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
@@ -181,7 +181,7 @@ class StepwiseEstimator(BaseEstimator):
         total_steps = 0
         t0 = time.perf_counter()
 
-        for epoch in range(cfg.num_epochs):
+        for epoch in range(cfg.max_epochs):
             log({"epoch": self._total_epochs_trained + 1})
 
             # Periodic incremental sync
@@ -249,7 +249,7 @@ class StepwiseEstimator(BaseEstimator):
             train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
             summary = (
-                f"Epoch {self._total_epochs_trained + 1}/{cfg.num_epochs}"
+                f"Epoch {self._total_epochs_trained + 1}/{cfg.max_epochs}"
                 f" | steps={total_steps}"
             )
             if n_sims is not None:

@@ -48,7 +48,7 @@ Controls the training process.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `num_epochs` | int | 100 | Maximum training epochs |
+| `max_epochs` | int | 100 | Maximum training epochs |
 | `batch_size` | int | 128 | Training batch size |
 | `early_stop_patience` | int | 16 | Epochs without improvement before stopping |
 | `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
@@ -57,7 +57,7 @@ Controls the training process.
 
 ```yaml
 loop:
-  num_epochs: 100
+  max_epochs: 100
   batch_size: 128
   early_stop_patience: 16
   cache_sync_every: 0
@@ -214,7 +214,7 @@ graph:
       _target_: falcon.estimators.Flow
 
       loop:
-        num_epochs: 100
+        max_epochs: 100
         batch_size: 128
         early_stop_patience: 16
         cache_sync_every: 0
@@ -311,7 +311,7 @@ Flow logs the following metrics during training:
 ## Tips
 
 1. **Start with defaults**: The default configuration works well for most problems
-2. **Increase `num_epochs`** for complex posteriors
+2. **Increase `max_epochs`** for complex posteriors
 3. **Enable `discard_samples`** if training becomes unstable with outliers
 4. **Use GPU** (`ray.num_gpus: 1`) for faster training with large embeddings
 5. **Lower `gamma`** for single-observation inference, higher for amortization
