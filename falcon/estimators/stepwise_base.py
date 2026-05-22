@@ -182,7 +182,7 @@ class StepwiseEstimator(BaseEstimator):
         t0 = time.perf_counter()
 
         for epoch in range(cfg.num_epochs):
-            log({"epoch": epoch + 1})
+            log({"epoch": self._total_epochs_trained + 1})
 
             # Periodic incremental sync
             if epoch > 0 and epoch % sync_every == 0:
@@ -249,7 +249,7 @@ class StepwiseEstimator(BaseEstimator):
             train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
             summary = (
-                f"Epoch {epoch+1}/{cfg.num_epochs}"
+                f"Epoch {self._total_epochs_trained + 1}/{cfg.num_epochs}"
                 f" | steps={total_steps}"
             )
             if n_sims is not None:
@@ -285,7 +285,7 @@ class StepwiseEstimator(BaseEstimator):
         self, epoch, train_metrics, val_metrics, t0, buffer
     ) -> None:
         """Record metrics to history dict."""
-        self.history["epochs"].append(epoch + 1)
+        self.history["epochs"].append(self._total_epochs_trained + 1)
         self.history["train_loss"].append(train_metrics.get("loss", 0))
         self.history["val_loss"].append(val_metrics.get("loss", 0))
 
