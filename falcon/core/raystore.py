@@ -137,9 +137,9 @@ class DatasetManagerActor:
         simulate_chunk_size,
         initial_samples_path,
         simulate_when_full,
-        samples_path,
         store_fraction,
         log_config=None,
+        snapshots_path=None,
     ):
         self.max_samples = max_samples
         self.min_samples = min_samples
@@ -149,7 +149,7 @@ class DatasetManagerActor:
         self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
-        self.samples_path = Path(samples_path) if samples_path else None
+        self.snapshots_path = Path(snapshots_path) if snapshots_path else None
         self.store_fraction = store_fraction
 
         # NPZ storage state
@@ -363,7 +363,7 @@ class DatasetManagerActor:
         info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
-        if self.store_fraction > 0 and self.samples_path is not None:
+        if self.store_fraction > 0 and self.snapshots_path is not None:
             self._dump_refs(sample_refs)
 
     def _dump_refs(self, sample_refs: list):
@@ -377,14 +377,11 @@ class DatasetManagerActor:
                 self._save_sample(sample)
 
     def _save_sample(self, sample: dict):
-        """Save a single sample as NPZ file to samples_path/buffer/."""
-        buffer_dir = self.samples_path / "buffer"
-        buffer_dir.mkdir(parents=True, exist_ok=True)
-
-        # Find next index from existing files
-        existing = sorted(buffer_dir.glob("*.npz"))
+        """Save a single sample as NPZ file to buffer/snapshots/."""
+        self.snapshots_path.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.snapshots_path.glob("*.npz"))
         next_idx = len(existing)
-        sample_path = buffer_dir / f"{next_idx:06d}.npz"
+        sample_path = self.snapshots_path / f"{next_idx:06d}.npz"
         np.savez(sample_path, **sample)
 
     def dump_store(self, samples: list):
@@ -393,7 +390,7 @@ class DatasetManagerActor:
         Args:
             samples: List of sample dicts to potentially store
         """
-        if self.store_fraction <= 0 or self.samples_path is None:
+        if self.store_fraction <= 0 or self.snapshots_path is None:
             return
 
         interval = max(1, int(1.0 / self.store_fraction))
@@ -424,7 +421,7 @@ class DatasetManagerActor:
         """Load pre-existing samples from NPZ sample directory. Returns number loaded.
 
         Expects initial_samples_path to point to a sample type directory
-        (e.g. samples_dir/prior) as produced by ``falcon sample prior``.
+        (e.g. samples/prior) as produced by ``falcon sample prior``.
         NPZ keys are remapped: ``key`` -> ``key.value`` with ``key.log_prob = 0.0``.
         """
         if self.initial_samples_path is not None:
@@ -674,14 +671,14 @@ class BufferView:
 
 def get_ray_dataset_manager(
     config: BufferConfig,
-    samples_path=None,
+    snapshots_path=None,
     log_config=None,
 ):
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(config, resolve=True) if not isinstance(config, dict) else config
     dataset_manager_actor = DatasetManagerActor.remote(
         **cfg,
-        samples_path=samples_path,
+        snapshots_path=snapshots_path,
         log_config=log_config,
     )
     return DatasetManager(dataset_manager_actor)

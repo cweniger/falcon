@@ -12,9 +12,8 @@ logging:
 # Directory configuration
 paths:
   import: "./src"
-  buffer: ${run_dir}/sim_dir
-  graph: ${run_dir}/graph_dir
-  samples: ${run_dir}/samples_dir
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
 
 # Training buffer parameters
 buffer:

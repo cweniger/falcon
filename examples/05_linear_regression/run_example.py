@@ -139,7 +139,7 @@ def main():
         sys.exit(1)
 
     # Step 3: Analyze samples
-    samples_dir = run_dir / "samples_dir"
+    samples_dir = run_dir / "samples"
     analyze_samples(samples_dir, script_dir)
 
 

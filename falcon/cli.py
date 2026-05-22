@@ -318,7 +318,7 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
     lines.append("=" * 60)
     lines.append(f"falcon launch {status}")
     lines.append(f"Output:  {output_dir}")
-    samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples")
     lines.append(f"Samples: {samples_path}")
     graph_path = Path(cfg.paths.graph)
     lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
@@ -453,7 +453,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         info_fn(f"  {key}: {value.shape}")
 
     # Determine output directory (flat structure)
-    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples")
     output_dir = Path(samples_dir) / sample_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -670,7 +670,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
         dataset_manager = falcon.get_ray_dataset_manager(
             buffer_cfg,
-            samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
+            snapshots_path=str(Path(cfg.run_dir) / "buffer" / "snapshots"),
             log_config=logging_cfg,
         )
 

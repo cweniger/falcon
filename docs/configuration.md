@@ -32,17 +32,15 @@ Configure file paths:
 ```yaml
 paths:
   import: "."
-  buffer: ${run_dir}/sim_dir
-  graph: ${run_dir}/graph_dir
-  samples: ${run_dir}/samples_dir
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `import` | str | `"."` | Path to import custom modules |
-| `buffer` | str | `${run_dir}/sim_dir` | Simulation buffer directory |
-| `graph` | str | `${run_dir}/graph_dir` | Trained models directory |
-| `samples` | str | `${run_dir}/samples_dir` | Output samples directory |
+| `graph` | str | `${run_dir}/graph` | Trained models directory |
+| `samples` | str | `${run_dir}/samples` | Output samples directory |
 
 ### `buffer`
 
@@ -67,7 +65,7 @@ buffer:
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
-| `store_fraction` | float | `0.0` | Fraction of simulated samples written to `samples_dir/buffer/` for inspection (0 = none, 1 = all) |
+| `store_fraction` | float | `0.0` | Fraction of simulated samples written to `buffer/snapshots/` for inspection (0 = none, 1 = all) |
 
 ### `graph`
 

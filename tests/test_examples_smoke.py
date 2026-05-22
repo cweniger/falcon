@@ -89,8 +89,8 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
     )
 
     # Verify output.log files were created by the logging system
-    graph_dir = tmp_path / "graph_dir"
-    assert graph_dir.exists(), f"graph_dir not found at {graph_dir}"
+    graph_dir = tmp_path / "graph"
+    assert graph_dir.exists(), f"graph dir not found at {graph_dir}"
 
     # Check driver output.log exists
     driver_log = graph_dir / "driver" / "output.log"
