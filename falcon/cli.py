@@ -2,7 +2,7 @@
 """
 Falcon Adaptive Training - Standalone CLI Tool
 Usage: falcon launch [--output DIR] [--config FILE] [key=value ...]
-       falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]
+       falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]
        falcon graph [--config FILE]
 
 Run directory behavior:
@@ -399,7 +399,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     Args:
         samples: Dict of sample arrays (keys like 'theta.value', 'x.value')
         sample_cfg: Config for this sample type (with exclude_keys, add_keys)
-        sample_type: 'prior', 'posterior', or 'proposal'
+        sample_type: 'prior', 'posterior', 'proposal', or 'ppd'
         graph: The Graph object (for determining default keys)
         cfg: Full config (for paths)
         info_fn: Function to use for info logging
@@ -410,7 +410,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     # Build key selection based on node names (strip .value/.log_prob suffixes)
     node_keys = {k for k in samples.keys() if k.endswith('.value')}
 
-    if sample_type in ["prior", "proposal"]:
+    if sample_type in ["prior", "proposal", "ppd"]:
         # Default: save all .value keys
         default_keys = set(node_keys)
     elif sample_type == "posterior":
@@ -789,6 +789,8 @@ def sample_mode(cfg, sample_type: str) -> None:
         sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
         sample_cfg = cfg.sample.get("proposal", None)
+    elif sample_type == "ppd":
+        sample_cfg = cfg.sample.get("ppd", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
@@ -817,6 +819,10 @@ def sample_mode(cfg, sample_type: str) -> None:
     elif sample_type == "proposal":
         deployed_graph.load(Path(cfg.paths.graph))
         sample_refs = deployed_graph.sample_proposal(num_samples, observations)
+
+    elif sample_type == "ppd":
+        deployed_graph.load(Path(cfg.paths.graph))
+        sample_refs = deployed_graph.sample_ppd(num_samples, observations)
 
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
@@ -866,7 +872,7 @@ def parse_args():
         print()
         print("Usage:")
         print("  falcon launch [--output DIR] [--config FILE] [--no-interactive] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]")
         print("  falcon graph [--config FILE]")
         print()
         print("Options:")
@@ -903,8 +909,8 @@ def parse_args():
 
     sample_type = None
     if mode == "sample":
-        if not args or args[0] not in ["prior", "posterior", "proposal"]:
-            print("Error: sample requires type: prior, posterior, or proposal")
+        if not args or args[0] not in ["prior", "posterior", "proposal", "ppd"]:
+            print("Error: sample requires type: prior, posterior, proposal, or ppd")
             sys.exit(1)
         sample_type = args.pop(0)
 

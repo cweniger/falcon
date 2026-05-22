@@ -710,6 +710,43 @@ class DeployedGraph:
             num_samples, self.graph.backward_order, condition_refs, "sample_proposal",
         )
 
+    def sample_ppd(self, num_samples, conditions=None):
+        """Run posterior predictive distribution (PPD) sampling.
+
+        Two-phase: sample latent variables from the posterior, then forward-simulate
+        observables from those posterior samples.
+
+        Args:
+            num_samples: Number of samples to generate
+            conditions: Observations dict (same as passed to sample_posterior)
+
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
+                (both posterior latents and forward-simulated observables)
+        """
+        observation_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
+
+        # Phase 1: theta ~ p(theta | x_obs)
+        posterior_refs = self._execute_graph(
+            num_samples, self.graph.backward_order, observation_refs, "sample_posterior",
+        )
+
+        # Phase 2: x_ppd ~ p(x | theta)  — forward-simulate fresh observables
+        # Condition on posterior theta; observed nodes are NOT pre-set here so they
+        # get re-simulated rather than returning the original observations.
+        posterior_condition_refs = self._extract_value_refs(posterior_refs)
+        forward_refs = self._execute_graph(
+            num_samples, self.graph.forward_order, posterior_condition_refs, "sample",
+        )
+
+        # Merge: posterior_refs holds theta.value; forward_refs holds x_ppd.value.
+        # Conditioned (theta) nodes are absent from forward_refs due to the skip in
+        # _execute_graph, so update is safe — no key collisions.
+        merged = [dict(p) for p in posterior_refs]
+        for i, fwd_dict in enumerate(forward_refs):
+            merged[i].update(fwd_dict)
+        return merged
+
     def _refs_to_arrays(self, sample_refs):
         """Convert List[Dict[str, ObjectRef]] to Dict[str, ndarray].
 
