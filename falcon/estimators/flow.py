@@ -373,6 +373,8 @@ class Flow(StepwiseEstimator):
         conditions: Optional[Dict] = None,
     ) -> dict:
         """Sample from the widened proposal distribution for adaptive resampling."""
+        if self._total_epochs_trained < self.loop_config.prior_epochs:
+            return self.sample_prior(num_samples)
         # Fall back to prior if networks not yet initialized (training hasn't started)
         if not self.networks_initialized:
             return self.sample_prior(num_samples)
@@ -474,6 +476,7 @@ class Flow(StepwiseEstimator):
         torch.save(self._best_conditional_flow.state_dict(), node_dir / "conditional_flow.pth")
         torch.save(self._best_marginal_flow.state_dict(), node_dir / "marginal_flow.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
+        torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
 
         # Save history
         torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
@@ -504,6 +507,9 @@ class Flow(StepwiseEstimator):
 
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
+
+        _tep = node_dir / "total_epochs_trained.pth"
+        self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
 
     # ==================== Private Helpers ====================
 

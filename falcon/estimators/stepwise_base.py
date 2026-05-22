@@ -28,6 +28,7 @@ class TrainingLoopConfig:
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
     max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
     cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
+    prior_epochs: int = 0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -70,6 +71,7 @@ class StepwiseEstimator(BaseEstimator):
         self.condition_keys = condition_keys or []
 
         self._terminated = False
+        self._total_epochs_trained: int = 0
 
         # Networks initialized flag (managed by subclass)
         self.networks_initialized = False
@@ -270,6 +272,7 @@ class StepwiseEstimator(BaseEstimator):
             self._record_epoch_history(
                 epoch, train_metrics_avg, val_metrics_avg, t0, buffer
             )
+            self._total_epochs_trained += 1
 
             if epochs_no_improve >= cfg.early_stop_patience:
                 info("Early stopping triggered.")
@@ -592,6 +595,8 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from widened proposal distribution for adaptive resampling."""
+        if self._total_epochs_trained < self.loop_config.prior_epochs:
+            return self.sample_prior(num_samples)
         result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
         log({
             "sample_proposal:mean": result['value'].mean(),
@@ -615,6 +620,8 @@ class LossBasedEstimator(StepwiseEstimator):
         # Save init tensors for model rebuild
         torch.save({"theta": self._init_theta, "conditions": self._init_conditions},
                    node_dir / "init_tensors.pth")
+
+        torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
 
         # Save history
         torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
@@ -647,6 +654,9 @@ class LossBasedEstimator(StepwiseEstimator):
         )
 
         self.networks_initialized = True
+
+        _tep = node_dir / "total_epochs_trained.pth"
+        self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
 
         # Load weights
         self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))
