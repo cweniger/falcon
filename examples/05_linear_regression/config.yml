@@ -53,7 +53,7 @@ buffer:
   simulate_chunk_size: 128
   simulate_when_full: true
   simulate_interval: 5
-  store_fraction: 0.0
+  snapshot_fraction: 0.0
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator

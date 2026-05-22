@@ -23,7 +23,7 @@ class BufferConfig:
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
     initial_samples_path: Optional[str] = None
-    store_fraction: float = 0.0
+    snapshot_fraction: float = 0.0
 
 
 class Batch:
@@ -137,7 +137,7 @@ class DatasetManagerActor:
         simulate_chunk_size,
         initial_samples_path,
         simulate_when_full,
-        store_fraction,
+        snapshot_fraction,
         log_config=None,
         snapshots_path=None,
     ):
@@ -150,7 +150,7 @@ class DatasetManagerActor:
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
         self.snapshots_path = Path(snapshots_path) if snapshots_path else None
-        self.store_fraction = store_fraction
+        self.snapshot_fraction = snapshot_fraction
 
         # NPZ storage state
         self._sample_counter = 0
@@ -363,12 +363,12 @@ class DatasetManagerActor:
         info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
-        if self.store_fraction > 0 and self.snapshots_path is not None:
+        if self.snapshot_fraction > 0 and self.snapshots_path is not None:
             self._dump_refs(sample_refs)
 
     def _dump_refs(self, sample_refs: list):
         """Fetch and dump samples to disk."""
-        interval = max(1, int(1.0 / self.store_fraction))
+        interval = max(1, int(1.0 / self.snapshot_fraction))
 
         for ref_dict in sample_refs:
             self._sample_counter += 1
@@ -385,15 +385,15 @@ class DatasetManagerActor:
         np.savez(sample_path, **sample)
 
     def dump_store(self, samples: list):
-        """Store samples to disk based on store_fraction.
+        """Store samples to disk based on snapshot_fraction.
 
         Args:
             samples: List of sample dicts to potentially store
         """
-        if self.store_fraction <= 0 or self.snapshots_path is None:
+        if self.snapshot_fraction <= 0 or self.snapshots_path is None:
             return
 
-        interval = max(1, int(1.0 / self.store_fraction))
+        interval = max(1, int(1.0 / self.snapshot_fraction))
 
         for sample in samples:
             self._sample_counter += 1
