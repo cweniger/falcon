@@ -8,7 +8,7 @@ from typing import Optional
 
 import ray
 from omegaconf import MISSING
-from falcon.core.logger import Logger, set_logger, log, info, error
+from falcon.core.logger import Logger, set_logger, log, info, warning, error
 
 
 @dataclass
@@ -440,6 +440,12 @@ class DatasetManagerActor:
             if samples:
                 self.append(samples)
                 info(f"Loaded {len(samples)} initial samples from {self.initial_samples_path}")
+                if len(samples) > self.max_samples:
+                    warning(
+                        f"Loaded {len(samples)} initial samples but max_samples={self.max_samples}; "
+                        f"{len(samples) - self.max_samples} oldest samples were tombstoned immediately. "
+                        "Consider increasing buffer.max_samples."
+                    )
             return len(samples)
         return 0
 
