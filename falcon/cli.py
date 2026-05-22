@@ -668,9 +668,10 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
         buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        buffer_base = cfg.paths.get("buffer", str(Path(cfg.run_dir) / "buffer"))
         dataset_manager = falcon.get_ray_dataset_manager(
             buffer_cfg,
-            snapshots_path=str(Path(cfg.run_dir) / "buffer" / "snapshots"),
+            snapshots_path=str(Path(buffer_base) / "snapshots"),
             log_config=logging_cfg,
         )
 
@@ -899,7 +900,7 @@ def parse_args():
             elif arg.startswith("--refresh="):
                 refresh = float(arg.split("=", 1)[1])
             i += 1
-        return mode, None, None, None, None, False, 16, address, refresh
+        return mode, None, None, None, None, False, 16, True, None, address, refresh
 
     sample_type = None
     if mode == "sample":
