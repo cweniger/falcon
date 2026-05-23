@@ -77,7 +77,7 @@ graph:
         - ['normal', 0.0, 1.0]
 
     estimator:
-      _target_: falcon.estimators.Gaussian
+      _target_: falcon.estimators.GaussianFullCov
       loop:
         max_epochs: 1000
         batch_size: 128

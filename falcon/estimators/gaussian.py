@@ -3,17 +3,6 @@
 This module provides:
 - GaussianPosterior: nn.Module implementing the Gaussian posterior
 - Gaussian: Factory function creating a configured LossBasedEstimator
-
-The Gaussian posterior uses:
-- Diagonal whitening for input/output normalization (stable under distribution shift)
-- Full covariance for residuals with eigendecomposition for efficient operations
-- EMA updates for running statistics
-
-Benefits over flow-based approaches:
-- Simpler: Full covariance Gaussian is mathematically tractable
-- Efficient: Eigendecomposition enables fast sampling and log_prob
-- Interpretable: Covariance matrix directly shows parameter correlations
-- Tempered proposals: Eigenvalue-based tempering for exploration
 """
 
 from dataclasses import dataclass, field

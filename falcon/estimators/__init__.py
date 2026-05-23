@@ -16,12 +16,14 @@ from falcon.estimators.gaussian import (
     GaussianConfig,
     GaussianPosterior,
 )
+from falcon.estimators.gaussian_fullcov import GaussianFullCov
 
 __all__ = [
     "Flow",
     "FlowConfig",
     "Gaussian",
     "GaussianConfig",
+    "GaussianFullCov",
     "GaussianPosterior",
     "StepwiseEstimator",
     "LossBasedEstimator",
