@@ -45,13 +45,13 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_samples: 4096
-  max_samples: 4096
+  min_samples: 1024
+  max_samples: 1024
   validation_samples: 256
-  simulate_count: 512
+  simulate_count: 128
   simulate_when_full: true
   simulate_interval: 1
-  snapshot_fraction: 0.0
+  snapshot_fraction: 0.1
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
@@ -70,20 +70,20 @@ graph:
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        max_epochs: 1000
+        max_epochs: 8000
         batch_size: 128
-        early_stop_patience: 32
+        early_stop_patience: 128
       network:
         hidden_dim: 128               # MLP hidden layer dimension
         num_layers: 3                 # Number of hidden layers
-        momentum: 0.10                # EMA momentum for running statistics
-        min_var: 1.0e-20               # Minimum variance for numerical stability
+        momentum: 0.005               # EMA momentum for running statistics
+        min_var: 1.0e-20              # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency
       embedding:
         _target_: model.E_identity
         _input_: [x]
       optimizer:
-        lr: 0.01
+        lr: 0.005
         lr_decay_factor: 0.5
         scheduler_patience: 16
       inference:
