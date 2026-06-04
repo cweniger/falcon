@@ -42,7 +42,7 @@ class OptimizerConfig:
 
     lr: float = 1e-2
     betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
-    lr_decay_factor: float = 0.1
+    lr_decay_factor: float = 1.0  # 1.0 = no LR decay (scheduler disabled)
     scheduler_patience: int = 8
 
 

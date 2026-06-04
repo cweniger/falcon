@@ -122,11 +122,14 @@ class GaussianFullCov(StepwiseEstimator):
 
         opt_cfg = self.cfg.optimizer
         self._optimizer = AdamW(self._model.parameters(), lr=opt_cfg.lr, betas=opt_cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=opt_cfg.lr_decay_factor,
-            patience=opt_cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=opt_cfg.lr_decay_factor,
+                patience=opt_cfg.scheduler_patience,
+            )
+            if opt_cfg.lr_decay_factor < 1.0 else None
         )
         self.networks_initialized = True
         debug("GaussianFullCov initialised.")
@@ -186,7 +189,8 @@ class GaussianFullCov(StepwiseEstimator):
             )
             log({"checkpoint": epoch})
 
-        self._scheduler.step(val_loss)
+        if self._scheduler is not None:
+            self._scheduler.step(val_loss)
         lr = self._optimizer.param_groups[0]["lr"]
         log({"lr": lr})
 
@@ -272,11 +276,14 @@ class GaussianFullCov(StepwiseEstimator):
 
         opt_cfg = self.cfg.optimizer
         self._optimizer = AdamW(self._model.parameters(), lr=opt_cfg.lr, betas=opt_cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=opt_cfg.lr_decay_factor,
-            patience=opt_cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=opt_cfg.lr_decay_factor,
+                patience=opt_cfg.scheduler_patience,
+            )
+            if opt_cfg.lr_decay_factor < 1.0 else None
         )
         self.networks_initialized = True
 
