@@ -11,12 +11,12 @@ from falcon.estimators.stepwise_base import (
     LossBasedEstimator,
     TrainingLoopConfig,
 )
-from falcon.estimators.gaussian import (
-    Gaussian,
+from falcon.estimators.gaussian import Gaussian
+from falcon.estimators.gaussian_fullcov import (
     GaussianConfig,
+    GaussianFullCov,
     GaussianPosterior,
 )
-from falcon.estimators.gaussian_fullcov import GaussianFullCov
 
 __all__ = [
     "Flow",
