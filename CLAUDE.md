@@ -26,9 +26,6 @@ falcon sample proposal -o outputs/exp01          # Sample from proposal distribu
 # Visualize graph structure
 falcon graph                                     # Display ASCII graph visualization
 
-# Real-time monitoring (requires: pip install "falcon-sbi[monitor]")
-falcon monitor                                   # TUI dashboard for training progress
-
 # Run examples
 cd examples/01_minimal && falcon launch -o outputs/run_01
 ```
@@ -149,7 +146,7 @@ graph:
 
 ## Key Files
 
-- `falcon/cli.py`: Entry point, implements `launch_mode`, `sample_mode`, `graph_mode`, `monitor_mode`
+- `falcon/cli.py`: Entry point, implements `launch_mode`, `sample_mode`, `graph_mode`
 - `falcon/core/graph.py`: Graph, Node, and CompositeNode definitions
 - `falcon/core/deployed_graph.py`: Runtime execution with Ray
 - `falcon/core/base_estimator.py`: Abstract estimator interface
@@ -161,5 +158,4 @@ graph:
 - `falcon/priors/hypercube.py`: Hypercube mapping prior distribution
 - `falcon/priors/product.py`: Product prior with latent space transformations
 - `falcon/embeddings/builder.py`: Declarative embedding pipeline builder
-- `falcon/interactive.py`: Interactive TUI display for launch mode
 - `examples/`: 01_minimal, 02_bimodal, 03_composite, 04_gaussian, 05_linear_regression

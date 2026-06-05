@@ -117,7 +117,6 @@ falcon sample posterior -o outputs/run_01
 | `falcon sample posterior` | Sample from learned posterior |
 | `falcon sample proposal` | Sample from proposal distribution |
 | `falcon graph` | Display graph structure |
-| `falcon monitor` | Launch TUI dashboard |
 
 ## Next Steps
 

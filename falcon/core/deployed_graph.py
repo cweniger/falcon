@@ -456,35 +456,8 @@ class DeployedGraph:
         self.model_path = model_path
         self.log_config = log_config or {}
         self.wrapped_nodes_dict = {}
-        self.monitor_bridge = None
 
-        self._create_monitor_bridge()
         self.deploy_nodes()
-
-    def _create_monitor_bridge(self):
-        """Create the MonitorBridge actor for falcon monitor TUI."""
-        from falcon.core.monitor_bridge import MonitorBridge
-        run_dir = str(self.model_path) if self.model_path else "unknown"
-        try:
-            # Name the actor so falcon monitor can discover it
-            self.monitor_bridge = MonitorBridge.options(
-                name="falcon:monitor_bridge",
-                lifetime="detached",  # Keep alive even if creator dies
-            ).remote(run_dir=run_dir)
-        except ValueError as e:
-            # Actor with this name might already exist from a previous run
-            if "already exists" in str(e):
-                try:
-                    self.monitor_bridge = ray.get_actor("falcon:monitor_bridge")
-                except Exception:
-                    warning("Could not connect to existing monitor bridge")
-                    self.monitor_bridge = None
-            else:
-                warning(f"Could not create monitor bridge: {e}")
-                self.monitor_bridge = None
-        except Exception as e:
-            warning(f"Could not create monitor bridge: {e}")
-            self.monitor_bridge = None
 
     def _check_resource_budget(self):
         """Raise if node GPU/CPU requests exceed cluster capacity."""
@@ -540,7 +513,7 @@ class DeployedGraph:
                     **_ray_options(node.actor_config)
                 ).remote(node, self.graph, self.model_path, self.log_config)
 
-        # Wait for all actors to initialize and register with monitor bridge
+        # Wait for all actors to initialize
         for name, actor in self.wrapped_nodes_dict.items():
             try:
                 # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
@@ -559,9 +532,6 @@ class DeployedGraph:
                 ray.get(done[0])  # re-raise any actor-side exception
                 info(f"  ✓ {name}")
 
-                # Register node with monitor bridge
-                if self.monitor_bridge:
-                    ray.get(self.monitor_bridge.register_node.remote(name, actor))
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
@@ -788,13 +758,6 @@ class DeployedGraph:
         # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor
         dataset_manager = dataset_manager.dataset_manager_actor
 
-        # Register dataset manager with monitor bridge for monitoring
-        if self.monitor_bridge:
-            ray.get(self.monitor_bridge.register_dataset_manager.remote(dataset_manager))
-            # Set log directory so monitor bridge can read log files
-            if graph_path is not None:
-                ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
-
         # Initial data generation: load from disk first, then generate remaining
         # Nodes handle chunking internally based on their sample_chunk_size config
         num_initial = ray.get(dataset_manager.num_initial_samples.remote())
@@ -808,7 +771,7 @@ class DeployedGraph:
         info(f"Initial samples ready ({num_loaded} loaded, {num_to_generate} generated)")
 
         info("")
-        info("Starting analysis. Monitor with: falcon monitor")
+        info("Starting analysis.")
 
         # Training - start all training nodes
         train_futures = {}  # Map future -> node_name for completion tracking
