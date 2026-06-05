@@ -57,7 +57,7 @@ class Run:
     def samples(self) -> SamplesReader:
         """Access samples (posterior, prior, proposal)."""
         if self._samples is None:
-            samples_dir = self.run_dir / "samples_dir"
+            samples_dir = self.run_dir / "samples"
             self._samples = SamplesReader(samples_dir)
         return self._samples
 
@@ -65,8 +65,8 @@ class Run:
     def buffer(self) -> SampleSetReader:
         """Access training buffer samples stored during training.
 
-        Returns a SampleSetReader for the sim_dir (paths.buffer).
-        Samples are stored when buffer.store_fraction > 0.
+        Returns a SampleSetReader for buffer/snapshots.
+        Samples are stored when buffer.snapshot_fraction > 0.
 
         Usage:
             run.buffer[0]           # First stored sample
@@ -74,7 +74,7 @@ class Run:
             run.buffer.stacked['z'] # Stacked array
         """
         if self._buffer is None:
-            buffer_dir = self.run_dir / "sim_dir"
+            buffer_dir = self.run_dir / "buffer" / "snapshots"
             self._buffer = SampleSetReader(buffer_dir)
         return self._buffer
 
@@ -82,7 +82,7 @@ class Run:
     def metrics(self) -> RunReader:
         """Access training metrics."""
         if self._metrics is None:
-            graph_dir = self.run_dir / "graph_dir"
+            graph_dir = self.run_dir / "graph"
             self._metrics = RunReader(graph_dir)
         return self._metrics
 

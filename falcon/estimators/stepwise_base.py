@@ -22,12 +22,13 @@ from falcon.core.logger import log, debug, info, warning, error
 class TrainingLoopConfig:
     """Generic training loop parameters."""
 
-    num_epochs: int = 100
+    max_epochs: int = 100
     batch_size: int = 128
     early_stop_patience: int = 16
     cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
     max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
     cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
+    prior_epochs: int = 0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -70,6 +71,7 @@ class StepwiseEstimator(BaseEstimator):
         self.condition_keys = condition_keys or []
 
         self._terminated = False
+        self._total_epochs_trained: int = 0
 
         # Networks initialized flag (managed by subclass)
         self.networks_initialized = False
@@ -179,8 +181,8 @@ class StepwiseEstimator(BaseEstimator):
         total_steps = 0
         t0 = time.perf_counter()
 
-        for epoch in range(cfg.num_epochs):
-            log({"epoch": epoch + 1})
+        for epoch in range(cfg.max_epochs):
+            log({"epoch": self._total_epochs_trained + 1})
 
             # Periodic incremental sync
             if epoch > 0 and epoch % sync_every == 0:
@@ -247,7 +249,7 @@ class StepwiseEstimator(BaseEstimator):
             train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
             summary = (
-                f"Epoch {epoch+1}/{cfg.num_epochs}"
+                f"Epoch {self._total_epochs_trained + 1}/{cfg.max_epochs}"
                 f" | steps={total_steps}"
             )
             if n_sims is not None:
@@ -270,6 +272,7 @@ class StepwiseEstimator(BaseEstimator):
             self._record_epoch_history(
                 epoch, train_metrics_avg, val_metrics_avg, t0, buffer
             )
+            self._total_epochs_trained += 1
 
             if epochs_no_improve >= cfg.early_stop_patience:
                 info("Early stopping triggered.")
@@ -282,7 +285,7 @@ class StepwiseEstimator(BaseEstimator):
         self, epoch, train_metrics, val_metrics, t0, buffer
     ) -> None:
         """Record metrics to history dict."""
-        self.history["epochs"].append(epoch + 1)
+        self.history["epochs"].append(self._total_epochs_trained + 1)
         self.history["train_loss"].append(train_metrics.get("loss", 0))
         self.history["val_loss"].append(val_metrics.get("loss", 0))
 
@@ -481,11 +484,14 @@ class LossBasedEstimator(StepwiseEstimator):
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
         self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg.lr_decay_factor,
-            patience=cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=cfg.lr_decay_factor,
+                patience=cfg.scheduler_patience,
+            )
+            if cfg.lr_decay_factor < 1.0 else None
         )
 
         self.networks_initialized = True
@@ -520,7 +526,8 @@ class LossBasedEstimator(StepwiseEstimator):
             self._update_best_model()
             log({"checkpoint": epoch})
 
-        self._scheduler.step(val_loss)
+        if self._scheduler is not None:
+            self._scheduler.step(val_loss)
         lr = self._optimizer.param_groups[0]["lr"]
         log({"lr": lr})
 
@@ -592,6 +599,8 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from widened proposal distribution for adaptive resampling."""
+        if self._total_epochs_trained < self.loop_config.prior_epochs:
+            return self.sample_prior(num_samples)
         result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
         log({
             "sample_proposal:mean": result['value'].mean(),
@@ -616,6 +625,8 @@ class LossBasedEstimator(StepwiseEstimator):
         torch.save({"theta": self._init_theta, "conditions": self._init_conditions},
                    node_dir / "init_tensors.pth")
 
+        torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
+
         # Save history
         torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
         torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
@@ -639,14 +650,20 @@ class LossBasedEstimator(StepwiseEstimator):
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
         self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg.lr_decay_factor,
-            patience=cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=cfg.lr_decay_factor,
+                patience=cfg.scheduler_patience,
+            )
+            if cfg.lr_decay_factor < 1.0 else None
         )
 
         self.networks_initialized = True
+
+        _tep = node_dir / "total_epochs_trained.pth"
+        self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
 
         # Load weights
         self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))

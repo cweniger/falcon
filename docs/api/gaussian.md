@@ -27,7 +27,7 @@ Gaussian is configured through the same four groups as Flow: `loop`, `network`,
 estimator:
   _target_: falcon.estimators.Gaussian
   loop:
-    num_epochs: 1000
+    max_epochs: 1000
     batch_size: 128
     early_stop_patience: 32
   network:
@@ -81,7 +81,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 1000
+        max_epochs: 1000
         batch_size: 128
         early_stop_patience: 32
       network:

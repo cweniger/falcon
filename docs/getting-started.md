@@ -73,7 +73,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 100
+        max_epochs: 100
       network:
         net_type: zuko_nice
 

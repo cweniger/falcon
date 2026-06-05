@@ -12,9 +12,8 @@ logging:
 # Directory configuration
 paths:
   import: "./src"
-  buffer: ${run_dir}/sim_dir
-  graph: ${run_dir}/graph_dir
-  samples: ${run_dir}/samples_dir
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
 
 # Training buffer parameters
 buffer:
@@ -45,7 +44,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 600
+        max_epochs: 600
         batch_size: 128
         early_stop_patience: 32
       network:

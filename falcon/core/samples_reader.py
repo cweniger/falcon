@@ -4,7 +4,7 @@ Samples reader for loading posterior/prior/proposal samples.
 Provides lazy-loaded access to samples stored as individual NPZ files.
 
 Usage:
-    samples = read_samples('outputs/run_01/samples_dir')
+    samples = read_samples('outputs/run_01/samples')
 
     # Access by sample type
     samples.posterior              # SampleSetReader
@@ -153,7 +153,7 @@ class SamplesReader:
     """Top-level reader for all sample types in a samples directory.
 
     Usage:
-        samples = read_samples('outputs/run_01/samples_dir')
+        samples = read_samples('outputs/run_01/samples')
         samples.posterior['x']  # Access posterior samples
         samples.types           # ['posterior', 'prior', ...]
     """
@@ -193,13 +193,13 @@ def read_samples(path: str) -> SamplesReader:
     """Read samples from a samples directory.
 
     Args:
-        path: Path to the samples directory (e.g., 'outputs/run_01/samples_dir')
+        path: Path to the samples directory (e.g., 'outputs/run_01/samples')
 
     Returns:
         SamplesReader providing access to all sample types.
 
     Example:
-        samples = read_samples('outputs/run_01/samples_dir')
+        samples = read_samples('outputs/run_01/samples')
         samples.posterior[32]           # Dict for sample 32
         samples.posterior['x']          # List of arrays
         samples.posterior.stacked['x']  # Stacked array
