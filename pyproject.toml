@@ -4,7 +4,7 @@ build-backend = "setuptools.build_meta"
 
 [project]
 name = "falcon-sbi"
-version = "0.4.1"
+dynamic = ["version"]
 description = "CLI-driven framework for simulation-based inference with large simulators"
 readme = "README.md"
 license = "Apache-2.0"
@@ -43,6 +43,8 @@ falcon = "falcon.cli:main"
 [project.urls]
 Homepage = "https://github.com/cweniger/falcon"
 Documentation = "https://cweniger.github.io/falcon/"
+
+[tool.setuptools_scm]
 
 [tool.setuptools.packages.find]
 include = ["falcon*"]
