@@ -20,7 +20,7 @@ import matplotlib.pyplot as plt
 
 def parse_args():
     parser = argparse.ArgumentParser(description="Run the 04_gaussian falcon example.")
-    parser.add_argument("-o", "--output", default="outputs/run", help="Output directory (default: outputs/run)")
+    parser.add_argument("-o", "--output", default="output/run", help="Output directory (default: output/run)")
     parser.add_argument("-c", "--config", default=None, help="Config file (default: config.yml)")
     return parser.parse_args()
 

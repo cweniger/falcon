@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 # Configuration
-RUN_DIR = "outputs/run"
+RUN_DIR = "output/run"
 
 
 def run_command(cmd: list[str], description: str, cwd: Path = None) -> bool:

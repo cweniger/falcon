@@ -44,7 +44,7 @@ class InteractiveDisplay:
         ┌─────────────────────────────────────────────────────┐
         │ [Driver log - scrolling]                            │
         │ 08:01:46 [INFO] falcon v0.1.0                       │
-        │ 08:01:46 [INFO] Output: outputs/test-run            │
+        │ 08:01:46 [INFO] Output: output/test-run             │
         ├─────────────────────────────────────────────────────┤
         │ ▸ theta | training | 5/300 | loss: -2.91            │
         │ ─────────────────────────────────────────────────── │

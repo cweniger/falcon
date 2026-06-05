@@ -6,7 +6,7 @@ Usage: falcon launch [--output DIR] [--config FILE] [key=value ...]
        falcon graph [--config FILE]
 
 Run directory behavior:
-  - If --output not specified, generates: outputs/adj-noun-YYMMDD-HHMM
+  - If --output not specified, generates: output/adj-noun-YYMMDD-HHMM
   - If --output exists with config.yml, resumes from saved config
   - Otherwise, loads ./config.yml and saves resolved config to output dir
 """

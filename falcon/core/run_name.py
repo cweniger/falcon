@@ -13,6 +13,6 @@ def generate_run_name() -> str:
     return f"{date}-{time}-{slug}"
 
 
-def generate_run_dir(base_dir: str = "outputs") -> str:
+def generate_run_dir(base_dir: str = "output") -> str:
     """Generate a full run directory path."""
     return f"{base_dir}/{generate_run_name()}"

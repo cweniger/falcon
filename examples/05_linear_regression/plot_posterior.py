@@ -20,8 +20,8 @@ def main():
     parser = argparse.ArgumentParser(description="Plot posterior comparison")
     parser.add_argument(
         "--run-dir",
-        default="outputs/latest",
-        help="Run directory (default: outputs/latest)",
+        default="output/latest",
+        help="Run directory (default: output/latest)",
     )
     parser.add_argument(
         "--data",
