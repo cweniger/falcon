@@ -51,7 +51,7 @@ buffer:
   simulate_count: 128
   simulate_when_full: true
   simulate_interval: 0.001
-  snapshot_fraction: 0.1
+  snapshot_every: 10
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
