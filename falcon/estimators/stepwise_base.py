@@ -484,11 +484,14 @@ class LossBasedEstimator(StepwiseEstimator):
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
         self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg.lr_decay_factor,
-            patience=cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=cfg.lr_decay_factor,
+                patience=cfg.scheduler_patience,
+            )
+            if cfg.lr_decay_factor < 1.0 else None
         )
 
         self.networks_initialized = True
@@ -523,7 +526,8 @@ class LossBasedEstimator(StepwiseEstimator):
             self._update_best_model()
             log({"checkpoint": epoch})
 
-        self._scheduler.step(val_loss)
+        if self._scheduler is not None:
+            self._scheduler.step(val_loss)
         lr = self._optimizer.param_groups[0]["lr"]
         log({"lr": lr})
 
@@ -646,11 +650,14 @@ class LossBasedEstimator(StepwiseEstimator):
         # Setup optimizer and scheduler
         cfg = self.optimizer_config
         self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=cfg.lr_decay_factor,
-            patience=cfg.scheduler_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=cfg.lr_decay_factor,
+                patience=cfg.scheduler_patience,
+            )
+            if cfg.lr_decay_factor < 1.0 else None
         )
 
         self.networks_initialized = True
