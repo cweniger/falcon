@@ -142,7 +142,7 @@ graph:
 │       ├── 000000.npz
 │       └── 000001.npz
 ├── buffer/
-│   └── snapshots/              # Buffer snapshots (when snapshot_fraction > 0)
+│   └── snapshots/              # Buffer snapshots (when snapshot_every > 0)
 │       └── 000000.npz
 └── config.yml                 # Saved configuration
 ```
