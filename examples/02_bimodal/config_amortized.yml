@@ -11,7 +11,7 @@ logging:
 
 # Directory configuration
 paths:
-  import: "./src"
+  imports: ["./src"]
   graph: ${run_dir}/graph
   samples: ${run_dir}/samples
 

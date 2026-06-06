@@ -44,7 +44,7 @@ logging:
 # Directory configuration
 # -----------------------------------------------------------------------------
 paths:
-  import: "./src"                       # Local folder(s) with user-defined code (e.g. model.py)
+  imports: ["./src"]                      # Local folder(s) with user-defined code (e.g. model.py)
   graph: ${run_dir}/graph               # Directory for serialized graph and trained networks
   samples: ${run_dir}/samples           # Directory for generated samples (posterior, prior, etc.)
 
