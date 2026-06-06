@@ -11,7 +11,7 @@ Convention: Observations have no batch dimension - shape is [features].
 import numpy as np
 
 # True parameters (no batch dimension)
-z_true = np.array([-2.0, 0.0, 2.0])
+z_true = np.array([-5.0, 0.0, 5.0])
 
 # Observation: x = exp(z), no noise (Asimov)
 x_obs = np.exp(z_true)
