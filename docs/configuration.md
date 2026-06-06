@@ -42,6 +42,28 @@ paths:
 | `graph` | str | `${run_dir}/graph` | Trained models directory |
 | `samples` | str | `${run_dir}/samples` | Output samples directory |
 
+### `sample`
+
+Configure sampling for each sample type:
+
+```yaml
+sample:
+  prior:
+    n: 64
+  posterior:
+    n: 100
+    resimulate: false  # if true, also forward-simulate from each posterior sample
+    exclude_keys: []   # node names to drop from saved NPZ files
+    add_keys: []       # node names to add beyond the default set
+```
+
+| Key | Type | Default | Description |
+|-----|------|---------|-------------|
+| `n` | int | — | Number of samples to generate |
+| `resimulate` | bool | `false` | **(posterior only)** After drawing posterior samples, run each through the forward simulator to produce predicted observations. Saves all node values (latent + simulated). Useful for posterior predictive checks. |
+| `exclude_keys` | list/str | `[]` | Node names to exclude from saved NPZ files |
+| `add_keys` | list/str | `[]` | Node names to add beyond the default set |
+
 ### `buffer`
 
 Configure the rolling sample buffer that feeds training. Falcon continuously simulates new samples in the background while training runs concurrently.

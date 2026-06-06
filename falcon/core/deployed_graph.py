@@ -621,6 +621,39 @@ class DeployedGraph:
                 result[node_name] = [d[key] for d in sample_refs]
         return result
 
+    def resimulate_posterior(self, posterior_refs):
+        """Forward-simulate non-latent nodes conditioned on posterior samples.
+
+        Mirrors the adaptive training loop pattern (see launch() adaptive loop).
+
+        Args:
+            posterior_refs: List[Dict[str, ObjectRef]] from sample_posterior()
+
+        Returns:
+            List[Dict[str, ObjectRef]] with all node values:
+            latent nodes (from posterior) + non-latent nodes (freshly simulated)
+        """
+        num_samples = len(posterior_refs)
+
+        # Extract latent node value refs (nodes that have an estimator)
+        condition_refs = self._extract_value_refs(posterior_refs)
+        latent_nodes = {n.name for n in self.graph.node_list
+                        if n.estimator_cls is not None}
+        condition_refs = {k: v for k, v in condition_refs.items()
+                          if k in latent_nodes}
+
+        # Re-simulate non-latent nodes (forward model) conditioned on posterior values
+        fwd_refs = self._execute_graph(
+            num_samples, self.graph.forward_order, condition_refs, "sample"
+        )
+
+        # _execute_graph skips pre-conditioned nodes (FIXME in _execute_graph),
+        # so merge latent node outputs back from the original posterior refs.
+        for i, post_ref in enumerate(posterior_refs):
+            fwd_refs[i].update({k: v for k, v in post_ref.items()
+                                 if k.split(".")[0] in latent_nodes})
+        return fwd_refs
+
     def _execute_graph(self, num_samples, node_order, condition_refs, sample_method):
         """Execute graph traversal with specified sampling method.
 
