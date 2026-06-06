@@ -7,7 +7,7 @@ config, samples, metrics, and observations.
 Usage:
     from falcon import load_run
 
-    run = load_run('outputs/run_01')
+    run = load_run('output/run_01')
     run.config                    # OmegaConf config
     run.samples.posterior         # SampleSetReader
     run.metrics['z']['loss']      # MetricReader
@@ -66,7 +66,7 @@ class Run:
         """Access training buffer samples stored during training.
 
         Returns a SampleSetReader for buffer/snapshots.
-        Samples are stored when buffer.store_fraction > 0.
+        Samples are stored when buffer.snapshot_every > 0.
 
         Usage:
             run.buffer[0]           # First stored sample
@@ -130,13 +130,13 @@ def load_run(path: str) -> Run:
     """Load a Falcon run from a directory.
 
     Args:
-        path: Path to the run directory (e.g., 'outputs/run_01')
+        path: Path to the run directory (e.g., 'output/run_01')
 
     Returns:
         Run object with access to config, samples, metrics, observations.
 
     Example:
-        run = load_run('outputs/run_01')
+        run = load_run('output/run_01')
         run.config                    # OmegaConf config
         run.samples.posterior['z']    # List of z arrays
         run.samples.posterior.stacked['z']  # Stacked array

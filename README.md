@@ -31,11 +31,11 @@ Run the minimal example (a 3-parameter Gaussian inference problem):
 
 ```bash
 cd examples/01_minimal
-falcon launch -o outputs/run_01
-falcon sample posterior -o outputs/run_01
+falcon launch -o output/run_01
+falcon sample posterior -o output/run_01
 ```
 
-This trains a neural posterior estimator on simulated data, then draws 1000 posterior samples. Results are saved under `outputs/run_01/`.
+This trains a neural posterior estimator on simulated data, then draws 1000 posterior samples. Results are saved under `output/run_01/`.
 
 ## How It Works
 

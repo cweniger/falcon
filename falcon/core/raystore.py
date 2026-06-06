@@ -23,7 +23,7 @@ class BufferConfig:
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
     initial_samples_path: Optional[str] = None
-    store_fraction: float = 0.0
+    snapshot_every: int = 0
 
 
 class Batch:
@@ -137,7 +137,7 @@ class DatasetManagerActor:
         simulate_chunk_size,
         initial_samples_path,
         simulate_when_full,
-        store_fraction,
+        snapshot_every,
         log_config=None,
         snapshots_path=None,
     ):
@@ -150,7 +150,7 @@ class DatasetManagerActor:
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
         self.snapshots_path = Path(snapshots_path) if snapshots_path else None
-        self.store_fraction = store_fraction
+        self.snapshot_every = max(0, int(snapshot_every))
 
         # NPZ storage state
         self._sample_counter = 0
@@ -363,16 +363,22 @@ class DatasetManagerActor:
         info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
-        if self.store_fraction > 0 and self.snapshots_path is not None:
+        if self._snapshot_enabled():
             self._dump_refs(sample_refs)
+
+    def _snapshot_enabled(self):
+        return self.snapshot_every > 0 and self.snapshots_path is not None
+
+    def _should_snapshot_next_sample(self):
+        if not self._snapshot_enabled():
+            return False
+        self._sample_counter += 1
+        return self._sample_counter % self.snapshot_every == 0
 
     def _dump_refs(self, sample_refs: list):
         """Fetch and dump samples to disk."""
-        interval = max(1, int(1.0 / self.store_fraction))
-
         for ref_dict in sample_refs:
-            self._sample_counter += 1
-            if self._sample_counter % interval == 0:
+            if self._should_snapshot_next_sample():
                 sample = {k: ray.get(v) for k, v in ref_dict.items()}
                 self._save_sample(sample)
 
@@ -385,19 +391,16 @@ class DatasetManagerActor:
         np.savez(sample_path, **sample)
 
     def dump_store(self, samples: list):
-        """Store samples to disk based on store_fraction.
+        """Store samples to disk based on snapshot_every.
 
         Args:
             samples: List of sample dicts to potentially store
         """
-        if self.store_fraction <= 0 or self.snapshots_path is None:
+        if not self._snapshot_enabled():
             return
 
-        interval = max(1, int(1.0 / self.store_fraction))
-
         for sample in samples:
-            self._sample_counter += 1
-            if self._sample_counter % interval == 0:
+            if self._should_snapshot_next_sample():
                 self._save_sample(sample)
 
     def garbage_collect_tombstones(self):

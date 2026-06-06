@@ -16,9 +16,9 @@
 #   sample   – Sampling parameters for posterior draws after training.
 #
 # Usage:
-#   falcon launch -o outputs/my_run
-#   falcon launch  # auto-generates: outputs/adj-noun-YYMMDD-HHMM
-#   falcon sample posterior -o outputs/my_run
+#   falcon launch -o output/my_run
+#   falcon launch  # auto-generates: output/adj-noun-YYMMDD-HHMM
+#   falcon sample posterior -o output/my_run
 #
 # Notes:
 #   • All outputs (simulations, trained models, logs) are written under
@@ -58,7 +58,7 @@ buffer:
   simulate_count: 64                    # Number of new samples generated per simulation round
   simulate_when_full: true              # If true, keep simulating when buffer is full (old samples disfavoured); if false, stop at max_samples
   simulate_interval: 1                  # Seconds between simulation rounds
-  store_fraction: 0.1                   # Fraction of samples to dump to buffer/snapshots/ (0=none, 1=all)
+  snapshot_every: 10                       # Save every Nth sample to buffer/snapshots/ (0=none, 1=all)
 
 # -----------------------------------------------------------------------------
 # Graph definition using declarative YAML

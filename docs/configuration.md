@@ -56,7 +56,7 @@ buffer:
   simulate_count: 64
   simulate_interval: 1
   simulate_when_full: true
-  store_fraction: 0.0
+  snapshot_every: 0
 ```
 
 | Key | Type | Default | Description |
@@ -67,7 +67,7 @@ buffer:
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
-| `store_fraction` | float | `0.0` | Fraction of simulated samples written to `{paths.buffer}/snapshots/` for inspection (0 = none, 1 = all) |
+| `snapshot_every` | int | `0` | Save every Nth sample to `buffer/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
 
 ### `graph`
 

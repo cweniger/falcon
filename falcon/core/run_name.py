@@ -6,13 +6,13 @@ from coolname import generate_slug
 
 
 def generate_run_name() -> str:
-    """Generate a memorable run name: YYMMDD-HHMM-adjective-noun."""
-    date = datetime.now().strftime("%y%m%d")
-    time = datetime.now().strftime("%H%M")
+    """Generate a memorable run name: YYMMDD-HHMMSS-adjective-noun."""
+    now = datetime.now()
+    date_time = now.strftime("%y%m%d-%H%M%S")
     slug = generate_slug(2)
-    return f"{date}-{time}-{slug}"
+    return f"{date_time}-{slug}"
 
 
-def generate_run_dir(base_dir: str = "outputs") -> str:
+def generate_run_dir(base_dir: str = "output") -> str:
     """Generate a full run directory path."""
     return f"{base_dir}/{generate_run_name()}"
