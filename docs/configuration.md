@@ -31,7 +31,7 @@ Configure file paths:
 
 ```yaml
 paths:
-  import: "."
+  imports: ["."]
   graph:   ${run_dir}/graph
   samples: ${run_dir}/samples
   buffer:  ${run_dir}/buffer   # optional; redirect to a separate volume (e.g. scratch)
@@ -39,7 +39,7 @@ paths:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `import` | str | `"."` | Path to import custom modules |
+| `imports` | list[str] | `null` | Directories prepended to `sys.path` in Ray workers so custom modules (e.g. `model.Simulator`) can be imported |
 | `graph` | str | `${run_dir}/graph` | Trained model checkpoints directory |
 | `samples` | str | `${run_dir}/samples` | Output samples directory |
 | `buffer` | str | `${run_dir}/buffer` | Buffer snapshots directory (`snapshots/` is appended); useful for routing large temporary simulation data to a separate scratch volume while keeping `run_dir` on persistent storage |

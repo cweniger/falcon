@@ -31,10 +31,10 @@ def _ray_options(actor_config):
 
 @ray.remote
 class MultiplexNodeWrapper:
-    def __init__(self, actor_config, node, graph, num_actors, model_path=None, log_config=None):
+    def __init__(self, actor_config, node, graph, num_actors, import_dirs=None, log_config=None):
         self.num_actors = num_actors
         self.wrapped_node_list = [
-            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, model_path, log_config)
+            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, import_dirs, log_config)
             for _ in range(self.num_actors)
         ]
 
@@ -120,7 +120,7 @@ class MultiplexNodeWrapper:
 # actors — sampling reads best_model which is independent of training state.
 @ray.remote
 class NodeWrapper:
-    def __init__(self, node, graph, model_path=None, log_config=None):
+    def __init__(self, node, graph, import_dirs=None, log_config=None):
         # Suppress Ray warning about blocking ray.get in async actor.
         # Ray emits this once per actor via a global flag. We set the flag
         # to True before any ray.get calls to prevent the warning.
@@ -134,11 +134,10 @@ class NodeWrapper:
         except (ImportError, AttributeError):
             pass  # Ray internals changed, warning will appear
 
-        # Add model_path to sys.path if provided
-        if model_path:
-            model_path = Path(model_path).resolve()
-            if str(model_path) not in sys.path:
-                sys.path.insert(0, str(model_path))
+        for p in (import_dirs or []):
+            resolved = str(Path(p).resolve())
+            if resolved not in sys.path:
+                sys.path.insert(0, resolved)
 
         self.node = node
         self.name = node.name
@@ -446,14 +445,14 @@ class NodeWrapper:
 
 
 class DeployedGraph:
-    def __init__(self, graph, model_path=None, log_config=None):
+    def __init__(self, graph, import_dirs=None, log_config=None):
         """Initialize a DeployedGraph with the given conceptual graph of nodes.
 
         Note: This class uses falcon.info(), falcon.warning() etc. for logging.
         These functions use the module-level logger set by cli.py via set_logger().
         """
         self.graph = graph
-        self.model_path = model_path
+        self.import_dirs = import_dirs or []
         self.log_config = log_config or {}
         self.wrapped_nodes_dict = {}
         self.monitor_bridge = None
@@ -464,7 +463,7 @@ class DeployedGraph:
     def _create_monitor_bridge(self):
         """Create the MonitorBridge actor for falcon monitor TUI."""
         from falcon.core.monitor_bridge import MonitorBridge
-        run_dir = str(self.model_path) if self.model_path else "unknown"
+        run_dir = str(self.import_dirs[0]) if self.import_dirs else "unknown"
         try:
             # Name the actor so falcon monitor can discover it
             self.monitor_bridge = MonitorBridge.options(
@@ -532,13 +531,13 @@ class DeployedGraph:
                     node,
                     self.graph,
                     node.num_actors,
-                    self.model_path,
+                    self.import_dirs,
                     self.log_config,
                 )
             else:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
                     **_ray_options(node.actor_config)
-                ).remote(node, self.graph, self.model_path, self.log_config)
+                ).remote(node, self.graph, self.import_dirs, self.log_config)
 
         # Wait for all actors to initialize and register with monitor bridge
         for name, actor in self.wrapped_nodes_dict.items():
