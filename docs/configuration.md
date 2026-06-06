@@ -31,16 +31,18 @@ Configure file paths:
 
 ```yaml
 paths:
-  import: "."
-  graph: ${run_dir}/graph
+  imports: ["."]
+  graph:   ${run_dir}/graph
   samples: ${run_dir}/samples
+  buffer:  ${run_dir}/buffer   # optional; redirect to a separate volume (e.g. scratch)
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `import` | str | `"."` | Path to import custom modules |
-| `graph` | str | `${run_dir}/graph` | Trained models directory |
+| `imports` | list[str] | `null` | Directories prepended to `sys.path` in Ray workers so custom modules (e.g. `model.Simulator`) can be imported |
+| `graph` | str | `${run_dir}/graph` | Trained model checkpoints directory |
 | `samples` | str | `${run_dir}/samples` | Output samples directory |
+| `buffer` | str | `${run_dir}/buffer` | Buffer snapshots directory (`snapshots/` is appended); useful for routing large temporary simulation data to a separate scratch volume while keeping `run_dir` on persistent storage |
 
 ### `buffer`
 
@@ -65,7 +67,7 @@ buffer:
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
-| `snapshot_every` | int | `0` | Save every Nth sample to `buffer/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
+| `snapshot_every` | int | `0` | Save every Nth sample to `{paths.buffer}/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
 
 ### `graph`
 

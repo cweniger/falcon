@@ -4,11 +4,21 @@ import sys
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import ray
 from omegaconf import MISSING
 from falcon.core.logger import Logger, set_logger, log, info, warning, error
+
+
+@dataclass
+class PathConfig:
+    """Configuration for file-system paths."""
+
+    graph: str = MISSING
+    samples: Optional[str] = None
+    buffer: Optional[str] = None
+    imports: Optional[List[str]] = None  # directories prepended to sys.path in Ray workers
 
 
 @dataclass

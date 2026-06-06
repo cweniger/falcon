@@ -233,6 +233,16 @@ def load_config(config_name: str = "config.yml", run_dir: str = None, overrides:
     return cfg
 
 
+def _resolve_paths(cfg):
+    """Merge cfg.paths against PathConfig and return a plain dict."""
+    from omegaconf import OmegaConf
+    from falcon.core.raystore import PathConfig as _PathConfig
+    return OmegaConf.to_container(
+        OmegaConf.merge(OmegaConf.structured(_PathConfig), cfg.paths),
+        resolve=True,
+    )
+
+
 class TeeOutput:
     """Write to both terminal and log file."""
     def __init__(self, log_file, terminal):
@@ -318,9 +328,9 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
     lines.append("=" * 60)
     lines.append(f"falcon launch {status}")
     lines.append(f"Output:  {output_dir}")
-    samples_path = cfg.paths.get("samples", f"{cfg.run_dir}/samples")
-    lines.append(f"Samples: {samples_path}")
-    graph_path = Path(cfg.paths.graph)
+    paths = _resolve_paths(cfg)
+    lines.append(f"Samples: {paths['samples'] or f'{cfg.run_dir}/samples'}")
+    graph_path = Path(paths['graph'])
     lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
     try:
         node_names = list(cfg.graph.keys())
@@ -453,7 +463,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         info_fn(f"  {key}: {value.shape}")
 
     # Determine output directory (flat structure)
-    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples")
+    samples_dir = _resolve_paths(cfg)["samples"] or f"{cfg.run_dir}/samples"
     output_dir = Path(samples_dir) / sample_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -505,6 +515,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
 
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
+    path_cfg = _resolve_paths(cfg)
 
     # Generate wandb group if not set - use run-dir folder name
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
@@ -514,7 +525,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
             logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
 
     # Ensure local dir is set to graph path
-    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+    logging_cfg.setdefault("local", {})["dir"] = path_cfg["graph"]
 
     # Create driver logger and set as module-level logger
     # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
@@ -588,7 +599,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
 
     # Start status polling thread for interactive mode
     status_thread = None
-    graph_path = Path(cfg.paths.graph)
+    graph_path = Path(path_cfg["graph"])
     if display:
         # Set log directory so display can read node output.log files
         display.set_log_dir(str(graph_path))
@@ -660,7 +671,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         # 1) Deploy graph (pass logging config)
         deployed_graph = falcon.DeployedGraph(
             graph,
-            model_path=cfg.paths.get("import"),
+            import_dirs=path_cfg["imports"],
             log_config=logging_cfg,
         )
 
@@ -668,9 +679,10 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
         buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        buffer_base = path_cfg["buffer"] or str(Path(cfg.run_dir) / "buffer")
         dataset_manager = falcon.get_ray_dataset_manager(
             buffer_cfg,
-            snapshots_path=str(Path(cfg.run_dir) / "buffer" / "snapshots"),
+            snapshots_path=str(Path(buffer_base) / "snapshots"),
             log_config=logging_cfg,
         )
 
@@ -780,8 +792,9 @@ def sample_mode(cfg, sample_type: str) -> None:
     from falcon.core.logger import Logger, set_logger, info
 
     # Setup logging config
+    path_cfg = _resolve_paths(cfg)
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
-    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+    logging_cfg.setdefault("local", {})["dir"] = path_cfg["graph"]
 
     # Create driver logger and set as module-level logger
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
@@ -823,7 +836,7 @@ def sample_mode(cfg, sample_type: str) -> None:
     # Deploy graph for sampling
     deployed_graph = falcon.DeployedGraph(
         graph,
-        model_path=cfg.paths.get("import"),
+        import_dirs=path_cfg["imports"],
         log_config=logging_cfg,
     )
 
@@ -832,15 +845,15 @@ def sample_mode(cfg, sample_type: str) -> None:
         sample_refs = deployed_graph.sample(num_samples)
 
     elif sample_type == "posterior":
-        deployed_graph.load(Path(cfg.paths.graph))
+        deployed_graph.load(Path(path_cfg["graph"]))
         sample_refs = deployed_graph.sample_posterior(num_samples, observations)
 
     elif sample_type == "proposal":
-        deployed_graph.load(Path(cfg.paths.graph))
+        deployed_graph.load(Path(path_cfg["graph"]))
         sample_refs = deployed_graph.sample_proposal(num_samples, observations)
 
     elif sample_type == "ppd":
-        deployed_graph.load(Path(cfg.paths.graph))
+        deployed_graph.load(Path(path_cfg["graph"]))
         sample_refs = deployed_graph.sample_ppd(num_samples, observations)
 
     else:
@@ -924,7 +937,7 @@ def parse_args():
             elif arg.startswith("--refresh="):
                 refresh = float(arg.split("=", 1)[1])
             i += 1
-        return mode, None, None, None, None, False, 16, address, refresh
+        return mode, None, None, None, None, False, 16, True, None, address, refresh
 
     sample_type = None
     if mode == "sample":
