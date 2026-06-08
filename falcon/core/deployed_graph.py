@@ -1,6 +1,5 @@
 import time
 import ray
-import asyncio
 import torch
 import os
 import sys
@@ -788,9 +787,9 @@ class DeployedGraph:
             graph_path: Path to save/load graph
             stop_check: Optional callable that returns True when graceful stop is requested
         """
-        asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check))
+        self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
-    async def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
+    def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
         # Load graph if saved model files exist (not just logging directories)
         if graph_path is not None and any(graph_path.glob("*/*.pth")):
             self.load(graph_path)
