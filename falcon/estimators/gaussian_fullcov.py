@@ -335,7 +335,12 @@ class GaussianFullCov(StepwiseEstimator):
 
         theta_latent = self.simulator_instance.inverse(theta, mode="standard_normal")
 
-        embedding_config = OmegaConf.to_container(self.cfg.embedding, resolve=True)
+        raw_embedding = self.cfg.embedding
+        embedding_config = (
+            OmegaConf.to_container(raw_embedding, resolve=True)
+            if raw_embedding is not None
+            else None
+        )
         embedding = instantiate_embedding(embedding_config).to(self.device)
         embedding.eval()
         with torch.no_grad():
