@@ -1,6 +1,7 @@
 """Flow-based posterior estimation (was SNPE_A)."""
 
 import copy
+import inspect
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -13,6 +14,7 @@ from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.logger import log, debug, info, warning, error
+from falcon.core.flat_config import flat_to_nested, apply_flat_signature
 from falcon.estimators.flow_density import FlowDensity
 from falcon.estimators.stepwise_base import StepwiseEstimator, TrainingLoopConfig
 from falcon.embeddings import instantiate_embedding
@@ -71,6 +73,53 @@ class FlowConfig:
     device: Optional[str] = None
 
 
+# ==================== Config Builder ====================
+
+
+_FLOW_SECTIONS = {
+    "loop": TrainingLoopConfig,
+    "network": NetworkConfig,
+    "optimizer": OptimizerConfig,
+    "inference": InferenceConfig,
+}
+
+_FLOW_EXTRA_PARAMS = [
+    inspect.Parameter("embedding", inspect.Parameter.KEYWORD_ONLY, default=None),
+    inspect.Parameter("device", inspect.Parameter.KEYWORD_ONLY, default=None),
+]
+
+
+class _FlowConfigBuilder:
+    """Config builder returned by ``Flow(...)`` when called with no positional args.
+
+    Stores flat kwargs (e.g. ``loop_max_epochs=300``) and produces a real
+    :class:`Flow` instance when the graph calls it with positional args.
+    """
+
+    def __init__(self, **flat_kwargs):
+        self._config = flat_to_nested(flat_kwargs, _FLOW_SECTIONS)
+
+    def __call__(
+        self,
+        simulator_instance,
+        theta_key=None,
+        condition_keys=None,
+        config=None,
+    ):
+        """Build the real Flow estimator, merging stored config with any runtime config."""
+        base = OmegaConf.create(self._config)
+        if config is not None:
+            base = OmegaConf.merge(base, config)
+        merged = OmegaConf.to_container(base, resolve=True)
+        return Flow(simulator_instance, theta_key, condition_keys, config=merged)
+
+    def __repr__(self) -> str:
+        return f"Flow({self._config!r})"
+
+
+apply_flat_signature(_FlowConfigBuilder, _FLOW_SECTIONS, _FLOW_EXTRA_PARAMS)
+
+
 # ==================== Flow Implementation ====================
 
 
@@ -83,6 +132,14 @@ class Flow(StepwiseEstimator):
     - Parameter space normalization via hypercube mapping
     - Importance sampling for posterior/proposal
     """
+
+    def __new__(cls, *args, **kwargs):
+        if not args:
+            # Python API: no positional args → return a config builder
+            obj = object.__new__(_FlowConfigBuilder)
+            _FlowConfigBuilder.__init__(obj, **kwargs)
+            return obj
+        return object.__new__(cls)
 
     def __init__(
         self,

@@ -24,7 +24,7 @@ from falcon.core.logger import log, debug
 
 @dataclass
 class NetworkConfig:
-    """Configuration for GaussianPosterior network."""
+    """Configuration for _GaussianPosterior network."""
 
     hidden_dim: int = 128
     num_layers: int = 3
@@ -64,10 +64,10 @@ class GaussianConfig:
     device: Optional[str] = None
 
 
-# ==================== GaussianPosterior Module ====================
+# ==================== _GaussianPosterior Module ====================
 
 
-class GaussianPosterior(nn.Module):
+class _GaussianPosterior(nn.Module):
     """Full covariance Gaussian posterior with eigenvalue-based operations.
 
     Implements the Posterior contract:
@@ -343,7 +343,7 @@ class GaussianFullCov(StepwiseEstimator):
             embedded = embedding(conditions_device)
 
         network_config = OmegaConf.to_container(self.cfg.network, resolve=True)
-        posterior = GaussianPosterior(
+        posterior = _GaussianPosterior(
             param_dim=theta_latent.shape[1],
             condition_dim=embedded.shape[1],
             **network_config,

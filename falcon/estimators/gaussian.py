@@ -1,4 +1,8 @@
-"""Gaussian posterior estimation — Gaussian factory for LossBasedEstimator."""
+"""Gaussian posterior estimation — Gaussian factory for LossBasedEstimator.
+
+TODO: Deprecated. Use falcon.estimators.GaussianFullCov directly.
+      This factory and gaussian.py will be removed in a future release.
+"""
 
 from typing import List, Optional
 
@@ -6,7 +10,7 @@ from omegaconf import OmegaConf
 
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.stepwise_base import LossBasedEstimator
-from falcon.estimators.gaussian_fullcov import GaussianConfig, GaussianPosterior  # noqa: F401
+from falcon.estimators.gaussian_fullcov import GaussianConfig, _GaussianPosterior
 
 
 # ==================== Factory Function ====================
@@ -18,7 +22,7 @@ def Gaussian(
     condition_keys: Optional[List[str]] = None,
     config: Optional[dict] = None,
 ) -> LossBasedEstimator:
-    """Create a LossBasedEstimator with GaussianPosterior.
+    """Create a LossBasedEstimator with _GaussianPosterior.
 
     This is the main entry point for using Gaussian posterior estimation.
     It provides sensible defaults while allowing full customization.
@@ -66,7 +70,7 @@ def Gaussian(
 
     return LossBasedEstimator(
         simulator_instance=simulator_instance,
-        posterior_cls=GaussianPosterior,
+        posterior_cls=_GaussianPosterior,
         embedding_config=embedding_config,
         loop_config=cfg.loop,
         optimizer_config=cfg.optimizer,
@@ -75,5 +79,5 @@ def Gaussian(
         theta_key=theta_key,
         condition_keys=condition_keys,
         device=cfg.device,
-        latent_mode="standard_normal",  # GaussianPosterior assumes N(0,I) prior
+        latent_mode="standard_normal",  # _GaussianPosterior assumes N(0,I) prior
     )

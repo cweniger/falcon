@@ -16,6 +16,7 @@ __all__ = [
     "read_run",
     "load_run",
     "read_samples",
+    "config",
     "estimators",
     "priors",
     "embeddings",
@@ -41,6 +42,7 @@ _LAZY_IMPORTS = {
     "read_run": ".core.run_reader",
     "load_run": ".core.run_loader",
     "read_samples": ".core.samples_reader",
+    "config": ".api",
 }
 
 
