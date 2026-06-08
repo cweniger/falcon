@@ -218,14 +218,19 @@ def _prepare_config(
 
     prebuilt_graph = None
 
-    # If resuming an existing run, use the saved config (ignore target)
-    if saved_config.exists():
-        cfg = OmegaConf.load(saved_config)
-    elif isinstance(target, Graph):
+    if isinstance(target, Graph):
+        # Graph target: always use the live graph object (saved config has
+        # <live object/array> placeholders that can't be re-parsed).
         prebuilt_graph = target
-        base = OmegaConf.create(_DEFAULT_GRAPH_CONFIG)
-        graph_dict = _graph_to_config_dict(target)
-        cfg = OmegaConf.merge(base, {"graph": OmegaConf.create(graph_dict)})
+        if saved_config.exists():
+            cfg = OmegaConf.load(saved_config)
+        else:
+            base = OmegaConf.create(_DEFAULT_GRAPH_CONFIG)
+            graph_dict = _graph_to_config_dict(target)
+            cfg = OmegaConf.merge(base, {"graph": OmegaConf.create(graph_dict)})
+    elif saved_config.exists():
+        # Resume an existing non-Graph run from its saved config.
+        cfg = OmegaConf.load(saved_config)
     elif isinstance(target, Config):
         cfg = OmegaConf.merge(target._dict_config, {})
     elif isinstance(target, DictConfig):
