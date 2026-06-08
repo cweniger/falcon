@@ -54,6 +54,19 @@ class Node:
         self.sample_chunk_size = sample_chunk_size
 
 
+def _short_cls_name(obj) -> str:
+    """Return a short display name for a class, instance, or string target."""
+    if obj is None:
+        return "None"
+    if isinstance(obj, str):
+        if obj.startswith("<live"):
+            return obj.split(":")[-1].strip().rstrip(">").strip()
+        return obj.rsplit(".", 1)[-1]
+    if isinstance(obj, type):
+        return obj.__name__
+    return type(obj).__name__
+
+
 class Graph:
     def __init__(self, node_list=None):
         # Observations supplied directly as arrays via add_node(observed=array)
@@ -242,6 +255,61 @@ class Graph:
         """Merge two graphs."""
         new_node_list = self.node_list + other.node_list
         return Graph(new_node_list)
+
+    # ------------------------------------------------------------------
+    # Rich display helpers
+    # ------------------------------------------------------------------
+
+    def _repr_html_(self) -> str:
+        """Mermaid flowchart for Jupyter/Colab."""
+        import uuid
+
+        uid = uuid.uuid4().hex[:8]
+        lines = ["flowchart LR"]
+
+        for node in self.node_list:
+            sim = _short_cls_name(node.simulator_cls)
+            if node.observed:
+                label = f'"{node.name}<br/><small>{sim} · observed</small>"'
+                color = "fill:#d5f5e3,stroke:#27ae60"
+            elif node.estimator_cls is not None:
+                est = _short_cls_name(node.estimator_cls)
+                label = f'"{node.name}<br/><small>sim:{sim}<br/>est:{est}</small>"'
+                color = "fill:#d6eaf8,stroke:#2980b9"
+            else:
+                label = f'"{node.name}<br/><small>{sim}</small>"'
+                color = "fill:#fef9e7,stroke:#f39c12"
+            lines.append(f"    {node.name}[{label}]")
+            lines.append(f"    style {node.name} {color}")
+
+        for node in self.node_list:
+            for parent in node.parents:
+                lines.append(f"    {parent} --> {node.name}")
+
+        for node in self.node_list:
+            for ev in node.evidence:
+                lines.append(f"    {ev} -.->|evidence| {node.name}")
+
+        mermaid_src = "\n".join(lines)
+        return f"""<div id="falcon-graph-{uid}">
+<pre class="mermaid" style="background:transparent">
+{mermaid_src}
+</pre>
+</div>
+<script>
+(function(){{
+  var render = function(){{
+    mermaid.initialize({{startOnLoad:false,securityLevel:'loose',theme:'default'}});
+    mermaid.run({{nodes:[document.querySelector('#falcon-graph-{uid} .mermaid')]}});
+  }};
+  if(window.mermaid){{ render(); }}
+  else{{
+    var s=document.createElement('script');
+    s.src='https://cdn.jsdelivr.net/npm/mermaid@11/dist/mermaid.min.js';
+    s.onload=render; document.head.appendChild(s);
+  }}
+}})();
+</script>"""
 
     def __str__(self):
         # Return graph structure
