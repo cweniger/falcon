@@ -45,13 +45,10 @@ graph:
         - ['uniform', -1.0, 1.0]
     estimator:
       _target_: falcon.estimators.Flow
-      loop:
-        max_epochs: 300
-        batch_size: 128
-        early_stop_patience: 32
-      network:
-        net_type: zuko_gf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-        theta_norm: true
+      max_epochs: 300
+      net_type: zuko_gf  # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      lr: 0.001
+      gamma: 0.5
       embedding:
         _target_: model.Concatenate
         _input_:
@@ -66,24 +63,23 @@ graph:
           - _target_: model.Linear
             out_features: 512
             _input_: [x]
-      optimizer:
-        lr: 0.001
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
-      inference:
-        gamma: 0.5
-        discard_samples: false
-        log_ratio_threshold: -20
-        sample_reference_posterior: false
-        use_best_models_during_inference: true
+      batch_size: 128
+      early_stop_patience: 32
+      theta_norm: true
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20
+      sample_reference_posterior: false
+      use_best_models: true
     ray:
       num_gpus: 0.5
 
   z2:
     evidence: [x]
-    simulator: 
+    simulator:
       _target_: falcon.priors.Hypercube
-      priors: 
+      priors:
         - ['uniform', -1.2, 1.2]
         - ['uniform', -1.2, 1.2]
         - ['uniform', -1.2, 1.2]
@@ -91,13 +87,10 @@ graph:
         - ['uniform', -1.2, 1.2]
     estimator:
       _target_: falcon.estimators.Flow
-      loop:
-        max_epochs: 300
-        batch_size: 128
-        early_stop_patience: 32
-      network:
-        net_type: nsf # nsf, zuko_gf, maf, nice, sospf, naf, gf
-        theta_norm: true
+      max_epochs: 300
+      net_type: nsf  # nsf, zuko_gf, maf, nice, sospf, naf, gf
+      lr: 0.001
+      gamma: 0.5
       embedding:
         _target_: timm.create_model
         model_name: resnet18 #convnext_tiny
@@ -107,16 +100,15 @@ graph:
         _input_:
           _target_: model.Unsqueeze
           _input_: [x]
-      optimizer:
-        lr: 0.001
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
-      inference:
-        gamma: 0.5
-        discard_samples: false
-        log_ratio_threshold: -20
-        sample_reference_posterior: false
-        use_best_models_during_inference: true
+      batch_size: 128
+      early_stop_patience: 32
+      theta_norm: true
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20
+      sample_reference_posterior: false
+      use_best_models: true
     ray:
       num_gpus: 0.5
 

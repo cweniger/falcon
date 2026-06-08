@@ -78,18 +78,9 @@ graph:
 
     estimator:
       _target_: falcon.estimators.GaussianFullCov
-      loop:
-        max_epochs: 1000
-        batch_size: 128
-        early_stop_patience: 32
-        cache_sync_every: 1
-        cache_on_device: false
-      network:
-        hidden_dim: 128
-        num_layers: 3
-        momentum: 0.1
-        min_var: 1.0e-20
-        eig_update_freq: 1
+      max_epochs: 1000
+      lr: 0.001
+      gamma: 0.2
       embedding:
         _target_: model.E_fft_whiten
         #_target_: model.E_fft_norm
@@ -97,15 +88,20 @@ graph:
         n_bins: 1000000
         n_features: 128
         n_modes: 128
-      optimizer:
-        lr: 0.001
-        betas: [0.9, 0.9]
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
-      inference:
-        gamma: 0.2
-        discard_samples: false
-        log_ratio_threshold: -20.0
+      batch_size: 128
+      early_stop_patience: 32
+      cache_sync_every: 1
+      cache_on_device: false
+      hidden_dim: 128
+      num_layers: 3
+      momentum: 0.1
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      betas: [0.9, 0.9]
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
 
     sample_chunk_size: 128
     ray:
