@@ -34,22 +34,26 @@ in the rest of this document:
   typed keyword arguments (`loop_num_epochs=600`), not nested dicts or nested
   config objects. The YAML file stays nested; a deterministic transform bridges
   the two.
-- **`_target_` unification is Step 0 of this plan**, not a separate effort. The
-  YAML-to-API bridge depends on it.
 - **`launch()` blocks by default.** A non-blocking `launch(wait=False)` mode is a
   supported, real escape hatch, justified by the live-monitoring use case.
 - **Ray cluster setup is separate from running a graph.** `falcon.init()` sets up
   or connects to Ray; `launch()` reuses it.
 - **The prior list-syntax is kept** as `Product`'s own field encoding. It is not
-  desugared into `_target_` blocks.
+  desugared into `_target_` blocks, and the existing list-of-lists syntax also
+  serves as the Python API — no separate typed-marginal objects needed for v1.
 - **Worked notebooks are the onboarding vehicle.** The per-run auto-saved
   `config.yml` is the bridge to the CLI.
 - **The v1 notebook display is one interleaved, color-tagged log stream** (driver
   plus all node logs). Structured ipywidgets displays are optional phase 2.
+- **`falcon.Simulator` base class is not needed for v1.** Duck typing is
+  sufficient; a base class adds value only when actor-environment hooks (JAX
+  passthrough) are implemented.
+- **`falcon.session()` context manager is deferred.** Not needed before the basic
+  API works; add later for CI scoped lifetimes.
 
 Still open (see Open Questions): the outcome of the cloudpickle spike (gates
-everything notebook-class-related), whether to adopt a short-name registry, and
-the exact flattened-signature parameter counts.
+everything notebook-class-related) and the exact flattened-signature parameter
+counts.
 
 ## Design principles
 
@@ -202,8 +206,7 @@ defaults show only as `<factory>`. Therefore:
 There are two distinct mechanisms:
 
 - **Flat typed kwargs** are the *constructor surface* of a fixed-schema object
-  (an estimator, the buffer). They autocomplete. Used in `Gaussian(loop_num_epochs=...)`
-  and `launch(graph, buffer_min_samples=...)`.
+  (an estimator, the buffer). They autocomplete. Used in `Gaussian(loop_num_epochs=...)`.
 - **Dotted-string overrides** are the *arbitrary-deep-path* escape hatch, used to
   override into a loaded `Config` whose paths include arbitrary user-chosen node
   names: `cfg.override("graph.theta.estimator.loop.num_epochs=150")`. These do
@@ -212,82 +215,31 @@ There are two distinct mechanisms:
 Flat kwargs are the discovery path; dotted overrides are the catch-all. They are
 not interchangeable and the docs must keep them distinct.
 
-## Step 0: unify `_target_` resolution
+## Step 0: unify `_target_` resolution — DEFERRED
 
-The YAML-to-API bridge requires that the config-to-class mapping be total and
-unambiguous. Today it is not: Falcon has three different mechanisms for "pick an
-implementation" (`_target_` import paths, the `net_type` registry string, and
-the prior list-syntax), and `_target_` itself sometimes points at a class,
-sometimes at a factory. Step 0 cleans this up. It is independently worth doing.
+**Decision (2026-06-08): Step 0 is deferred indefinitely.**
 
-### The two-layer rule
+The original motivation was to replace `net_type` (a bare string discriminator)
+with `Flow.MAF()` / `Flow.NSF()` variant classes so that per-variant
+hyperparameters could be exposed with full autocomplete. That surface only becomes
+load-bearing when those hyperparameters are actually exposed. Right now all 13
+flow builders are called identically — `builder(theta, s, z_score_x=None,
+z_score_y=None)` — so `net_type` is just a plain product field, and the
+variant-class refactor is pure churn with no functional benefit.
 
-- **Layer 1, slot boundaries: uniform `_target_` dispatch.** Choosing which class
-  fills a sum or composite slot (`simulator`, `estimator`, a flow architecture,
-  an embedding component) always goes through `_target_`. `_target_` is the
-  discriminator and appears exactly when a slot is a sum or composite. Product
-  slots have no `_target_` (their class is fixed by position).
-- **Layer 2, inside a class: the class owns its field representations.** Once
-  `_target_` has selected a class, that class decides how to interpret its own
-  keys, including using a compact domain syntax. The clarity comes from
-  delegation, not from forcing uniformity all the way down.
+If per-variant hyperparameters are ever needed before a full variant-class refactor
+is worthwhile, the pragmatic escape hatch is `net_config: dict = {}` passed
+through to the builder.
 
-### Rules
+Similarly, `NetworkConfig` conflates architecture (`net_type`) and normalization
+fields (`theta_norm`, `norm_momentum`, etc.), but untangling them has no practical
+benefit until variant-specific params are added.
 
-1. **`_target_` is the single discriminator.** Absorb `net_type` into `_target_`.
-   The 13 flow builders become classes; `_target_` resolves to a class.
-2. **One resolver, two accepted value forms.** `_target_` accepts a dotted import
-   path or a registered short name. A short-name registry (see Open Questions:
-   `catalogue`) keeps YAML ergonomic; the resolver is one function.
-3. **`_target_` resolves to a class, not a bare factory.** A class gives an
-   introspectable signature (the schema), nested-class namespacing (`Flow.MAF`),
-   and round-trip serialization (`type(obj).__qualname__`). Make today's factory
-   functions (e.g. `Gaussian`) into classes even if they delegate internally.
-   This is the same no-`**kwargs` constraint as principle 4, applied to YAML.
-4. **Reserved structural keys are a fixed, documented set.** `_target_`,
-   `_input_` at component level; `parents`, `evidence`, `observed`, `ray` at
-   graph-node level. Every other key is a constructor kwarg. The rule is total
-   with no exceptions. (Make the underscore-prefix convention consistent so
-   "is this key structural?" is answerable by eye.)
+The prior list-syntax (`['uniform', -100, 100]`) is also left as-is: it is already
+the Python API, the same list-of-lists form works in both YAML and notebook code,
+and no typed-marginal object layer is needed.
 
-### The prior list-syntax stays
-
-`priors: [['uniform', -100, 100], ['normal', 0, 1], ...]` is **not** desugared
-into per-marginal `_target_` blocks. It is `Product`'s own field encoding for a
-**collection** slot, and is documented on `Product`. The discipline that keeps it
-clean rather than ad hoc: it is a total, documented, 1:1 serialization of typed
-objects. Every `['name', *args]` entry has an exact typed twin:
-
-```
-['uniform', -100, 100]   ==   falcon.priors.Uniform(low=-100, high=100)
-['normal',  0, 1]        ==   falcon.priors.Normal(loc=0, scale=1)
-['fixed',   3.0]         ==   falcon.priors.Fixed(value=3.0)
-```
-
-Same objects, two encodings. The YAML list form and the Python object form are
-two serializations of the identical list of marginals; `Product` owns the
-bidirectional parse. The notebook form is `Product([Uniform(...), Fixed(...)])`.
-The one documented cost: the list form is positional, so the reader must know the
-argument order; this is documented on `Product`.
-
-### Untangle Flow's `network` config
-
-Flow's current `NetworkConfig` conflates two shapes: the architecture (a sum:
-`net_type`) and input normalization (a product: `theta_norm`, `norm_momentum`,
-`adaptive_momentum`, `use_log_update`). Step 0 separates them: normalization is a
-product and flattens (`norm_theta`, `norm_momentum`, ...); architecture is a sum
-and becomes the `network=Flow.<Variant>(...)` object slot. The flat/object split
-forces this cleanup, which is a point in its favor.
-
-### `net_type` today
-
-Right now the 13 flow builders are called with no variant-specific
-hyperparameters (`flow_density.py` calls `builder(theta, s, z_score_x=None, z_score_y=None)`).
-So today the flow architecture is effectively a bare-string product, and the
-variant classes (`Flow.MAF`, `Flow.NSF`, ...) have empty constructors. The
-sum-as-object surface becomes load-bearing only when the builders'
-hyperparameters are exposed. Step 0 should still introduce the variant classes
-so the surface is stable when that happens.
+**Consequence for sequencing**: implementation starts at Step 1.
 
 ## Target notebook UX (the spec)
 
@@ -317,7 +269,7 @@ falcon.corner(samples)
 ```python
 import falcon, torch
 
-class MySimulator(falcon.Simulator):          # thin, documented, optional base class
+class MySimulator:                             # plain callable, duck typing
     def __call__(self, theta):
         return theta + 0.1 * torch.randn_like(theta)
 
@@ -326,8 +278,8 @@ graph = falcon.Graph()
 graph.add_node(
     "theta",
     simulator=falcon.priors.Product([          # collection -> list of typed marginals
-        falcon.priors.Uniform(-5, 5),
-        falcon.priors.Uniform(-5, 5),
+        ['uniform', -5, 5],
+        ['uniform', -5, 5],
     ]),
     estimator=falcon.estimators.Gaussian(      # sum -> object; products inside flatten
         loop_num_epochs=300,
@@ -347,20 +299,25 @@ graph.add_node(
 
 graph                                          # rich repr: Mermaid DAG
 
-run = falcon.launch(graph, buffer_min_samples=4000)
+run = falcon.launch(graph)
 ```
 
-### A Flow estimator with a variant and a composite embedding
+### A Flow estimator with a composite embedding
 
 ```python
 estimator=falcon.estimators.Flow(
     loop_num_epochs=600,                       # product -> flat
     optimizer_lr=1e-3,                         # product -> flat
-    network=falcon.estimators.Flow.MAF(),      # sum -> variant object
-    embedding=falcon.Sequential(               # composite -> construction expression
-        falcon.embeddings.PCAProjector(n_components=64, inputs=["x"]),
-        MyCNN(channels=32),                    # __main__ nn.Module
-    ),
+    network_net_type="maf",                    # product -> flat string field
+    embedding={                                # composite -> nested _input_ config
+        '_target_': 'MyCNN',
+        'channels': 32,
+        '_input_': {
+            '_target_': 'falcon.embeddings.PCAProjector',
+            'n_components': 64,
+            '_input_': 'x',
+        },
+    },
 )
 ```
 
@@ -373,7 +330,7 @@ is wrong.
 
 Split `launch_mode` in `falcon/cli.py` into three:
 
-- `_run_pipeline(cfg, *, posterior_sample, timeout, stop_check, log_sink) -> Path`:
+- `_run_pipeline(cfg, *, auto_sample, timeout, stop_check, log_sink) -> Path`:
   graph build, deploy, train, optional posterior sampling, end-of-run summary,
   teardown. No terminal control, no signal handlers, no Ray init/shutdown (see
   Ray lifecycle).
@@ -393,37 +350,39 @@ The test of the structure: `falcon launch` and `falcon.launch()` should read as
 two thin adapters over one core, differing only in frontend (terminal TUI vs cell
 output) and input format (argv vs Python objects). CLI flags map 1:1 onto API
 parameters (`-o` to `output=`, `key=value` to `overrides=`,
-`--no-posterior-sample` to `posterior_sample=`, `--timeout` to `timeout=`). If
+`--no-auto-sample` to `auto_sample=`, `--timeout` to `timeout=`). If
 the CLI ends up with pipeline logic the API path does not also exercise, the
 split has leaked.
 
 ## The public API
 
 ```
-falcon.init(address=None, num_cpus=None, num_gpus=None, **ray_init_kwargs)
+falcon.init(**ray_init_kwargs)
 falcon.config(source) -> Config                       # source: path | dict | DictConfig
 falcon.launch(target, output=None, *, overrides=None,
-              posterior_sample=True, timeout=None, wait=True,
-              buffer_min_samples=..., buffer_max_samples=..., ...) -> Run | LaunchHandle
+              auto_sample=True, timeout=None, wait=True) -> Run | LaunchHandle
 falcon.shutdown()
-falcon.session(...)                                   # context manager
 ```
 
 - **`Config`** wraps `DictConfig`: dict-like access, `.override(*dotted_strings)`,
   `.to_yaml()`, `_repr_markdown_`. OmegaConf does the real work.
 - **`falcon.launch(target, ...)`** accepts a `Config` / dict / path **or** a
-  `Graph`. For a `Graph` it synthesizes a config. Run-level product config is
-  passed as flat kwargs synthesized from `BufferConfig` etc.
-  (`buffer_min_samples=...`); `output`, `timeout`, `posterior_sample`, `wait` are
-  run options; `overrides=` carries arbitrary dotted-string overrides as an
-  escape hatch. Cluster-level Ray config is **not** here; it is on `falcon.init()`.
-  `launch()` calls `_run_pipeline` with no TUI and a notebook log sink.
+  `Graph`. Buffer, network, and other model config belongs in the config object
+  (or via `overrides=`), not as kwargs on `launch()`. `output`, `timeout`,
+  `auto_sample`, and `wait` are the only run-level options here. Cluster-level Ray
+  config lives on `falcon.init()`. `launch()` calls `_run_pipeline` with no TUI
+  and a notebook log sink.
 - **`Run`** is returned (blocking mode). It gains methods, not top-level
   functions: `run.sample_posterior(n)`, `.sample_prior(n)`, `.sample_proposal(n)`
   (each writes NPZ for CLI parity and returns the samples), `run.plot_metrics()`,
   `run.status`, `run.runtime`, `run.config`. `load_run` is reused as-is. There is
   no `falcon.load` alias and no top-level `falcon.sample()`; sampling is a `Run`
   method because a `Run` owns the config and the trained graph.
+- **`falcon.init(**ray_init_kwargs)`** is a thin wrapper around `ray.init()`.
+  Named `num_cpus` / `num_gpus` parameters are omitted: when connecting to an
+  existing cluster (`address=...`) they are meaningless; when starting a local
+  cluster Ray detects resources automatically. Pass any `ray.init()` kwarg
+  directly. Idempotent: a second call is a no-op.
 
 ### Blocking vs non-blocking
 
@@ -471,21 +430,21 @@ Starting a local Ray is cheap and a beginner should not have to think about it.
 Either way, Ray is initialized **once per session** and reused.
 
 ```
-falcon.init(address=None, num_cpus=None, num_gpus=None, ...)   # optional, once, idempotent
-falcon.launch(...)            # uses existing Ray; lazily calls init() if none; never shuts down
-falcon.shutdown()             # explicit teardown
-with falcon.session(...): ... # scoped lifetime (and for CI)
+falcon.init(**ray_init_kwargs)   # optional, once, idempotent; thin wrapper around ray.init()
+falcon.launch(...)               # uses existing Ray; lazily calls init() if none; never shuts down
+falcon.shutdown()                # explicit teardown
 ```
 
-- `falcon.init()` connects to an existing cluster (`address`) or starts a local
-  one. Idempotent: a second call is a no-op. **Cluster-level Ray resources live
-  here**, not on `launch()`, because `launch()` reuses whatever Ray is up and
-  cannot meaningfully re-specify cluster resources on a second call.
+- `falcon.init()` connects to an existing cluster (`address=...` passed as a
+  kwarg) or starts a local one. Idempotent: a second call is a no-op.
+  **Cluster-level Ray resources live here**, not on `launch()`.
 - `launch()` reuses an existing Ray, lazily calls `init()` with defaults if none
   exists (so a beginner does nothing), and **never shuts Ray down on return**, so
   state and actors survive across cells.
 - The CLI keeps init-and-shutdown inside its one-shot process. This is a
   deliberate, documented divergence from the API path.
+- `falcon.session()` context manager is deferred; use `falcon.init()` +
+  `falcon.shutdown()` explicitly for now.
 
 Beginner: do nothing, the first `launch()` brings up local Ray. Expert on a
 cluster: `falcon.init(address=...)` once at the top, then many `launch()` calls
@@ -539,8 +498,8 @@ module. We do not silently write temp modules.
 
 Every standard config system (Hydra, spaCy, AllenNLP) assumes components are
 importable. Notebook `__main__` classes break that: they have no import path, so
-they cannot serialize back to a `_target_` string. This is the one place Falcon
-is off the beaten path, and it is handled with a deliberate, narrow exception:
+they cannot serialize back to a `_target_` string. This is handled with a
+deliberate, narrow exception:
 
 - When `launch()` saves the resolved `config.yml`, a live notebook-defined object
   is written as a placeholder, `"<live object: ClassName>"`, not a real `_target_`.
@@ -552,7 +511,9 @@ is off the beaten path, and it is handled with a deliberate, narrow exception:
 So a run using only library components produces a fully runnable `config.yml`; a
 run using notebook-defined classes produces a `config.yml` that is viewable and
 instructive but not replayable without the notebook. The example notebooks must
-state this honestly.
+state this honestly. Source extraction to a `_live_objects.py` artefact is not
+implemented for v1 — the notebook itself is already the natural reproducibility
+artefact.
 
 ## JAX and process-global state
 
@@ -580,8 +541,8 @@ state that does **not** serialize. Ray actors are separate processes, so:
 Design consequence: the node's Ray actor config should expose a first-class
 `env` / `runtime_env` passthrough so users can set `JAX_ENABLE_X64`,
 `XLA_PYTHON_CLIENT_PREALLOCATE`, etc. per actor without hand-rolling it. The
-`falcon.Simulator` base class docs should show the JAX pattern explicitly (x64
-and `jit` in `__init__`, per-actor key splitting).
+`add_node` docs should show the JAX pattern explicitly (x64 and `jit` in
+`__init__`, per-actor key splitting).
 
 ## Live monitoring and dynamic output
 
@@ -712,16 +673,18 @@ is on well-paved road.
 
 ## Example notebooks (deliverables)
 
-Each `examples/0X_*` gets a companion `notebook.ipynb`:
+Each `examples/0X_*` gets a companion `notebook.py` (jupytext percent format),
+kept as source of truth alongside the existing CLI scripts. The `.ipynb` files
+are generated build artefacts, not checked in. Existing `run.py` / `run_example.py`
+files are left untouched; the notebook scripts are new, separate files.
 
 - `01_minimal`: cell story A: load config, override, launch, inspect, sample.
 - `02_bimodal`: config register: compare training strategies by editing config.
 - `03_composite`: programmatic register: multi-node graph, composite embedding.
-- `04_gaussian`: define-your-own: write a `Simulator` subclass in a cell.
+- `04_gaussian`: define-your-own: write a plain callable simulator in a cell.
 - `05_linear_regression`: the full define-your-own story with an explicit FFT
   embedding network defined in a cell, the cloudpickle caveats surfaced, and a
-  check against the analytic Gaussian posterior. (A worked draft of this notebook
-  exists from the design discussion.)
+  check against the analytic Gaussian posterior.
 - A new `examples/00_tour.ipynb`: narrative tour of the whole framework.
 
 These are the acceptance tests for the API. Onboarding flows through them: a
@@ -739,23 +702,19 @@ notebook rot is caught. Add a `notebooks` extra to `pyproject.toml`
 
 ## Phasing / sequencing
 
-0. **Step 0: unify `_target_` resolution.** Absorb `net_type`, introduce the flow
-   variant classes, untangle Flow's network/normalization configs, fix reserved
-   structural keys, document the prior list-syntax on `Product`. Independently
-   valuable; the YAML-to-API bridge depends on it.
+0. **Step 0: deferred.** See above.
 1. **`_run_pipeline` extraction.** CLI behavior byte-for-byte unchanged; unit
    tests exercise `_run_pipeline` directly. No new public API.
 2. **Cloudpickle spike.** Prove or disprove notebook-`__main__` classes surviving
    to Ray actors. Gate the rest of the plan on this.
 3. **Flat config surface.** Synthesized signatures from the nested dataclasses,
    the prefix-transform bridge, the `Config` object. Typed configs, no `**kwargs`.
-4. **`falcon.init` / `launch` / `shutdown` / `session` + the v1 interleaved
-   color-tagged log stream.** `launch()` returns a `Run`, blocks. The CLI is
-   refactored to conform to the API. The config register, end to end.
-   `01_minimal` notebook.
-5. **`Graph.add_node` builder + `falcon.Simulator` + live-object support + the
-   escape-hatch serialization + the JAX actor-env passthrough.** The programmatic
-   register. `03` / `04` / `05` notebooks.
+4. **`falcon.init` / `launch` / `shutdown` + the v1 interleaved color-tagged log
+   stream.** `launch()` returns a `Run`, blocks. The CLI is refactored to conform
+   to the API. The config register, end to end. `01_minimal` notebook.
+5. **`Graph.add_node` builder + live-object support + the escape-hatch
+   serialization + the JAX actor-env passthrough.** The programmatic register.
+   `03` / `04` / `05` notebooks. (`falcon.Simulator` base class deferred.)
 6. **Rich reprs + Mermaid graph + `plot_metrics` / `corner`.**
 7. **Phase-2 monitoring (optional): the ipywidgets dashboard over `MonitorBridge`,
    `launch(wait=False)` + `LaunchHandle`, the separate monitor client.** Built
@@ -777,14 +736,10 @@ notebook rot is caught. Add a `notebooks` extra to `pyproject.toml`
 
 - **Cloudpickle spike outcome.** Gates everything notebook-class-related. If it
   fails, the `falcon.register` fallback applies.
-- **Short-name registry.** Whether to adopt `catalogue` (or a hand-rolled
-  registry) so `_target_` accepts short names like `nsf` as well as dotted paths.
-  `catalogue` is tiny and dependency-free; the cost is one more dependency when
-  OmegaConf/Hydra already resolve import paths. Decide during Step 0.
 - **Flattened-signature parameter counts.** The flat surface is comfortable at
   sklearn scale (~20-30 params per estimator) and degrades past that. Count the
   real totals during Step 3 (Flow's `InferenceConfig` alone is ~12 fields). If an
   estimator's flattened signature is much larger than ~30, revisit before
   implementing.
-- **Where notebook runs write.** Default `outputs/<adj-noun-date>` as today; the
+- **Where notebook runs write.** Default `output/<adj-noun-date>` as today; the
   rich `Run` repr surfaces the path so it is never lost.
