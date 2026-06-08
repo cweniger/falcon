@@ -135,7 +135,7 @@ class SampleStatus(IntEnum):
     DELETED = 4  # Permanently deleted
 
 
-@ray.remote(name="DatasetManager")
+@ray.remote
 class DatasetManagerActor:
     def __init__(
         self,
