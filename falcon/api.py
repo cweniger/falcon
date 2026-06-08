@@ -227,9 +227,9 @@ def _prepare_config(
         graph_dict = _graph_to_config_dict(target)
         cfg = OmegaConf.merge(base, {"graph": OmegaConf.create(graph_dict)})
     elif isinstance(target, Config):
-        cfg = target._dict_config
+        cfg = OmegaConf.merge(target._dict_config, {})
     elif isinstance(target, DictConfig):
-        cfg = target
+        cfg = OmegaConf.merge(target, {})
     elif isinstance(target, dict):
         cfg = OmegaConf.create(target)
     elif isinstance(target, (str, Path)):
