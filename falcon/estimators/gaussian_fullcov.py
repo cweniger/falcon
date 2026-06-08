@@ -326,6 +326,18 @@ class GaussianFullCov(StepwiseEstimator):
         self._optimizer = None
         self._scheduler = None
 
+    # ==================== Optimizer ====================
+
+    def _build_optimizer(self):
+        self._optimizer = AdamW(self._model.parameters(), lr=self.lr, betas=self.betas)
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer, mode="min",
+                factor=self.lr_decay_factor, patience=self.lr_patience,
+            )
+            if self.lr_decay_factor < 1.0 else None
+        )
+
     # ==================== Model Building ====================
 
     def _build_model(self, batch) -> nn.Module:
@@ -370,20 +382,7 @@ class GaussianFullCov(StepwiseEstimator):
             {k: v.clone() for k, v in self._model.state_dict().items()}
         )
 
-        self._optimizer = AdamW(
-            self._model.parameters(),
-            lr=self.lr,
-            betas=self.betas,
-        )
-        self._scheduler = (
-            ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=self.lr_decay_factor,
-                patience=self.lr_patience,
-            )
-            if self.lr_decay_factor < 1.0 else None
-        )
+        self._build_optimizer()
         self.networks_initialized = True
         debug("GaussianFullCov initialised.")
 
@@ -527,20 +526,7 @@ class GaussianFullCov(StepwiseEstimator):
         self._model = self._create_model(self._init_theta, self._init_conditions)
         self._best_model = copy.deepcopy(self._model)
 
-        self._optimizer = AdamW(
-            self._model.parameters(),
-            lr=self.lr,
-            betas=self.betas,
-        )
-        self._scheduler = (
-            ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=self.lr_decay_factor,
-                patience=self.lr_patience,
-            )
-            if self.lr_decay_factor < 1.0 else None
-        )
+        self._build_optimizer()
         self.networks_initialized = True
 
         tep = node_dir / "total_epochs_trained.pth"

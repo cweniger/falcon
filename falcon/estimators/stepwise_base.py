@@ -461,29 +461,23 @@ class LossBasedEstimator(StepwiseEstimator):
 
     # ==================== Training Implementation ====================
 
-    def _initialize_model(self, batch) -> None:
-        """Initialize model, best model, optimizer, and scheduler."""
-        debug("Initializing model...")
-
-        # Build model
-        self._model = self._build_model(batch)
-
-        # Clone for best model
-        self._best_model = self._clone_model(self._model)
-
-        # Setup optimizer and scheduler
+    def _build_optimizer(self):
         cfg = self.optimizer_config
         self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
         self._scheduler = (
             ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=cfg.lr_decay_factor,
-                patience=cfg.scheduler_patience,
+                self._optimizer, mode="min",
+                factor=cfg.lr_decay_factor, patience=cfg.scheduler_patience,
             )
             if cfg.lr_decay_factor < 1.0 else None
         )
 
+    def _initialize_model(self, batch) -> None:
+        """Initialize model, best model, optimizer, and scheduler."""
+        debug("Initializing model...")
+        self._model = self._build_model(batch)
+        self._best_model = self._clone_model(self._model)
+        self._build_optimizer()
         self.networks_initialized = True
         debug("Model initialized.")
 
@@ -582,7 +576,7 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def sample_posterior(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from the posterior distribution q(theta|x)."""
-        # TODO: refactor — this corrects for the bias from training on proposal data.
+        # Corrects for the bias from training on proposal data.
         gamma = self.inference_config.gamma
         gamma_correct = (1 + gamma) / gamma if gamma is not None else None
         return self._sample(num_samples, conditions, gamma=gamma_correct)
@@ -637,19 +631,7 @@ class LossBasedEstimator(StepwiseEstimator):
         self._model = self._create_model(self._init_theta, self._init_conditions)
         self._best_model = self._clone_model(self._model)
 
-        # Setup optimizer and scheduler
-        cfg = self.optimizer_config
-        self._optimizer = AdamW(self._model.parameters(), lr=cfg.lr, betas=cfg.betas)
-        self._scheduler = (
-            ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=cfg.lr_decay_factor,
-                patience=cfg.scheduler_patience,
-            )
-            if cfg.lr_decay_factor < 1.0 else None
-        )
-
+        self._build_optimizer()
         self.networks_initialized = True
 
         _tep = node_dir / "total_epochs_trained.pth"

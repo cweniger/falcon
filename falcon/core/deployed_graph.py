@@ -799,7 +799,6 @@ class DeployedGraph:
         if graph_path is not None and any(graph_path.glob("*/*.pth")):
             self.load(graph_path)
 
-        # TODO: Make distrinction clearer between dataset_manager and dataset_manager_actor
         dataset_manager = dataset_manager.dataset_manager_actor
 
         # Register dataset manager with monitor bridge for monitoring
