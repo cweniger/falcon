@@ -14,14 +14,14 @@ pip install .
 
 # Training
 falcon launch                                    # Run with default config
-falcon launch -o outputs/exp01                   # Specify output directory
-falcon launch buffer.num_epochs=500              # Override config parameters
+falcon launch -o output/exp01                   # Specify output directory
+falcon launch buffer.max_epochs=500              # Override config parameters
 falcon launch -c config_amortized                # Use alternate config file
 
 # Sampling (after training)
-falcon sample prior -o outputs/exp01             # Sample from prior
-falcon sample posterior -o outputs/exp01         # Sample from posterior
-falcon sample proposal -o outputs/exp01          # Sample from proposal distribution
+falcon sample prior -o output/exp01             # Sample from prior
+falcon sample posterior -o output/exp01         # Sample from posterior
+falcon sample proposal -o output/exp01          # Sample from proposal distribution
 
 # Visualize graph structure
 falcon graph                                     # Display ASCII graph visualization
@@ -30,7 +30,7 @@ falcon graph                                     # Display ASCII graph visualiza
 falcon monitor                                   # TUI dashboard for training progress
 
 # Run examples
-cd examples/01_minimal && falcon launch -o outputs/run_01
+cd examples/01_minimal && falcon launch -o output/run_01
 ```
 
 ## Architecture
@@ -98,7 +98,7 @@ graph:
     estimator:                    # Posterior network
       _target_: falcon.estimators.Flow
       loop:                       # Training loop config
-        num_epochs: 300
+        max_epochs: 300
         batch_size: 128
       network:                    # Network config
         net_type: nsf
@@ -131,15 +131,18 @@ graph:
 
 ```
 {run_dir}/
-├── sim_dir/                    # Simulation buffer (samples_*.pt)
-├── graph_dir/                  # Trained models and logs
+├── graph/                      # Trained models and logs
 │   ├── graph.pkl               # Serialized graph structure
 │   ├── {node_name}/            # Per-node directories
 │   │   └── estimator.pt        # Network weights
 │   ├── output.log              # Training logs
 │   └── metrics/                # Metric history (chunk_*.npz)
-├── samples_dir/                # Generated samples
-│   └── posterior/{timestamp}/  # Timestamped sample batches
+├── samples/                    # Generated samples
+│   └── posterior/              # Posterior sample files
+│       ├── 000000.npz
+│       └── 000001.npz
+├── buffer/
+│   └── snapshots/              # Buffer snapshots (when snapshot_every > 0)
 │       └── 000000.npz
 └── config.yml                 # Saved configuration
 ```

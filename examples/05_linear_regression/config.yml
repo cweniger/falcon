@@ -15,8 +15,8 @@
 # Usage:
 #   cd examples/05_linear_regression
 #   python data/gen_mock_data.py
-#   falcon launch -o outputs/run
-#   falcon sample posterior -o outputs/run
+#   falcon launch -o output/run
+#   falcon sample posterior -o output/run
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -38,10 +38,9 @@ logging:
 # Directory configuration
 # -----------------------------------------------------------------------------
 paths:
-  import: "./src"
-  buffer: ${run_dir}/sim_dir
-  graph: ${run_dir}/graph_dir
-  samples: ${run_dir}/samples_dir
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
@@ -54,7 +53,7 @@ buffer:
   simulate_chunk_size: 128
   simulate_when_full: true
   simulate_interval: 5
-  store_fraction: 0.0
+  snapshot_every: 0
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
@@ -78,9 +77,9 @@ graph:
         - ['normal', 0.0, 1.0]
 
     estimator:
-      _target_: falcon.estimators.Gaussian
+      _target_: falcon.estimators.GaussianFullCov
       loop:
-        num_epochs: 1000
+        max_epochs: 1000
         batch_size: 128
         early_stop_patience: 32
         cache_sync_every: 1

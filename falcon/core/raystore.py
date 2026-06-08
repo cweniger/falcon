@@ -4,11 +4,21 @@ import sys
 from dataclasses import dataclass
 from enum import IntEnum
 from pathlib import Path
-from typing import Optional
+from typing import List, Optional
 
 import ray
 from omegaconf import MISSING
-from falcon.core.logger import Logger, set_logger, log, info, error
+from falcon.core.logger import Logger, set_logger, log, info, warning, error
+
+
+@dataclass
+class PathConfig:
+    """Configuration for file-system paths."""
+
+    graph: str = MISSING
+    samples: Optional[str] = None
+    buffer: Optional[str] = None
+    imports: Optional[List[str]] = None  # directories prepended to sys.path in Ray workers
 
 
 @dataclass
@@ -23,7 +33,7 @@ class BufferConfig:
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
     initial_samples_path: Optional[str] = None
-    store_fraction: float = 0.0
+    snapshot_every: int = 0
 
 
 class Batch:
@@ -137,9 +147,9 @@ class DatasetManagerActor:
         simulate_chunk_size,
         initial_samples_path,
         simulate_when_full,
-        samples_path,
-        store_fraction,
+        snapshot_every,
         log_config=None,
+        snapshots_path=None,
     ):
         self.max_samples = max_samples
         self.min_samples = min_samples
@@ -149,8 +159,8 @@ class DatasetManagerActor:
         self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
-        self.samples_path = Path(samples_path) if samples_path else None
-        self.store_fraction = store_fraction
+        self.snapshots_path = Path(snapshots_path) if snapshots_path else None
+        self.snapshot_every = max(0, int(snapshot_every))
 
         # NPZ storage state
         self._sample_counter = 0
@@ -363,44 +373,44 @@ class DatasetManagerActor:
         info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
 
         # Disk dump: fetch values lazily if needed
-        if self.store_fraction > 0 and self.samples_path is not None:
+        if self._snapshot_enabled():
             self._dump_refs(sample_refs)
+
+    def _snapshot_enabled(self):
+        return self.snapshot_every > 0 and self.snapshots_path is not None
+
+    def _should_snapshot_next_sample(self):
+        if not self._snapshot_enabled():
+            return False
+        self._sample_counter += 1
+        return self._sample_counter % self.snapshot_every == 0
 
     def _dump_refs(self, sample_refs: list):
         """Fetch and dump samples to disk."""
-        interval = max(1, int(1.0 / self.store_fraction))
-
         for ref_dict in sample_refs:
-            self._sample_counter += 1
-            if self._sample_counter % interval == 0:
+            if self._should_snapshot_next_sample():
                 sample = {k: ray.get(v) for k, v in ref_dict.items()}
                 self._save_sample(sample)
 
     def _save_sample(self, sample: dict):
-        """Save a single sample as NPZ file to samples_path/buffer/."""
-        buffer_dir = self.samples_path / "buffer"
-        buffer_dir.mkdir(parents=True, exist_ok=True)
-
-        # Find next index from existing files
-        existing = sorted(buffer_dir.glob("*.npz"))
+        """Save a single sample as NPZ file to buffer/snapshots/."""
+        self.snapshots_path.mkdir(parents=True, exist_ok=True)
+        existing = sorted(self.snapshots_path.glob("*.npz"))
         next_idx = len(existing)
-        sample_path = buffer_dir / f"{next_idx:06d}.npz"
+        sample_path = self.snapshots_path / f"{next_idx:06d}.npz"
         np.savez(sample_path, **sample)
 
     def dump_store(self, samples: list):
-        """Store samples to disk based on store_fraction.
+        """Store samples to disk based on snapshot_every.
 
         Args:
             samples: List of sample dicts to potentially store
         """
-        if self.store_fraction <= 0 or self.samples_path is None:
+        if not self._snapshot_enabled():
             return
 
-        interval = max(1, int(1.0 / self.store_fraction))
-
         for sample in samples:
-            self._sample_counter += 1
-            if self._sample_counter % interval == 0:
+            if self._should_snapshot_next_sample():
                 self._save_sample(sample)
 
     def garbage_collect_tombstones(self):
@@ -424,7 +434,7 @@ class DatasetManagerActor:
         """Load pre-existing samples from NPZ sample directory. Returns number loaded.
 
         Expects initial_samples_path to point to a sample type directory
-        (e.g. samples_dir/prior) as produced by ``falcon sample prior``.
+        (e.g. samples/prior) as produced by ``falcon sample prior``.
         NPZ keys are remapped: ``key`` -> ``key.value`` with ``key.log_prob = 0.0``.
         """
         if self.initial_samples_path is not None:
@@ -443,6 +453,12 @@ class DatasetManagerActor:
             if samples:
                 self.append(samples)
                 info(f"Loaded {len(samples)} initial samples from {self.initial_samples_path}")
+                if len(samples) > self.max_samples:
+                    warning(
+                        f"Loaded {len(samples)} initial samples but max_samples={self.max_samples}; "
+                        f"{len(samples) - self.max_samples} oldest samples were tombstoned immediately. "
+                        "Consider increasing buffer.max_samples."
+                    )
             return len(samples)
         return 0
 
@@ -674,14 +690,14 @@ class BufferView:
 
 def get_ray_dataset_manager(
     config: BufferConfig,
-    samples_path=None,
+    snapshots_path=None,
     log_config=None,
 ):
     from omegaconf import OmegaConf
     cfg = OmegaConf.to_container(config, resolve=True) if not isinstance(config, dict) else config
     dataset_manager_actor = DatasetManagerActor.remote(
         **cfg,
-        samples_path=samples_path,
+        snapshots_path=snapshots_path,
         log_config=log_config,
     )
     return DatasetManager(dataset_manager_actor)

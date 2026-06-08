@@ -48,7 +48,7 @@ Controls the training process.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `num_epochs` | int | 100 | Maximum training epochs |
+| `max_epochs` | int | 100 | Maximum training epochs |
 | `batch_size` | int | 128 | Training batch size |
 | `early_stop_patience` | int | 16 | Epochs without improvement before stopping |
 | `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
@@ -57,7 +57,7 @@ Controls the training process.
 
 ```yaml
 loop:
-  num_epochs: 100
+  max_epochs: 100
   batch_size: 128
   early_stop_patience: 16
   cache_sync_every: 0
@@ -134,6 +134,11 @@ Controls posterior sampling and amortization.
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
 | `use_best_models_during_inference` | bool | true | Use best validation model for sampling |
+| `num_proposals` | int | 256 | Candidate samples drawn from the flow for importance sampling |
+| `reference_samples` | int | 128 | Samples used to evaluate the reference posterior |
+| `hypercube_bound` | float | 2.0 | Out-of-bounds threshold in hypercube space |
+| `out_of_bounds_penalty` | float | 100.0 | Log-weight penalty applied to out-of-bounds proposals |
+| `nan_replacement` | float | -100.0 | Log-weight substituted for NaN values during importance sampling |
 
 ```yaml
 inference:
@@ -209,7 +214,7 @@ graph:
       _target_: falcon.estimators.Flow
 
       loop:
-        num_epochs: 100
+        max_epochs: 100
         batch_size: 128
         early_stop_patience: 16
         cache_sync_every: 0
@@ -306,7 +311,7 @@ Flow logs the following metrics during training:
 ## Tips
 
 1. **Start with defaults**: The default configuration works well for most problems
-2. **Increase `num_epochs`** for complex posteriors
+2. **Increase `max_epochs`** for complex posteriors
 3. **Enable `discard_samples`** if training becomes unstable with outliers
 4. **Use GPU** (`ray.num_gpus: 1`) for faster training with large embeddings
 5. **Lower `gamma`** for single-observation inference, higher for amortization
@@ -339,4 +344,4 @@ Flow logs the following metrics during training:
 
 ::: falcon.estimators.flow.InferenceConfig
 
-::: falcon.estimators.base.TrainingLoopConfig
+::: falcon.estimators.stepwise_base.TrainingLoopConfig

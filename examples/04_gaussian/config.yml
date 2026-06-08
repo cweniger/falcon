@@ -16,8 +16,8 @@
 # Usage:
 #   cd examples/04_gaussian
 #   python data/gen_mock_data.py          # Generate mock observation data
-#   falcon launch -o outputs/run           # Train the model
-#   falcon sample posterior -o outputs/run # Generate posterior samples
+#   falcon launch -o output/run           # Train the model
+#   falcon sample posterior -o output/run # Generate posterior samples
 # =============================================================================
 
 # -----------------------------------------------------------------------------
@@ -37,22 +37,21 @@ logging:
 # Directory configuration
 # -----------------------------------------------------------------------------
 paths:
-  import: "./src"
-  buffer: ${run_dir}/sim_dir
-  graph: ${run_dir}/graph_dir
-  samples: ${run_dir}/samples_dir
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_samples: 4096
-  max_samples: 4096
+  min_samples: 1024
+  max_samples: 1024
   validation_samples: 256
-  simulate_count: 512
+  simulate_count: 128
   simulate_when_full: true
-  simulate_interval: 1
-  store_fraction: 0.0
+  simulate_interval: 0.001
+  snapshot_every: 10
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
@@ -69,26 +68,25 @@ graph:
         - ['normal', 0.0, 1.0]
 
     estimator:
-      _target_: falcon.estimators.Gaussian
+      _target_: falcon.estimators.GaussianFullCov
       loop:
-        num_epochs: 1000
+        max_epochs: 8000
         batch_size: 128
-        early_stop_patience: 32
+        early_stop_patience: 128
       network:
         hidden_dim: 128               # MLP hidden layer dimension
         num_layers: 3                 # Number of hidden layers
-        momentum: 0.10                # EMA momentum for running statistics
-        min_var: 1.0e-20               # Minimum variance for numerical stability
+        momentum: 0.01                # EMA momentum for running statistics
+        min_var: 1.0e-20              # Minimum variance for numerical stability
         eig_update_freq: 1            # Eigendecomposition update frequency
       embedding:
         _target_: model.E_identity
         _input_: [x]
       optimizer:
         lr: 0.01
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
+        lr_decay_factor: 1.0      # 1.0 = no LR decay
       inference:
-        gamma: 1.0                   # Tempering for proposal sampling
+        gamma: 0.1                   # Tempering for proposal sampling
         discard_samples: false
         log_ratio_threshold: -20.0
 

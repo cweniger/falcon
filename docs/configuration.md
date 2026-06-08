@@ -31,18 +31,18 @@ Configure file paths:
 
 ```yaml
 paths:
-  import_path: "."
-  buffer_dir: "sim_dir"
-  graph_dir: "graph_dir"
-  samples_dir: "samples_dir"
+  imports: ["."]
+  graph:   ${run_dir}/graph
+  samples: ${run_dir}/samples
+  buffer:  ${run_dir}/buffer   # optional; redirect to a separate volume (e.g. scratch)
 ```
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `import_path` | str | `"."` | Path to import custom modules |
-| `buffer_dir` | str | `"sim_dir"` | Simulation buffer directory |
-| `graph_dir` | str | `"graph_dir"` | Trained models directory |
-| `samples_dir` | str | `"samples_dir"` | Output samples directory |
+| `imports` | list[str] | `null` | Directories prepended to `sys.path` in Ray workers so custom modules (e.g. `model.Simulator`) can be imported |
+| `graph` | str | `${run_dir}/graph` | Trained model checkpoints directory |
+| `samples` | str | `${run_dir}/samples` | Output samples directory |
+| `buffer` | str | `${run_dir}/buffer` | Buffer snapshots directory (`snapshots/` is appended); useful for routing large temporary simulation data to a separate scratch volume while keeping `run_dir` on persistent storage |
 
 ### `buffer`
 
@@ -56,7 +56,7 @@ buffer:
   simulate_count: 64
   simulate_interval: 1
   simulate_when_full: true
-  store_fraction: 0.0
+  snapshot_every: 0
 ```
 
 | Key | Type | Default | Description |
@@ -67,7 +67,7 @@ buffer:
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
-| `store_fraction` | float | `0.0` | Fraction of simulated samples written to `samples_dir/buffer/` for inspection (0 = none, 1 = all) |
+| `snapshot_every` | int | `0` | Save every Nth sample to `{paths.buffer}/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
 
 ### `graph`
 
@@ -89,7 +89,7 @@ graph:
     estimator:                     # Posterior learner (optional)
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 300
+        max_epochs: 300
       network:
         net_type: nsf
       embedding:
@@ -131,7 +131,7 @@ estimator:
   _target_: falcon.estimators.Flow
 
   loop:
-    num_epochs: 300
+    max_epochs: 300
     batch_size: 128
     early_stop_patience: 50
     cache_sync_every: 0
@@ -192,5 +192,5 @@ observed: "./data/obs.npz['x']"
 Override any parameter via CLI:
 
 ```bash
-falcon launch buffer.num_epochs=1000 graph.theta.estimator.optimizer.lr=0.001
+falcon launch buffer.max_epochs=1000 graph.theta.estimator.optimizer.lr=0.001
 ```

@@ -37,8 +37,7 @@ import numpy as np
 class Simulator:
     """Simple Gaussian simulator."""
 
-    def sample(self, batch_dim, parent_conditions=[]):
-        theta = parent_conditions[0]  # Parameters from parent node
+    def simulate_batch(self, batch_size, theta):
         noise = np.random.randn(*theta.shape) * 0.1
         return theta + noise
 ```
@@ -55,7 +54,7 @@ logging:
     enabled: true
 
 paths:
-  import_path: "."
+  import: "."
 
 buffer:
   min_samples: 1000
@@ -74,7 +73,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Flow
       loop:
-        num_epochs: 100
+        max_epochs: 100
       network:
         net_type: zuko_nice
 
@@ -100,13 +99,13 @@ np.savez("data/obs.npz", x=obs)
 ### 4. Run Training
 
 ```bash
-falcon launch -o outputs/run_01
+falcon launch -o output/run_01
 ```
 
 ### 5. Sample from Posterior
 
 ```bash
-falcon sample posterior -o outputs/run_01
+falcon sample posterior -o output/run_01
 ```
 
 ## CLI Commands

@@ -31,10 +31,10 @@ def _ray_options(actor_config):
 
 @ray.remote
 class MultiplexNodeWrapper:
-    def __init__(self, actor_config, node, graph, num_actors, model_path=None, log_config=None):
+    def __init__(self, actor_config, node, graph, num_actors, import_dirs=None, log_config=None):
         self.num_actors = num_actors
         self.wrapped_node_list = [
-            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, model_path, log_config)
+            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, import_dirs, log_config)
             for _ in range(self.num_actors)
         ]
 
@@ -120,7 +120,7 @@ class MultiplexNodeWrapper:
 # actors — sampling reads best_model which is independent of training state.
 @ray.remote
 class NodeWrapper:
-    def __init__(self, node, graph, model_path=None, log_config=None):
+    def __init__(self, node, graph, import_dirs=None, log_config=None):
         # Suppress Ray warning about blocking ray.get in async actor.
         # Ray emits this once per actor via a global flag. We set the flag
         # to True before any ray.get calls to prevent the warning.
@@ -134,11 +134,10 @@ class NodeWrapper:
         except (ImportError, AttributeError):
             pass  # Ray internals changed, warning will appear
 
-        # Add model_path to sys.path if provided
-        if model_path:
-            model_path = Path(model_path).resolve()
-            if str(model_path) not in sys.path:
-                sys.path.insert(0, str(model_path))
+        for p in (import_dirs or []):
+            resolved = str(Path(p).resolve())
+            if resolved not in sys.path:
+                sys.path.insert(0, resolved)
 
         self.node = node
         self.name = node.name
@@ -429,7 +428,7 @@ class NodeWrapper:
                     status["loss"] = status["loss_history"][-1]
                 status["current_epoch"] = len(est.history.get("epochs", []))
             if hasattr(est, "loop_config"):
-                status["total_epochs"] = est.loop_config.num_epochs
+                status["total_epochs"] = est.loop_config.max_epochs
             if hasattr(est, "history") and est.history.get("n_samples"):
                 status["samples"] = est.history["n_samples"][-1]
 
@@ -446,14 +445,14 @@ class NodeWrapper:
 
 
 class DeployedGraph:
-    def __init__(self, graph, model_path=None, log_config=None):
+    def __init__(self, graph, import_dirs=None, log_config=None):
         """Initialize a DeployedGraph with the given conceptual graph of nodes.
 
         Note: This class uses falcon.info(), falcon.warning() etc. for logging.
         These functions use the module-level logger set by cli.py via set_logger().
         """
         self.graph = graph
-        self.model_path = model_path
+        self.import_dirs = import_dirs or []
         self.log_config = log_config or {}
         self.wrapped_nodes_dict = {}
         self.monitor_bridge = None
@@ -464,7 +463,7 @@ class DeployedGraph:
     def _create_monitor_bridge(self):
         """Create the MonitorBridge actor for falcon monitor TUI."""
         from falcon.core.monitor_bridge import MonitorBridge
-        run_dir = str(self.model_path) if self.model_path else "unknown"
+        run_dir = str(self.import_dirs[0]) if self.import_dirs else "unknown"
         try:
             # Name the actor so falcon monitor can discover it
             self.monitor_bridge = MonitorBridge.options(
@@ -486,9 +485,43 @@ class DeployedGraph:
             warning(f"Could not create monitor bridge: {e}")
             self.monitor_bridge = None
 
+    def _check_resource_budget(self):
+        """Raise if node GPU/CPU requests exceed cluster capacity."""
+        cluster = ray.cluster_resources()
+        available_gpus = cluster.get("GPU", 0)
+        available_cpus = cluster.get("CPU", 0)
+
+        total_gpus = sum(
+            node.actor_config.get("num_gpus", 0) * node.num_actors
+            for node in self.graph.node_list
+        )
+        total_cpus = sum(
+            node.actor_config.get("num_cpus", 1) * node.num_actors
+            for node in self.graph.node_list
+        )
+
+        if total_gpus > available_gpus:
+            node_summary = ", ".join(
+                f"{n.name}: {n.actor_config.get('num_gpus', 0)} GPU"
+                for n in self.graph.node_list
+                if n.actor_config.get("num_gpus", 0) > 0
+            )
+            warning(
+                f"GPU over-subscription: nodes request {total_gpus:.1f} GPUs "
+                f"but only {available_gpus:.1f} available. "
+                f"Actors may hang — reduce ray.num_gpus in your config or increase "
+                f"available GPUs. ({node_summary})"
+            )
+        if total_cpus > available_cpus:
+            warning(
+                f"CPU over-subscription: nodes request {total_cpus} CPUs "
+                f"but only {available_cpus:.0f} available — actors may queue."
+            )
+
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
         info("Spinning up graph...")
+        self._check_resource_budget()
 
         # Create all actors (non-blocking)
         for node in self.graph.node_list:
@@ -498,22 +531,31 @@ class DeployedGraph:
                     node,
                     self.graph,
                     node.num_actors,
-                    self.model_path,
+                    self.import_dirs,
                     self.log_config,
                 )
             else:
                 self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
                     **_ray_options(node.actor_config)
-                ).remote(node, self.graph, self.model_path, self.log_config)
+                ).remote(node, self.graph, self.import_dirs, self.log_config)
 
         # Wait for all actors to initialize and register with monitor bridge
         for name, actor in self.wrapped_nodes_dict.items():
             try:
                 # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
                 if hasattr(actor, 'wait_ready'):
-                    ray.get(actor.wait_ready.remote())
+                    ready_ref = actor.wait_ready.remote()
                 else:
-                    ray.get(actor.__ray_ready__.remote())
+                    ready_ref = actor.__ray_ready__.remote()
+                done, _ = ray.wait([ready_ref], timeout=60.0)
+                if not done:
+                    raise RuntimeError(
+                        f"Node '{name}' did not initialize within 60 s. "
+                        "This usually means Ray cannot schedule the actor — "
+                        "check that ray.num_gpus/num_cpus in your config do not "
+                        "exceed available cluster resources."
+                    )
+                ray.get(done[0])  # re-raise any actor-side exception
                 info(f"  ✓ {name}")
 
                 # Register node with monitor bridge
@@ -666,6 +708,43 @@ class DeployedGraph:
         return self._execute_graph(
             num_samples, self.graph.backward_order, condition_refs, "sample_proposal",
         )
+
+    def sample_ppd(self, num_samples, conditions=None):
+        """Run posterior predictive distribution (PPD) sampling.
+
+        Two-phase: sample latent variables from the posterior, then forward-simulate
+        observables from those posterior samples.
+
+        Args:
+            num_samples: Number of samples to generate
+            conditions: Observations dict (same as passed to sample_posterior)
+
+        Returns:
+            List[Dict[str, ObjectRef]]: One dict per sample with refs to all node values
+                (both posterior latents and forward-simulated observables)
+        """
+        observation_refs = self._arrays_to_condition_refs(conditions, num_samples) if conditions else {}
+
+        # Phase 1: theta ~ p(theta | x_obs)
+        posterior_refs = self._execute_graph(
+            num_samples, self.graph.backward_order, observation_refs, "sample_posterior",
+        )
+
+        # Phase 2: x_ppd ~ p(x | theta)  — forward-simulate fresh observables
+        # Condition on posterior theta; observed nodes are NOT pre-set here so they
+        # get re-simulated rather than returning the original observations.
+        posterior_condition_refs = self._extract_value_refs(posterior_refs)
+        forward_refs = self._execute_graph(
+            num_samples, self.graph.forward_order, posterior_condition_refs, "sample",
+        )
+
+        # Merge: posterior_refs holds theta.value; forward_refs holds x_ppd.value.
+        # Conditioned (theta) nodes are absent from forward_refs due to the skip in
+        # _execute_graph, so update is safe — no key collisions.
+        merged = [dict(p) for p in posterior_refs]
+        for i, fwd_dict in enumerate(forward_refs):
+            merged[i].update(fwd_dict)
+        return merged
 
     def _refs_to_arrays(self, sample_refs):
         """Convert List[Dict[str, ObjectRef]] to Dict[str, ndarray].

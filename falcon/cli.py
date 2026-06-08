@@ -2,11 +2,11 @@
 """
 Falcon Adaptive Training - Standalone CLI Tool
 Usage: falcon launch [--output DIR] [--config FILE] [key=value ...]
-       falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]
+       falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]
        falcon graph [--config FILE]
 
 Run directory behavior:
-  - If --output not specified, generates: outputs/adj-noun-YYMMDD-HHMM
+  - If --output not specified, generates: output/YYMMDD-HHMMSS-adj-noun
   - If --output exists with config.yml, resumes from saved config
   - Otherwise, loads ./config.yml and saves resolved config to output dir
 """
@@ -233,6 +233,16 @@ def load_config(config_name: str = "config.yml", run_dir: str = None, overrides:
     return cfg
 
 
+def _resolve_paths(cfg):
+    """Merge cfg.paths against PathConfig and return a plain dict."""
+    from omegaconf import OmegaConf
+    from falcon.core.raystore import PathConfig as _PathConfig
+    return OmegaConf.to_container(
+        OmegaConf.merge(OmegaConf.structured(_PathConfig), cfg.paths),
+        resolve=True,
+    )
+
+
 class TeeOutput:
     """Write to both terminal and log file."""
     def __init__(self, log_file, terminal):
@@ -294,13 +304,112 @@ class _GracefulShutdown:
         return self._stopping
 
 
+def _fmt_duration(seconds):
+    """Format a duration in seconds as e.g. '4m 23s' or '1h 02m 05s'."""
+    seconds = int(round(seconds))
+    h, rem = divmod(seconds, 3600)
+    m, s = divmod(rem, 60)
+    if h:
+        return f"{h}h {m:02d}m {s:02d}s"
+    if m:
+        return f"{m}m {s:02d}s"
+    return f"{s}s"
+
+
+def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None, end_time=None):
+    """Build a compact end-of-run summary as a list of text lines.
+
+    Always returns something printable even if the monitor bridge is
+    unreachable; per-node details and counts are best-effort.
+    """
+    from datetime import datetime
+
+    lines = []
+    lines.append("=" * 60)
+    lines.append(f"falcon launch {status}")
+    lines.append(f"Output:  {output_dir}")
+    paths = _resolve_paths(cfg)
+    lines.append(f"Samples: {paths['samples'] or f'{cfg.run_dir}/samples'}")
+    graph_path = Path(paths['graph'])
+    lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
+    try:
+        node_names = list(cfg.graph.keys())
+    except Exception:
+        node_names = []
+    if node_names:
+        n = len(node_names)
+        if n <= 6:
+            suffix = f"(per-node: {', '.join(node_names)})"
+        else:
+            suffix = f"(per-node, {n} nodes)"
+        lines.append(f"         {graph_path / '<node>' / 'output.log'}  {suffix}")
+    if start_time is not None:
+        lines.append(f"Started: {datetime.fromtimestamp(start_time):%Y-%m-%d %H:%M:%S}")
+    if end_time is not None:
+        lines.append(f"Ended:   {datetime.fromtimestamp(end_time):%Y-%m-%d %H:%M:%S}")
+    if start_time is not None and end_time is not None:
+        lines.append(f"Runtime: {_fmt_duration(end_time - start_time)}")
+    try:
+        import ray
+        if ray.is_initialized():
+            res = ray.cluster_resources()
+            cpu = int(res.get("CPU", 0))
+            gpu = int(res.get("GPU", 0))
+            mem_gb = res.get("memory", 0) / (1024 ** 3)
+            n_alive = sum(1 for n in ray.nodes() if n.get("Alive"))
+            lines.append(
+                f"Ray:     {n_alive} node(s) | {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB"
+            )
+    except Exception:
+        pass
+    try:
+        import ray
+        bridge = getattr(deployed_graph, "monitor_bridge", None) if deployed_graph else None
+        if bridge is not None:
+            status_dict = ray.get(bridge.get_status.remote(), timeout=5.0)
+            nodes = status_dict.get("nodes", {})
+            if nodes:
+                lines.append("Nodes:")
+                for name, ns in nodes.items():
+                    parts = [str(ns.get("status", "?"))]
+                    total_epochs = ns.get("total_epochs", 0)
+                    if total_epochs:
+                        parts.append(f"{ns.get('current_epoch', 0)}/{total_epochs} epochs")
+                    loss = ns.get("loss")
+                    if loss is not None:
+                        parts.append(f"loss={loss:.4g}")
+                    sims = ns.get("samples", 0)
+                    if sims:
+                        parts.append(f"{sims} sims")
+                    lines.append(f"  {name}: {' | '.join(parts)}")
+            buf = status_dict.get("buffer", {})
+            if isinstance(buf, dict):
+                total_generated = buf.get("total_length")
+                if total_generated is not None:
+                    live = buf.get("training", 0) + buf.get("validation", 0)
+                    lines.append(
+                        f"Samples generated: {total_generated} total | "
+                        f"{buf.get('training', 0)} train, {buf.get('validation', 0)} val "
+                        f"({live} live in buffer)"
+                    )
+                elif "training" in buf or "validation" in buf:
+                    lines.append(
+                        f"Buffer:  {buf.get('training', 0)} training, "
+                        f"{buf.get('validation', 0)} validation"
+                    )
+    except Exception:
+        pass  # Best-effort; the path lines above are the essential receipt
+    lines.append("=" * 60)
+    return lines
+
+
 def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     """Save generated samples to disk.
 
     Args:
         samples: Dict of sample arrays (keys like 'theta.value', 'x.value')
         sample_cfg: Config for this sample type (with exclude_keys, add_keys)
-        sample_type: 'prior', 'posterior', or 'proposal'
+        sample_type: 'prior', 'posterior', 'proposal', or 'ppd'
         graph: The Graph object (for determining default keys)
         cfg: Full config (for paths)
         info_fn: Function to use for info logging
@@ -311,7 +420,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     # Build key selection based on node names (strip .value/.log_prob suffixes)
     node_keys = {k for k in samples.keys() if k.endswith('.value')}
 
-    if sample_type in ["prior", "proposal"]:
+    if sample_type in ["prior", "proposal", "ppd"]:
         # Default: save all .value keys
         default_keys = set(node_keys)
     elif sample_type == "posterior":
@@ -354,7 +463,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         info_fn(f"  {key}: {value.shape}")
 
     # Determine output directory (flat structure)
-    samples_dir = cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir")
+    samples_dir = _resolve_paths(cfg)["samples"] or f"{cfg.run_dir}/samples"
     output_dir = Path(samples_dir) / sample_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -374,10 +483,11 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
 
-def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_sample: bool = True, timeout: float = None) -> None:
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample: bool = True, timeout: float = None) -> None:
     """Launch mode: Full training and inference pipeline."""
     import logging
     import threading
+    import time as _time
     import torch
     import ray
     from omegaconf import OmegaConf
@@ -385,21 +495,27 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     from falcon.core.graph import create_graph_from_config
     from falcon.core.logger import Logger, set_logger, info
 
+    launch_start = _time.time()
+
     # Initialize interactive display or graceful shutdown handler
     display = None
     shutdown_handler = None
     if interactive:
-        from falcon.interactive import InteractiveDisplay
-        # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
-        display = InteractiveDisplay(footer_height=log_lines + 4)
-        display.start()
-    else:
+        try:
+            from falcon.interactive import InteractiveDisplay
+            # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
+            display = InteractiveDisplay(footer_height=log_lines + 4)
+            display.start()
+        except ImportError:
+            print("Interactive display unavailable (install falcon-sbi[blessed] to enable it)")
+    if display is None:
         # Non-interactive mode: install double Ctrl+C handler
         shutdown_handler = _GracefulShutdown()
         shutdown_handler.install()
 
     # Get output directory from config
     output_dir = Path(cfg.run_dir)
+    path_cfg = _resolve_paths(cfg)
 
     # Generate wandb group if not set - use run-dir folder name
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
@@ -409,7 +525,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
             logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
 
     # Ensure local dir is set to graph path
-    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+    logging_cfg.setdefault("local", {})["dir"] = path_cfg["graph"]
 
     # Create driver logger and set as module-level logger
     # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
@@ -481,26 +597,9 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
     ### Run analysis ###
     ####################
 
-    # 1) Deploy graph (pass logging config)
-    deployed_graph = falcon.DeployedGraph(
-        graph,
-        model_path=cfg.paths.get("import"),
-        log_config=logging_cfg,
-    )
-
-    # 2) Prepare dataset manager for deployed graph and store initial samples
-    from omegaconf import OmegaConf
-    from falcon.core.raystore import BufferConfig
-    buffer_cfg = OmegaConf.merge(OmegaConf.structured(BufferConfig), cfg.buffer)
-    dataset_manager = falcon.get_ray_dataset_manager(
-        buffer_cfg,
-        samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
-        log_config=logging_cfg,
-    )
-
-    # 3) Start status polling thread for interactive mode
+    # Start status polling thread for interactive mode
     status_thread = None
-    graph_path = Path(cfg.paths.graph)
+    graph_path = Path(path_cfg["graph"])
     if display:
         # Set log directory so display can read node output.log files
         display.set_log_dir(str(graph_path))
@@ -545,9 +644,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         status_thread = threading.Thread(target=poll_status, daemon=True)
         status_thread.start()
 
-    # 4) Launch training & simulations
     # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
-    import time as _time
     _start_time = _time.time()
     _timeout_logged = False
 
@@ -568,7 +665,27 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 return True
         return False
 
+    run_status = "completed"
+    deployed_graph = None
     try:
+        # 1) Deploy graph (pass logging config)
+        deployed_graph = falcon.DeployedGraph(
+            graph,
+            import_dirs=path_cfg["imports"],
+            log_config=logging_cfg,
+        )
+
+        # 2) Prepare dataset manager for deployed graph and store initial samples
+        from omegaconf import OmegaConf as _OmegaConf
+        from falcon.core.raystore import BufferConfig as _BufferConfig
+        buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        buffer_base = path_cfg["buffer"] or str(Path(cfg.run_dir) / "buffer")
+        dataset_manager = falcon.get_ray_dataset_manager(
+            buffer_cfg,
+            snapshots_path=str(Path(buffer_base) / "snapshots"),
+            log_config=logging_cfg,
+        )
+
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
         #############################
@@ -579,7 +696,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         sample_cfg = cfg.get("sample", {}).get("posterior", {})
         num_posterior_samples = sample_cfg.get("n", 0)
 
-        if posterior_sample and num_posterior_samples > 0:
+        if auto_sample and num_posterior_samples > 0:
             info(f"Generating {num_posterior_samples} posterior samples...")
 
             sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
@@ -595,20 +712,67 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
                 info_fn=info,
             )
 
+        # Check if PPD sampling is configured and enabled
+        ppd_cfg = cfg.get("sample", {}).get("ppd", {})
+        num_ppd_samples = ppd_cfg.get("n", 0)
+
+        if auto_sample and num_ppd_samples > 0:
+            info(f"Generating {num_ppd_samples} PPD samples...")
+
+            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
+            samples = deployed_graph._refs_to_arrays(sample_refs)
+
+            _save_samples(
+                samples=samples,
+                sample_cfg=ppd_cfg,
+                sample_type="ppd",
+                graph=graph,
+                cfg=cfg,
+                info_fn=info,
+            )
+
+    except KeyboardInterrupt:
+        run_status = "interrupted"
+        raise
+    except Exception as e:
+        run_status = f"failed ({type(e).__name__}: {e})"
+        raise
     finally:
         ##########################
         ### Clean up resources ###
         ##########################
 
+        # A graceful Ctrl+C / timeout exits the launch normally, not via an
+        # exception, so reflect that here.
+        if run_status == "completed":
+            if (display and display.stop_requested) or (
+                shutdown_handler and shutdown_handler.stop_requested
+            ):
+                run_status = "interrupted"
+
+        # Build the end-of-run summary and route it through the driver logger
+        # so it lands in driver/output.log (and, in plain mode, on stdout).
+        summary_lines = _build_run_summary(
+            run_status, output_dir, cfg, deployed_graph,
+            start_time=launch_start, end_time=_time.time(),
+        )
+        for line in summary_lines:
+            info(line)
+
         # Stop interactive display first (restores terminal)
         if display:
             display.stop()
+            # The TUI used the alternate screen buffer, so nothing the user
+            # saw survives. Echo the summary to real stdout as the receipt.
+            for line in summary_lines:
+                print(line)
 
         # Uninstall shutdown handler
         if shutdown_handler:
             shutdown_handler.uninstall()
 
-        deployed_graph.shutdown()
+        if deployed_graph is not None:
+            deployed_graph.shutdown()
         driver_logger.shutdown()
 
 
@@ -628,8 +792,9 @@ def sample_mode(cfg, sample_type: str) -> None:
     from falcon.core.logger import Logger, set_logger, info
 
     # Setup logging config
+    path_cfg = _resolve_paths(cfg)
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
-    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+    logging_cfg.setdefault("local", {})["dir"] = path_cfg["graph"]
 
     # Create driver logger and set as module-level logger
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
@@ -656,6 +821,8 @@ def sample_mode(cfg, sample_type: str) -> None:
         sample_cfg = cfg.sample.get("posterior", None)
     elif sample_type == "proposal":
         sample_cfg = cfg.sample.get("proposal", None)
+    elif sample_type == "ppd":
+        sample_cfg = cfg.sample.get("ppd", None)
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
 
@@ -669,7 +836,7 @@ def sample_mode(cfg, sample_type: str) -> None:
     # Deploy graph for sampling
     deployed_graph = falcon.DeployedGraph(
         graph,
-        model_path=cfg.paths.get("import"),
+        import_dirs=path_cfg["imports"],
         log_config=logging_cfg,
     )
 
@@ -678,12 +845,16 @@ def sample_mode(cfg, sample_type: str) -> None:
         sample_refs = deployed_graph.sample(num_samples)
 
     elif sample_type == "posterior":
-        deployed_graph.load(Path(cfg.paths.graph))
+        deployed_graph.load(Path(path_cfg["graph"]))
         sample_refs = deployed_graph.sample_posterior(num_samples, observations)
 
     elif sample_type == "proposal":
-        deployed_graph.load(Path(cfg.paths.graph))
+        deployed_graph.load(Path(path_cfg["graph"]))
         sample_refs = deployed_graph.sample_proposal(num_samples, observations)
+
+    elif sample_type == "ppd":
+        deployed_graph.load(Path(path_cfg["graph"]))
+        sample_refs = deployed_graph.sample_ppd(num_samples, observations)
 
     else:
         raise ValueError(f"Unknown sample type: {sample_type}")
@@ -706,7 +877,11 @@ def sample_mode(cfg, sample_type: str) -> None:
 
 def monitor_mode(address: str = "auto", refresh: float = 1.0):
     """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
-    from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    try:
+        from falcon.monitor import init_ray_for_monitor, FalconMonitor
+    except ImportError:
+        print("falcon monitor requires falcon-sbi[monitor]")
+        sys.exit(1)
     if not init_ray_for_monitor(address):
         sys.exit(1)
     app = FalconMonitor(ray_address=address, refresh_interval=refresh)
@@ -729,7 +904,7 @@ def parse_args():
         print()
         print("Usage:")
         print("  falcon launch [--output DIR] [--config FILE] [--no-interactive] [key=value ...]")
-        print("  falcon sample prior|posterior|proposal [--output DIR] [--config FILE] [key=value ...]")
+        print("  falcon sample prior|posterior|proposal|ppd [--output DIR] [--config FILE] [key=value ...]")
         print("  falcon graph [--config FILE]")
         print()
         print("Options:")
@@ -737,7 +912,7 @@ def parse_args():
         print("  -c, --config FILE      Config file (default: config.yml)")
         print("  --no-interactive       Disable interactive TUI (plain output)")
         print("  --log-lines N          Number of log lines in interactive footer (default: 16)")
-        print("  --no-posterior-sample  Skip posterior sampling after training")
+        print("  --no-auto-sample       Skip automatic sampling after training")
         print("  --timeout SECONDS      Stop training after SECONDS (graceful stop)")
         sys.exit(0)
 
@@ -762,12 +937,12 @@ def parse_args():
             elif arg.startswith("--refresh="):
                 refresh = float(arg.split("=", 1)[1])
             i += 1
-        return mode, None, None, None, None, False, 16, address, refresh
+        return mode, None, None, None, None, False, 16, True, None, address, refresh
 
     sample_type = None
     if mode == "sample":
-        if not args or args[0] not in ["prior", "posterior", "proposal"]:
-            print("Error: sample requires type: prior, posterior, or proposal")
+        if not args or args[0] not in ["prior", "posterior", "proposal", "ppd"]:
+            print("Error: sample requires type: prior, posterior, proposal, or ppd")
             sys.exit(1)
         sample_type = args.pop(0)
 
@@ -777,7 +952,7 @@ def parse_args():
     # Interactive mode: default to True if stdout is a TTY
     interactive = sys.stdout.isatty()
     log_lines = 16  # Default log lines in footer
-    posterior_sample = True  # Sample posteriors after training if configured
+    auto_sample = True  # Run configured sample types after training
     timeout = None  # Training timeout in seconds
     overrides = []
     i = 0
@@ -811,8 +986,8 @@ def parse_args():
             interactive = True
         elif arg == "--no-interactive":
             interactive = False
-        elif arg == "--no-posterior-sample":
-            posterior_sample = False
+        elif arg == "--no-auto-sample":
+            auto_sample = False
         elif arg == "--timeout" and i + 1 < len(args):
             timeout = float(args[i + 1])
             i += 1
@@ -827,12 +1002,12 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, None, None
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, posterior_sample, timeout, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, address, refresh = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
@@ -846,7 +1021,7 @@ def main():
     cfg = load_config(config_name, run_dir, overrides)
 
     if mode == "launch":
-        launch_mode(cfg, interactive=interactive, log_lines=log_lines, posterior_sample=posterior_sample, timeout=timeout)
+        launch_mode(cfg, interactive=interactive, log_lines=log_lines, auto_sample=auto_sample, timeout=timeout)
     elif mode == "graph":
         graph_mode(cfg)
     else:

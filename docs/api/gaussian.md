@@ -27,7 +27,7 @@ Gaussian is configured through the same four groups as Flow: `loop`, `network`,
 estimator:
   _target_: falcon.estimators.Gaussian
   loop:
-    num_epochs: 1000
+    max_epochs: 1000
     batch_size: 128
     early_stop_patience: 32
   network:
@@ -57,7 +57,7 @@ estimator:
 |-----------|------|---------|-------------|
 | `hidden_dim` | int | 128 | MLP hidden layer dimension |
 | `num_layers` | int | 3 | Number of hidden layers |
-| `momentum` | float | 0.10 | EMA momentum for running statistics |
+| `momentum` | float | 0.01 | EMA momentum for running statistics |
 | `min_var` | float | 1e-20 | Minimum variance for numerical stability |
 | `eig_update_freq` | int | 1 | Eigendecomposition update frequency |
 
@@ -81,7 +81,7 @@ graph:
     estimator:
       _target_: falcon.estimators.Gaussian
       loop:
-        num_epochs: 1000
+        max_epochs: 1000
         batch_size: 128
         early_stop_patience: 32
       network:

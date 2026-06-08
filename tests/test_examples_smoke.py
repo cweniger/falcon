@@ -18,22 +18,22 @@ _skip_ci = pytest.mark.skipif(IN_CI, reason="Too resource-heavy for CI runners")
 # Each tuple: (example_dir_name, config_name, epoch_overrides)
 EXAMPLE_CONFIGS = [
     # 01_minimal: single estimator 'z'
-    ("01_minimal", "config.yml", ["graph.z.estimator.loop.num_epochs=2"]),
+    ("01_minimal", "config.yml", ["graph.z.estimator.loop.max_epochs=2"]),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
-    ("02_bimodal", "config_regular.yml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("02_bimodal", "config_regular.yml", ["graph.z.estimator.loop.max_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 03_composite: two ResNet18 + Ray actors exceed CI runner memory
     pytest.param(
         "03_composite", "config.yml",
-        ["graph.z1.estimator.loop.num_epochs=2", "graph.z2.estimator.loop.num_epochs=2",
+        ["graph.z1.estimator.loop.max_epochs=2", "graph.z2.estimator.loop.max_epochs=2",
          "graph.z1.ray.num_gpus=0", "graph.z2.ray.num_gpus=0"],
         marks=_skip_ci,
     ),
     # 04_gaussian: SNPE_gaussian with exponential forward model (needs GPU override)
-    ("04_gaussian", "config.yml", ["graph.z.estimator.loop.num_epochs=2", "graph.z.ray.num_gpus=0"]),
+    ("04_gaussian", "config.yml", ["graph.z.estimator.loop.max_epochs=2", "graph.z.ray.num_gpus=0"]),
     # 05_linear_regression: requires GPU
     pytest.param(
         "05_linear_regression", "config.yml",
-        ["graph.theta.estimator.loop.num_epochs=2", "graph.theta.ray.num_gpus=0"],
+        ["graph.theta.estimator.loop.max_epochs=2", "graph.theta.ray.num_gpus=0"],
         marks=_skip_ci,
     ),
 ]
@@ -89,8 +89,8 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
     )
 
     # Verify output.log files were created by the logging system
-    graph_dir = tmp_path / "graph_dir"
-    assert graph_dir.exists(), f"graph_dir not found at {graph_dir}"
+    graph_dir = tmp_path / "graph"
+    assert graph_dir.exists(), f"graph dir not found at {graph_dir}"
 
     # Check driver output.log exists
     driver_log = graph_dir / "driver" / "output.log"

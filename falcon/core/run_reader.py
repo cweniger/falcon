@@ -173,13 +173,13 @@ def read_run(path: str) -> RunReader:
     """Read a run from local metric storage.
 
     Args:
-        path: Path to the run directory (e.g., 'outputs/run_01/graph')
+        path: Path to the run directory (e.g., 'output/run_01/graph')
 
     Returns:
         RunReader providing dict-like access to nodes and metrics.
 
     Example:
-        run = read_run('outputs/run_01/graph')
+        run = read_run('output/run_01/graph')
         run['z']['loss'].values     # np.array of loss values
         run['z']['loss'].steps      # np.array of step numbers
         run['z'].metrics            # list of available metrics

@@ -19,7 +19,7 @@ from pathlib import Path
 import numpy as np
 
 # Configuration
-RUN_DIR = "outputs/run"
+RUN_DIR = "output/run"
 
 
 def run_command(cmd: list[str], description: str, cwd: Path = None) -> bool:
@@ -139,7 +139,7 @@ def main():
         sys.exit(1)
 
     # Step 3: Analyze samples
-    samples_dir = run_dir / "samples_dir"
+    samples_dir = run_dir / "samples"
     analyze_samples(samples_dir, script_dir)
 
 
