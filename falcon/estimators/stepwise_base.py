@@ -45,38 +45,25 @@ class StepwiseEstimator(BaseEstimator):
     - save/load
     """
 
-    def __init__(
+    def setup(
         self,
         simulator_instance,
-        loop_config: TrainingLoopConfig,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
+        config=None,
     ):
-        """
-        Initialize the stepwise estimator.
+        """Initialise runtime state shared by all stepwise estimators.
 
-        Args:
-            simulator_instance: Prior/simulator instance
-            loop_config: Training loop configuration
-            theta_key: Key for theta in batch data
-            condition_keys: Keys for condition data in batch
+        Subclasses must set ``self.loop_config`` and ``self.cache_on_device``
+        *before* calling ``super().setup()``.
         """
         self.simulator_instance = simulator_instance
-        self.loop_config = loop_config
         self.param_dim = simulator_instance.param_dim
-        self.cache_on_device = loop_config.cache_on_device
-
-        # Key configuration for Batch access
         self.theta_key = theta_key
         self.condition_keys = condition_keys or []
-
         self._terminated = False
         self._total_epochs_trained: int = 0
-
-        # Networks initialized flag (managed by subclass)
         self.networks_initialized = False
-
-        # History tracking
         self.history = {
             "train_ids": [],
             "val_ids": [],

@@ -166,14 +166,20 @@ class NodeWrapper:
         debug(f"Condition keys: {self.condition_keys}")
 
         if node.estimator_cls is not None:
-            # Config builders (_FlowConfigBuilder etc.) and classes both work
-            # through LazyLoader's __call__ protocol.  Raw instances of an
-            # already-constructed estimator are used directly.
-            if isinstance(node.estimator_cls, (str, type)):
+            from falcon.core.base_estimator import BaseEstimator as _BaseEstimator
+            if isinstance(node.estimator_cls, _BaseEstimator):
+                # Notebook path: already a configured instance (e.g. Flow(loop_max_epochs=200))
+                self.estimator_instance = node.estimator_cls
+            elif isinstance(node.estimator_cls, (str, type)):
+                # YAML / class path: instantiate with no args then setup
                 estimator_cls = LazyLoader(node.estimator_cls)
+                self.estimator_instance = estimator_cls()
             else:
-                estimator_cls = LazyLoader(node.estimator_cls)
-            self.estimator_instance = estimator_cls(
+                raise TypeError(
+                    f"estimator_cls must be a BaseEstimator instance, class, or "
+                    f"string; got {type(node.estimator_cls).__name__}"
+                )
+            self.estimator_instance.setup(
                 self.simulator_instance,
                 theta_key=node.name,
                 condition_keys=self.condition_keys,

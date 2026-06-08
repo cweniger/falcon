@@ -1,6 +1,7 @@
 """Full-covariance Gaussian estimator for TransformedPrior simulators."""
 
 import copy
+import inspect
 import time
 from dataclasses import dataclass, field
 from pathlib import Path
@@ -260,21 +261,32 @@ class _GaussianPosterior(nn.Module):
 class GaussianFullCov(StepwiseEstimator):
     """Full-covariance Gaussian posterior estimator for TransformedPrior simulators.
 
+    Pass flat keyword arguments to configure at graph-build time::
+
+        graph.add_node("z", estimator=GaussianFullCov(loop_max_epochs=200))
+
     Works in the standard-normal latent space defined by the simulator's
     forward/inverse transforms. Samples are mapped back to parameter space
     after generation.
-
-    Gamma is resolved once at initialisation:
-      - proposal sampling uses _proposal_gamma  (widens the distribution)
-      - posterior sampling uses _posterior_gamma (corrects for proposal bias)
     """
 
-    def __init__(
+    _CONFIG_SECTIONS = {
+        "loop": TrainingLoopConfig,
+        "network": NetworkConfig,
+        "optimizer": OptimizerConfig,
+        "inference": InferenceConfig,
+    }
+    _CONFIG_EXTRA_PARAMS = [
+        inspect.Parameter("embedding", inspect.Parameter.KEYWORD_ONLY, default=None),
+        inspect.Parameter("device", inspect.Parameter.KEYWORD_ONLY, default=None),
+    ]
+
+    def setup(
         self,
         simulator_instance,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
-        config: Optional[dict] = None,
+        config=None,
     ):
         if not isinstance(simulator_instance, TransformedPrior):
             raise TypeError(
@@ -283,14 +295,12 @@ class GaussianFullCov(StepwiseEstimator):
             )
 
         schema = OmegaConf.structured(GaussianConfig)
-        cfg = OmegaConf.merge(schema, config or {})
+        notebook_cfg = OmegaConf.create(self._init_flat_kwargs)
+        cfg = OmegaConf.merge(schema, notebook_cfg, config or {})
 
-        super().__init__(
-            simulator_instance=simulator_instance,
-            loop_config=cfg.loop,
-            theta_key=theta_key,
-            condition_keys=condition_keys,
-        )
+        self.loop_config = cfg.loop
+        self.cache_on_device = cfg.loop.cache_on_device
+        super().setup(simulator_instance, theta_key, condition_keys)
 
         self.cfg = cfg
 
@@ -300,12 +310,10 @@ class GaussianFullCov(StepwiseEstimator):
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             debug(f"Auto-detected device: {self.device}")
 
-        # Resolve gamma once: proposal widens, posterior corrects back
         gamma = cfg.inference.gamma
         self._proposal_gamma = gamma
         self._posterior_gamma = (1.0 + gamma) / gamma if gamma is not None else None
 
-        # Model state (initialised lazily on first batch)
         self._model: Optional[nn.Module] = None
         self._best_model: Optional[nn.Module] = None
         self._best_loss: float = float("inf")
