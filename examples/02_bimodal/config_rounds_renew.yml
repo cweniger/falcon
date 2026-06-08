@@ -43,29 +43,25 @@ graph:
         - ['uniform', -10000.0, 10000.0]
     estimator:
       _target_: falcon.estimators.Flow
-      loop:
-        max_epochs: 600
-        batch_size: 128
-        early_stop_patience: 32
-      network:
-        net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
-        theta_norm: true
-        norm_momentum: 0.002
-        use_log_update: true
-        adaptive_momentum: false
+      max_epochs: 600
+      net_type: nsf  # zuko_gf, maf, nice, sospf, naf, gf
+      lr: 0.006
+      gamma: 0.5
       embedding:
         _target_: model.E
         _input_: [x]
-      optimizer:
-        lr: 0.006
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
-      inference:
-        gamma: 0.5
-        discard_samples: false
-        log_ratio_threshold: -20
-        sample_reference_posterior: false
-        use_best_models_during_inference: true
+      batch_size: 128
+      early_stop_patience: 32
+      theta_norm: true
+      norm_momentum: 0.002
+      use_log_update: true
+      adaptive_momentum: false
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20
+      sample_reference_posterior: false
+      use_best_models: true
     ray:
       num_gpus: 1
   

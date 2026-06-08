@@ -12,19 +12,12 @@ from falcon.estimators.stepwise_base import (
     TrainingLoopConfig,
 )
 from falcon.estimators.gaussian import Gaussian
-from falcon.estimators.gaussian_fullcov import (
-    GaussianConfig,
-    GaussianFullCov,
-    GaussianPosterior,
-)
+from falcon.estimators.gaussian_fullcov import GaussianFullCov
 
 __all__ = [
     "Flow",
-    "FlowConfig",
     "Gaussian",
-    "GaussianConfig",
     "GaussianFullCov",
-    "GaussianPosterior",
     "StepwiseEstimator",
     "LossBasedEstimator",
     "TrainingLoopConfig",
@@ -33,7 +26,6 @@ __all__ = [
 # Lazy imports for sbi-dependent classes
 _LAZY_IMPORTS = {
     "Flow": "falcon.estimators.flow",
-    "FlowConfig": "falcon.estimators.flow",
 }
 
 

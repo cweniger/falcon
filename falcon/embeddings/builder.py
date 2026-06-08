@@ -333,8 +333,28 @@ def _flatten_config_to_modules(
     return modules, input_keys_list, output_keys, temp_counter
 
 
+class _PassthroughEmbedding(nn.Module):
+    """Identity embedding: concatenates all condition tensors along the last dim.
+
+    Casts to float32 so the output is compatible with the default network dtype.
+    """
+
+    def forward(self, data_dict: Dict[str, Any]):
+        import torch
+        tensors = [v.float() for v in data_dict.values() if hasattr(v, "shape")]
+        if not tensors:
+            raise ValueError("PassthroughEmbedding received an empty conditions dict.")
+        return torch.cat(tensors, dim=-1)
+
+
 def instantiate_embedding(embedding_config: Dict[str, Any]) -> EmbeddingWrapper:
-    """Instantiate embedding pipeline from config."""
+    """Instantiate embedding pipeline from config.
+
+    When *embedding_config* is ``None``, returns a pass-through embedding that
+    concatenates all condition tensors along the last dimension.
+    """
+    if embedding_config is None:
+        return _PassthroughEmbedding()
     required_input_keys = _collect_input_keys(embedding_config)
     modules, input_keys_list, output_keys, _ = _flatten_config_to_modules(
         embedding_config

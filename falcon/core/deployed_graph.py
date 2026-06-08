@@ -1,6 +1,5 @@
 import time
 import ray
-import asyncio
 import torch
 import os
 import sys
@@ -154,20 +153,36 @@ class NodeWrapper:
         # Status tracking for monitoring
         self._status = "initializing"
 
-        simulator_cls = LazyLoader(node.simulator_cls)
-        self.simulator_instance = simulator_cls(**node.simulator_config)
+        # Live instances (from Python API) are used directly; string / class
+        # paths go through LazyLoader for deferred import + instantiation.
+        if isinstance(node.simulator_cls, (str, type)):
+            simulator_cls = LazyLoader(node.simulator_cls)
+            self.simulator_instance = simulator_cls(**node.simulator_config)
+        else:
+            self.simulator_instance = node.simulator_cls
 
         # Condition keys for embedding (evidence + scaffolds)
         self.condition_keys = self.node.evidence + self.node.scaffolds
         debug(f"Condition keys: {self.condition_keys}")
 
         if node.estimator_cls is not None:
-            estimator_cls = LazyLoader(node.estimator_cls)
-            self.estimator_instance = estimator_cls(
+            from falcon.core.base_estimator import BaseEstimator as _BaseEstimator
+            if isinstance(node.estimator_cls, _BaseEstimator):
+                # Notebook path: already a configured instance (e.g. Flow(max_epochs=200))
+                self.estimator_instance = node.estimator_cls
+            elif isinstance(node.estimator_cls, (str, type)):
+                # YAML path: pass flat config dict as kwargs to __init__
+                estimator_cls = LazyLoader(node.estimator_cls)
+                self.estimator_instance = estimator_cls(**node.estimator_config)
+            else:
+                raise TypeError(
+                    f"estimator_cls must be a BaseEstimator instance, class, or "
+                    f"string; got {type(node.estimator_cls).__name__}"
+                )
+            self.estimator_instance.setup(
                 self.simulator_instance,
                 theta_key=node.name,
                 condition_keys=self.condition_keys,
-                config=node.estimator_config,
             )
         else:
             self.estimator_instance = None
@@ -427,8 +442,8 @@ class NodeWrapper:
                 if status["loss_history"]:
                     status["loss"] = status["loss_history"][-1]
                 status["current_epoch"] = len(est.history.get("epochs", []))
-            if hasattr(est, "loop_config"):
-                status["total_epochs"] = est.loop_config.max_epochs
+            if hasattr(est, "max_epochs"):
+                status["total_epochs"] = est.max_epochs
             if hasattr(est, "history") and est.history.get("n_samples"):
                 status["samples"] = est.history["n_samples"][-1]
 
@@ -777,9 +792,9 @@ class DeployedGraph:
             graph_path: Path to save/load graph
             stop_check: Optional callable that returns True when graceful stop is requested
         """
-        asyncio.run(self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check))
+        self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
-    async def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
+    def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
         # Load graph if saved model files exist (not just logging directories)
         if graph_path is not None and any(graph_path.glob("*/*.pth")):
             self.load(graph_path)

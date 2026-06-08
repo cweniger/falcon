@@ -483,10 +483,43 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
     info_fn(f"Saved {num_samples} {sample_type} samples to: {output_dir}/")
 
 
-def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample: bool = True, timeout: float = None) -> None:
-    """Launch mode: Full training and inference pipeline."""
-    import logging
-    import threading
+def _run_pipeline(
+    cfg,
+    *,
+    auto_sample: bool = True,
+    timeout: float = None,
+    stop_check=None,
+    log_handler=None,
+    on_graph_ready=None,
+    summary_sink=None,
+    graph=None,
+    observations=None,
+) -> Path:
+    """Pure training pipeline, decoupled from CLI frontend and Ray lifecycle.
+
+    Assumes Ray is already initialised. Does not call ray.init() or ray.shutdown().
+
+    Args:
+        cfg: Resolved OmegaConf config.
+        auto_sample: Run configured post-training sampling when True.
+        timeout: Stop training after this many seconds (None = no limit).
+        stop_check: Callable returning True when training should stop gracefully.
+            Defaults to never stopping.
+        log_handler: Optional logging.Handler to replace the stdout console
+            handler (used by the TUI to route log lines to its display buffer).
+        on_graph_ready: Optional callable(graph_path: Path) invoked just before
+            training starts; used by the TUI to start its status polling thread.
+        summary_sink: Optional list; the end-of-run summary lines are appended
+            to it so the caller can echo them after display teardown.
+        graph: Pre-built Graph object (from the Python API).  When provided,
+            ``cfg.graph`` is not parsed; this graph is used directly.
+        observations: Dict of node_name -> np.ndarray from graph._api_observations.
+            Only used when *graph* is provided.
+
+    Returns:
+        output_dir Path.
+    """
+    import logging as _logging
     import time as _time
     import torch
     import ray
@@ -495,187 +528,79 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
     from falcon.core.graph import create_graph_from_config
     from falcon.core.logger import Logger, set_logger, info
 
+    if stop_check is None:
+        stop_check = lambda: False
+
     launch_start = _time.time()
-
-    # Initialize interactive display or graceful shutdown handler
-    display = None
-    shutdown_handler = None
-    if interactive:
-        try:
-            from falcon.interactive import InteractiveDisplay
-            # Footer height = log_lines + 4 (separator, status bar, sub-separator, help)
-            display = InteractiveDisplay(footer_height=log_lines + 4)
-            display.start()
-        except ImportError:
-            print("Interactive display unavailable (install falcon-sbi[blessed] to enable it)")
-    if display is None:
-        # Non-interactive mode: install double Ctrl+C handler
-        shutdown_handler = _GracefulShutdown()
-        shutdown_handler.install()
-
-    # Get output directory from config
     output_dir = Path(cfg.run_dir)
     path_cfg = _resolve_paths(cfg)
 
-    # Generate wandb group if not set - use run-dir folder name
+    # Build logging config
     logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
     if logging_cfg.get("wandb", {}).get("enabled", False):
         if not logging_cfg.get("wandb", {}).get("group"):
-            # Use the run-dir folder name as the group name
             logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
-
-    # Ensure local dir is set to graph path
     logging_cfg.setdefault("local", {})["dir"] = path_cfg["graph"]
 
     # Create driver logger and set as module-level logger
-    # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
     driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
     set_logger(driver_logger)
 
-    # If interactive mode, replace console handler with one that routes to display
-    if display:
+    # Replace stdout handler with the injected one (e.g. TUI routing)
+    if log_handler is not None:
         for handler in driver_logger._logger.handlers[:]:
-            if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+            if isinstance(handler, _logging.StreamHandler) and handler.stream == sys.stdout:
                 driver_logger._logger.removeHandler(handler)
-                # Add custom handler that routes to display
-                interactive_handler = logging.StreamHandler(_InteractiveStream(display))
-                interactive_handler.setFormatter(logging.Formatter(
-                    '%(asctime)s [%(levelname)s] %(message)s',
-                    datefmt='%H:%M:%S'
-                ))
-                interactive_handler.setLevel(logging.INFO)
-                driver_logger._logger.addHandler(interactive_handler)
                 break
+        driver_logger._logger.addHandler(log_handler)
 
-    # Log startup info
+    # Startup info
     info(f"falcon v{falcon.__version__}")
     info(f"Output: {output_dir}")
 
-    # Initialize Ray
-    ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Forward actor stdout/stderr to driver when console.level is set,
-    # so node log messages and crash output reach the terminal.
-    console_level = logging_cfg.get("console", {}).get("level", None)
-    ray_init_args.setdefault("log_to_driver", console_level is not None)
-    # Use a fixed namespace so falcon monitor can discover actors
-    ray_init_args.setdefault("namespace", "falcon")
-    # Suppress Ray startup banner
-    ray_init_args.setdefault("logging_level", "ERROR")
-    ray.init(**ray_init_args)
-
-    # Show Ray cluster info with resources
+    # Ray cluster info (Ray must already be initialised by the caller)
     ctx = ray.get_runtime_context()
     gcs_address = ctx.gcs_address
-    is_local = ray_init_args.get("address") is None
+    is_local = cfg.get("ray", {}).get("init", {}).get("address") is None
     ray_status = "new local instance" if is_local else "existing cluster"
     resources = ray.cluster_resources()
     cpu = int(resources.get("CPU", 0))
     gpu = int(resources.get("GPU", 0))
     mem_gb = resources.get("memory", 0) / (1024**3)
-
     info(f"Ray: {gcs_address} ({ray_status})")
     info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
 
-    ########################
-    ### Model definition ###
-    ########################
-
-    # Instantiate model components directly from graph
-    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
-
-    # Convert observations to tensors, adding batch dimension
-    observations = {
-        k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
-    }
-
-    # Log graph info
+    # Build graph and observations
+    if graph is None:
+        graph, obs_raw = create_graph_from_config(cfg.graph, _cfg=cfg)
+        observations_tensors = {
+            k: torch.from_numpy(v).unsqueeze(0) for k, v in obs_raw.items()
+        }
+    else:
+        import numpy as np
+        observations_tensors = {
+            k: torch.from_numpy(np.asarray(v)).unsqueeze(0)
+            for k, v in (observations or {}).items()
+        }
     info(str(graph))
-    for name, shape in observations.items():
+    for name, shape in observations_tensors.items():
         info(f"Observed: {name} {list(shape.shape)}")
 
-    ####################
-    ### Run analysis ###
-    ####################
-
-    # Start status polling thread for interactive mode
-    status_thread = None
     graph_path = Path(path_cfg["graph"])
-    if display:
-        # Set log directory so display can read node output.log files
-        display.set_log_dir(str(graph_path))
 
-        def poll_status():
-            """Background thread to poll MonitorBridge and update display."""
-            import time
-            while display.is_running:
-                try:
-                    bridge = ray.get_actor("falcon:monitor_bridge")
-                    status = ray.get(bridge.get_status.remote())
-
-                    # Update nodes
-                    for name, node_status in status.get("nodes", {}).items():
-                        display.update_node(
-                            name=name,
-                            status=node_status.get("status", "unknown"),
-                            current_epoch=node_status.get("current_epoch", 0),
-                            total_epochs=node_status.get("total_epochs", 0),
-                            loss=node_status.get("loss"),
-                            samples=node_status.get("samples", 0),
-                        )
-
-                    # Add dataset manager as a viewable node (for its output.log)
-                    display.update_node(name="dataset", status="active")
-
-                    # Update buffer stats
-                    buffer = status.get("buffer", {})
-                    display.update_buffer(
-                        training=buffer.get("training", 0),
-                        validation=buffer.get("validation", 0),
-                    )
-                except Exception:
-                    pass  # MonitorBridge may not be ready yet
-
-                # Redraw footer to refresh log tail
-                with display._lock:
-                    display._draw_footer()
-
-                time.sleep(1.0)
-
-        status_thread = threading.Thread(target=poll_status, daemon=True)
-        status_thread.start()
-
-    # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
-    _start_time = _time.time()
-    _timeout_logged = False
-
-    def stop_check():
-        nonlocal _timeout_logged
-        # Check user interrupt (Ctrl+C)
-        if display and display.stop_requested:
-            return True
-        if shutdown_handler and shutdown_handler.stop_requested:
-            return True
-        # Check timeout
-        if timeout is not None:
-            elapsed = _time.time() - _start_time
-            if elapsed >= timeout:
-                if not _timeout_logged:
-                    info(f"Timeout reached ({timeout}s), stopping gracefully...")
-                    _timeout_logged = True
-                return True
-        return False
+    # Notify caller that graph path is known (TUI uses this to start status thread)
+    if on_graph_ready is not None:
+        on_graph_ready(graph_path)
 
     run_status = "completed"
     deployed_graph = None
     try:
-        # 1) Deploy graph (pass logging config)
         deployed_graph = falcon.DeployedGraph(
             graph,
             import_dirs=path_cfg["imports"],
             log_config=logging_cfg,
         )
 
-        # 2) Prepare dataset manager for deployed graph and store initial samples
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
         buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
@@ -686,50 +611,27 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
             log_config=logging_cfg,
         )
 
-        deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
+        deployed_graph.launch(dataset_manager, observations_tensors, graph_path=graph_path, stop_check=stop_check)
 
-        #############################
-        ### Posterior sampling    ###
-        #############################
-
-        # Check if posterior sampling is configured and enabled
+        # Auto-sample posterior
         sample_cfg = cfg.get("sample", {}).get("posterior", {})
         num_posterior_samples = sample_cfg.get("n", 0)
-
         if auto_sample and num_posterior_samples > 0:
             info(f"Generating {num_posterior_samples} posterior samples...")
-
-            sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
+            sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations_tensors)
             samples = deployed_graph._refs_to_arrays(sample_refs)
+            _save_samples(samples=samples, sample_cfg=sample_cfg, sample_type="posterior",
+                          graph=graph, cfg=cfg, info_fn=info)
 
-            # Save posterior samples
-            _save_samples(
-                samples=samples,
-                sample_cfg=sample_cfg,
-                sample_type="posterior",
-                graph=graph,
-                cfg=cfg,
-                info_fn=info,
-            )
-
-        # Check if PPD sampling is configured and enabled
+        # Auto-sample PPD
         ppd_cfg = cfg.get("sample", {}).get("ppd", {})
         num_ppd_samples = ppd_cfg.get("n", 0)
-
         if auto_sample and num_ppd_samples > 0:
             info(f"Generating {num_ppd_samples} PPD samples...")
-
-            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
+            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations_tensors)
             samples = deployed_graph._refs_to_arrays(sample_refs)
-
-            _save_samples(
-                samples=samples,
-                sample_cfg=ppd_cfg,
-                sample_type="ppd",
-                graph=graph,
-                cfg=cfg,
-                info_fn=info,
-            )
+            _save_samples(samples=samples, sample_cfg=ppd_cfg, sample_type="ppd",
+                          graph=graph, cfg=cfg, info_fn=info)
 
     except KeyboardInterrupt:
         run_status = "interrupted"
@@ -738,42 +640,141 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         run_status = f"failed ({type(e).__name__}: {e})"
         raise
     finally:
-        ##########################
-        ### Clean up resources ###
-        ##########################
+        # A graceful stop_check exit is not an exception, so detect it here.
+        if run_status == "completed" and stop_check():
+            run_status = "interrupted"
 
-        # A graceful Ctrl+C / timeout exits the launch normally, not via an
-        # exception, so reflect that here.
-        if run_status == "completed":
-            if (display and display.stop_requested) or (
-                shutdown_handler and shutdown_handler.stop_requested
-            ):
-                run_status = "interrupted"
-
-        # Build the end-of-run summary and route it through the driver logger
-        # so it lands in driver/output.log (and, in plain mode, on stdout).
         summary_lines = _build_run_summary(
             run_status, output_dir, cfg, deployed_graph,
             start_time=launch_start, end_time=_time.time(),
         )
         for line in summary_lines:
             info(line)
-
-        # Stop interactive display first (restores terminal)
-        if display:
-            display.stop()
-            # The TUI used the alternate screen buffer, so nothing the user
-            # saw survives. Echo the summary to real stdout as the receipt.
-            for line in summary_lines:
-                print(line)
-
-        # Uninstall shutdown handler
-        if shutdown_handler:
-            shutdown_handler.uninstall()
+        if summary_sink is not None:
+            summary_sink.extend(summary_lines)
 
         if deployed_graph is not None:
             deployed_graph.shutdown()
         driver_logger.shutdown()
+
+    return output_dir
+
+
+def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample: bool = True, timeout: float = None) -> None:
+    """Launch mode: CLI frontend over _run_pipeline."""
+    import logging
+    import threading
+    import time as _time
+    import ray
+    from omegaconf import OmegaConf
+
+    # Set up interactive display or graceful shutdown handler
+    display = None
+    shutdown_handler = None
+    if interactive:
+        try:
+            from falcon.interactive import InteractiveDisplay
+            display = InteractiveDisplay(footer_height=log_lines + 4)
+            display.start()
+        except ImportError:
+            print("Interactive display unavailable (install falcon-sbi[blessed] to enable it)")
+    if display is None:
+        shutdown_handler = _GracefulShutdown()
+        shutdown_handler.install()
+
+    # Initialize Ray
+    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+    ray_init_args = cfg.get("ray", {}).get("init", {})
+    console_level = logging_cfg.get("console", {}).get("level", None)
+    ray_init_args.setdefault("log_to_driver", console_level is not None)
+    ray_init_args.setdefault("namespace", "falcon")
+    ray_init_args.setdefault("logging_level", "ERROR")
+    ray.init(**ray_init_args)
+
+    # Build stop_check: handles Ctrl+C, display stop, and timeout
+    _start_time = _time.time()
+    _timeout_logged = False
+
+    def stop_check():
+        nonlocal _timeout_logged
+        if display and display.stop_requested:
+            return True
+        if shutdown_handler and shutdown_handler.stop_requested:
+            return True
+        if timeout is not None:
+            elapsed = _time.time() - _start_time
+            if elapsed >= timeout:
+                if not _timeout_logged:
+                    from falcon.core.logger import info
+                    info(f"Timeout reached ({timeout}s), stopping gracefully...")
+                    _timeout_logged = True
+                return True
+        return False
+
+    # Build log handler for TUI routing (replaces stdout in the driver logger)
+    log_handler = None
+    if display:
+        interactive_handler = logging.StreamHandler(_InteractiveStream(display))
+        interactive_handler.setFormatter(logging.Formatter(
+            '%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'
+        ))
+        interactive_handler.setLevel(logging.INFO)
+        log_handler = interactive_handler
+
+    # Build on_graph_ready: TUI sets log dir and starts status polling thread
+    def on_graph_ready(graph_path):
+        if display is None:
+            return
+        display.set_log_dir(str(graph_path))
+
+        def poll_status():
+            import time
+            while display.is_running:
+                try:
+                    bridge = ray.get_actor("falcon:monitor_bridge")
+                    status = ray.get(bridge.get_status.remote())
+                    for name, node_status in status.get("nodes", {}).items():
+                        display.update_node(
+                            name=name,
+                            status=node_status.get("status", "unknown"),
+                            current_epoch=node_status.get("current_epoch", 0),
+                            total_epochs=node_status.get("total_epochs", 0),
+                            loss=node_status.get("loss"),
+                            samples=node_status.get("samples", 0),
+                        )
+                    display.update_node(name="dataset", status="active")
+                    buffer = status.get("buffer", {})
+                    display.update_buffer(
+                        training=buffer.get("training", 0),
+                        validation=buffer.get("validation", 0),
+                    )
+                except Exception:
+                    pass
+                with display._lock:
+                    display._draw_footer()
+                time.sleep(1.0)
+
+        threading.Thread(target=poll_status, daemon=True).start()
+
+    summary_lines = []
+    try:
+        _run_pipeline(
+            cfg,
+            auto_sample=auto_sample,
+            timeout=timeout,
+            stop_check=stop_check,
+            log_handler=log_handler,
+            on_graph_ready=on_graph_ready,
+            summary_sink=summary_lines,
+        )
+    finally:
+        if display:
+            display.stop()
+            # TUI used alternate screen buffer; echo summary to restored terminal.
+            for line in summary_lines:
+                print(line)
+        if shutdown_handler:
+            shutdown_handler.uninstall()
 
 
 def sample_mode(cfg, sample_type: str) -> None:
