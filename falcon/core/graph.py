@@ -154,7 +154,7 @@ class Graph:
                 Live instances (e.g. ``Product([...])``) are shipped to Ray
                 actors via cloudpickle.
             estimator: Estimator class, string ``_target_``, config builder
-                (e.g. ``Flow(loop_max_epochs=300)``), or ``None`` for
+                (e.g. ``Flow(max_epochs=300)``), or ``None`` for
                 observation-only nodes.
             parents: List of parent node names (forward / simulation direction).
             evidence: List of evidence node names (inference direction).

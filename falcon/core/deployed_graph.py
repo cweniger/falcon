@@ -168,12 +168,12 @@ class NodeWrapper:
         if node.estimator_cls is not None:
             from falcon.core.base_estimator import BaseEstimator as _BaseEstimator
             if isinstance(node.estimator_cls, _BaseEstimator):
-                # Notebook path: already a configured instance (e.g. Flow(loop_max_epochs=200))
+                # Notebook path: already a configured instance (e.g. Flow(max_epochs=200))
                 self.estimator_instance = node.estimator_cls
             elif isinstance(node.estimator_cls, (str, type)):
-                # YAML / class path: instantiate with no args then setup
+                # YAML path: pass flat config dict as kwargs to __init__
                 estimator_cls = LazyLoader(node.estimator_cls)
-                self.estimator_instance = estimator_cls()
+                self.estimator_instance = estimator_cls(**node.estimator_config)
             else:
                 raise TypeError(
                     f"estimator_cls must be a BaseEstimator instance, class, or "
@@ -183,7 +183,6 @@ class NodeWrapper:
                 self.simulator_instance,
                 theta_key=node.name,
                 condition_keys=self.condition_keys,
-                config=node.estimator_config,
             )
         else:
             self.estimator_instance = None
@@ -443,8 +442,8 @@ class NodeWrapper:
                 if status["loss_history"]:
                     status["loss"] = status["loss_history"][-1]
                 status["current_epoch"] = len(est.history.get("epochs", []))
-            if hasattr(est, "loop_config"):
-                status["total_epochs"] = est.loop_config.max_epochs
+            if hasattr(est, "max_epochs"):
+                status["total_epochs"] = est.max_epochs
             if hasattr(est, "history") and est.history.get("n_samples"):
                 status["samples"] = est.history["n_samples"][-1]
 

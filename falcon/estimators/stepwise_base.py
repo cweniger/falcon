@@ -50,13 +50,8 @@ class StepwiseEstimator(BaseEstimator):
         simulator_instance,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
-        config=None,
     ):
-        """Initialise runtime state shared by all stepwise estimators.
-
-        Subclasses must set ``self.loop_config`` and ``self.cache_on_device``
-        *before* calling ``super().setup()``.
-        """
+        """Initialise runtime state shared by all stepwise estimators."""
         self.simulator_instance = simulator_instance
         self.param_dim = simulator_instance.param_dim
         self.theta_key = theta_key
@@ -142,22 +137,16 @@ class StepwiseEstimator(BaseEstimator):
     # ==================== Concrete Methods ====================
 
     async def train(self, buffer) -> None:
-        """
-        Main training loop with epochs and early stopping.
-
-        Args:
-            buffer: BufferView providing access to training/validation data
-        """
-        cfg = self.loop_config
+        """Main training loop with epochs and early stopping."""
         keys = [f"{self.theta_key}.value", f"{self.theta_key}.log_prob",
                 *[f"{k}.value" for k in self.condition_keys]]
-        await self._train(buffer, cfg, keys)
+        await self._train(buffer, keys)
 
-    async def _train(self, buffer, cfg, keys) -> None:
+    async def _train(self, buffer, keys) -> None:
         """Epoch-based training with CPU-cached dataloader."""
-        sync_every = cfg.cache_sync_every if cfg.cache_sync_every > 0 else 1
+        sync_every = self.cache_sync_every if self.cache_sync_every > 0 else 1
 
-        train_cache = buffer.cached_loader(keys, max_cache_samples=cfg.max_cache_samples)
+        train_cache = buffer.cached_loader(keys, max_cache_samples=self.max_cache_samples)
         val_cache = buffer.cached_val_loader(keys, max_cache_samples=0)
 
         train_cache.sync()
@@ -168,7 +157,7 @@ class StepwiseEstimator(BaseEstimator):
         total_steps = 0
         t0 = time.perf_counter()
 
-        for epoch in range(cfg.max_epochs):
+        for epoch in range(self.max_epochs):
             log({"epoch": self._total_epochs_trained + 1})
 
             # Periodic incremental sync
@@ -177,12 +166,12 @@ class StepwiseEstimator(BaseEstimator):
                 val_cache.sync()
 
             # === Training phase ===
-            steps_per_epoch = max(1, train_cache.count // cfg.batch_size)
+            steps_per_epoch = max(1, train_cache.count // self.batch_size)
             train_metrics_sum = {}
             num_train_batches = 0
 
             for step in range(steps_per_epoch):
-                batch = train_cache.sample_batch(cfg.batch_size)
+                batch = train_cache.sample_batch(self.batch_size)
                 metrics = self.train_step(batch)
 
                 for k, v in metrics.items():
@@ -202,10 +191,10 @@ class StepwiseEstimator(BaseEstimator):
             # === Validation phase ===
             val_metrics_sum = {}
             num_val_samples = 0
-            val_steps = max(1, val_cache.count // cfg.batch_size)
+            val_steps = max(1, val_cache.count // self.batch_size)
 
             for step in range(val_steps):
-                batch = val_cache.sample_batch(cfg.batch_size)
+                batch = val_cache.sample_batch(self.batch_size)
                 metrics = self.val_step(batch)
                 bs = len(batch)
 
@@ -236,7 +225,7 @@ class StepwiseEstimator(BaseEstimator):
             train_loss = train_metrics_avg.get("loss", float("nan"))
             val_loss = val_metrics_avg.get("loss", float("inf"))
             summary = (
-                f"Epoch {self._total_epochs_trained + 1}/{cfg.max_epochs}"
+                f"Epoch {self._total_epochs_trained + 1}/{self.max_epochs}"
                 f" | steps={total_steps}"
             )
             if n_sims is not None:
@@ -261,7 +250,7 @@ class StepwiseEstimator(BaseEstimator):
             )
             self._total_epochs_trained += 1
 
-            if epochs_no_improve >= cfg.early_stop_patience:
+            if epochs_no_improve >= self.early_stop_patience:
                 info("Early stopping triggered.")
                 break
 
@@ -330,12 +319,26 @@ class LossBasedEstimator(StepwiseEstimator):
                 "standard_normal": transform to N(0,I) via simulator.inverse/forward
                 "hypercube": transform to hypercube via simulator.inverse/forward
         """
-        super().__init__(
-            simulator_instance=simulator_instance,
-            loop_config=loop_config,
-            theta_key=theta_key,
-            condition_keys=condition_keys,
-        )
+        self.max_epochs = loop_config.max_epochs
+        self.batch_size = loop_config.batch_size
+        self.early_stop_patience = loop_config.early_stop_patience
+        self.cache_sync_every = loop_config.cache_sync_every
+        self.max_cache_samples = loop_config.max_cache_samples
+        self.cache_on_device = loop_config.cache_on_device
+        self.prior_epochs = loop_config.prior_epochs
+
+        # Runtime state normally set by StepwiseEstimator.setup()
+        self.simulator_instance = simulator_instance
+        self.param_dim = simulator_instance.param_dim
+        self.theta_key = theta_key
+        self.condition_keys = condition_keys or []
+        self._terminated = False
+        self._total_epochs_trained: int = 0
+        self.networks_initialized = False
+        self.history = {
+            "train_ids": [], "val_ids": [], "epochs": [],
+            "train_loss": [], "val_loss": [], "n_samples": [], "elapsed_min": [],
+        }
 
         self.posterior_cls = posterior_cls
         self.embedding_config = embedding_config
@@ -344,25 +347,25 @@ class LossBasedEstimator(StepwiseEstimator):
         self.inference_config = inference_config
         self.latent_mode = latent_mode
 
-        # Device setup
         if device:
             self.device = torch.device(device)
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             debug(f"Auto-detected device: {self.device}")
 
-        # Model (initialized lazily)
         self._model: Optional[nn.Module] = None
         self._best_model: Optional[nn.Module] = None
         self._best_loss: float = float("inf")
 
-        # Stored tensors from first batch (for model rebuild on load)
         self._init_theta: Optional[torch.Tensor] = None
         self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
 
-        # Optimizer/scheduler (initialized lazily)
         self._optimizer: Optional[AdamW] = None
         self._scheduler: Optional[ReduceLROnPlateau] = None
+
+    def setup(self, simulator_instance=None, theta_key=None, condition_keys=None):
+        """No-op: LossBasedEstimator is fully initialised in __init__ (deprecated factory pattern)."""
+        pass
 
     # ==================== Model Creation ====================
 
@@ -586,7 +589,7 @@ class LossBasedEstimator(StepwiseEstimator):
 
     def sample_proposal(self, num_samples: int, conditions: Optional[Dict] = None) -> dict:
         """Sample from widened proposal distribution for adaptive resampling."""
-        if self._total_epochs_trained < self.loop_config.prior_epochs:
+        if self._total_epochs_trained < self.prior_epochs:
             return self.sample_prior(num_samples)
         result = self._sample(num_samples, conditions, gamma=self.inference_config.gamma)
         log({

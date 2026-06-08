@@ -1,68 +1,20 @@
 """Full-covariance Gaussian estimator for TransformedPrior simulators."""
 
 import copy
-import inspect
 import time
-from dataclasses import dataclass, field
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Dict, List, Optional
 
 import numpy as np
 import torch
 import torch.nn as nn
-from omegaconf import OmegaConf
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.networks import build_mlp
-from falcon.estimators.stepwise_base import StepwiseEstimator, TrainingLoopConfig
+from falcon.estimators.stepwise_base import StepwiseEstimator
 from falcon.core.logger import log, debug
-
-
-# ==================== Configuration Dataclasses ====================
-
-
-@dataclass
-class NetworkConfig:
-    """Configuration for _GaussianPosterior network."""
-
-    hidden_dim: int = 128
-    num_layers: int = 3
-    momentum: float = 0.01
-    min_var: float = 1e-20
-    eig_update_freq: int = 1
-
-
-@dataclass
-class OptimizerConfig:
-    """Optimizer and scheduler parameters."""
-
-    lr: float = 1e-2
-    betas: tuple = (0.9, 0.9)  # Lower beta2 for dynamic SBI setting
-    lr_decay_factor: float = 1.0  # 1.0 = no LR decay (scheduler disabled)
-    scheduler_patience: int = 8
-
-
-@dataclass
-class InferenceConfig:
-    """Inference and sampling parameters."""
-
-    gamma: float = 0.5
-    discard_samples: bool = False
-    log_ratio_threshold: float = -20.0
-
-
-@dataclass
-class GaussianConfig:
-    """Top-level Gaussian estimator configuration."""
-
-    loop: TrainingLoopConfig = field(default_factory=TrainingLoopConfig)
-    network: NetworkConfig = field(default_factory=NetworkConfig)
-    optimizer: OptimizerConfig = field(default_factory=OptimizerConfig)
-    inference: InferenceConfig = field(default_factory=InferenceConfig)
-    embedding: Optional[Any] = None
-    device: Optional[str] = None
 
 
 # ==================== _GaussianPosterior Module ====================
@@ -261,32 +213,90 @@ class _GaussianPosterior(nn.Module):
 class GaussianFullCov(StepwiseEstimator):
     """Full-covariance Gaussian posterior estimator for TransformedPrior simulators.
 
-    Pass flat keyword arguments to configure at graph-build time::
+    Works in the standard-normal latent space; samples are mapped back to
+    parameter space after generation.
 
-        graph.add_node("z", estimator=GaussianFullCov(loop_max_epochs=200))
-
-    Works in the standard-normal latent space defined by the simulator's
-    forward/inverse transforms. Samples are mapped back to parameter space
-    after generation.
+    Args:
+        max_epochs: Maximum training epochs.
+        lr: Learning rate.
+        gamma: Proposal tempering coefficient.
+        embedding: Embedding config dict or ``None``.
+        device: Device string; auto-detected if ``None``.
+        batch_size: Mini-batch size.
+        early_stop_patience: Epochs without improvement before stopping.
+        prior_epochs: Epochs to sample from prior before switching to proposal.
+        cache_on_device: Cache training data on the estimator's device.
+        cache_sync_every: Resync buffer cache every N epochs (0 = every epoch).
+        max_cache_samples: Cap on cached training samples (0 = all).
+        hidden_dim: MLP hidden layer width.
+        num_layers: MLP depth.
+        momentum: EMA momentum for running statistics.
+        min_var: Minimum variance for numerical stability.
+        eig_update_freq: Eigendecomposition update frequency.
+        betas: AdamW beta coefficients.
+        lr_decay_factor: LR decay factor (1.0 = no decay).
+        lr_patience: Plateau patience before LR decay.
+        discard_samples: Discard low log-ratio training samples.
+        log_ratio_threshold: Log-ratio cutoff for discarding.
     """
 
-    _CONFIG_SECTIONS = {
-        "loop": TrainingLoopConfig,
-        "network": NetworkConfig,
-        "optimizer": OptimizerConfig,
-        "inference": InferenceConfig,
-    }
-    _CONFIG_EXTRA_PARAMS = [
-        inspect.Parameter("embedding", inspect.Parameter.KEYWORD_ONLY, default=None),
-        inspect.Parameter("device", inspect.Parameter.KEYWORD_ONLY, default=None),
-    ]
+    def __init__(
+        self,
+        *,
+        # Most commonly changed
+        max_epochs: int = 100,
+        lr: float = 1e-2,
+        gamma: float = 0.5,
+        embedding=None,
+        device=None,
+        # Training loop
+        batch_size: int = 128,
+        early_stop_patience: int = 16,
+        prior_epochs: int = 0,
+        cache_on_device: bool = False,
+        cache_sync_every: int = 0,
+        max_cache_samples: int = 0,
+        # Network architecture
+        hidden_dim: int = 128,
+        num_layers: int = 3,
+        momentum: float = 0.01,
+        min_var: float = 1e-20,
+        eig_update_freq: int = 1,
+        # Optimizer
+        betas: tuple = (0.9, 0.9),
+        lr_decay_factor: float = 1.0,
+        lr_patience: int = 8,
+        # Inference / sampling
+        discard_samples: bool = False,
+        log_ratio_threshold: float = -20.0,
+    ):
+        self.max_epochs = max_epochs
+        self.lr = lr
+        self.gamma = gamma
+        self.embedding = embedding
+        self.device = device
+        self.batch_size = batch_size
+        self.early_stop_patience = early_stop_patience
+        self.prior_epochs = prior_epochs
+        self.cache_on_device = cache_on_device
+        self.cache_sync_every = cache_sync_every
+        self.max_cache_samples = max_cache_samples
+        self.hidden_dim = hidden_dim
+        self.num_layers = num_layers
+        self.momentum = momentum
+        self.min_var = min_var
+        self.eig_update_freq = eig_update_freq
+        self.betas = betas
+        self.lr_decay_factor = lr_decay_factor
+        self.lr_patience = lr_patience
+        self.discard_samples = discard_samples
+        self.log_ratio_threshold = log_ratio_threshold
 
     def setup(
         self,
         simulator_instance,
         theta_key: Optional[str] = None,
         condition_keys: Optional[List[str]] = None,
-        config=None,
     ):
         if not isinstance(simulator_instance, TransformedPrior):
             raise TypeError(
@@ -294,25 +304,19 @@ class GaussianFullCov(StepwiseEstimator):
                 f"got {type(simulator_instance).__name__}."
             )
 
-        schema = OmegaConf.structured(GaussianConfig)
-        notebook_cfg = OmegaConf.create(self._init_flat_kwargs)
-        cfg = OmegaConf.merge(schema, notebook_cfg, config or {})
-
-        self.loop_config = cfg.loop
-        self.cache_on_device = cfg.loop.cache_on_device
         super().setup(simulator_instance, theta_key, condition_keys)
 
-        self.cfg = cfg
-
-        if cfg.device:
-            self.device = torch.device(cfg.device)
+        if self.device:
+            self.device = torch.device(self.device)
         else:
             self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
             debug(f"Auto-detected device: {self.device}")
 
-        gamma = cfg.inference.gamma
-        self._proposal_gamma = gamma
-        self._posterior_gamma = (1.0 + gamma) / gamma if gamma is not None else None
+        self._proposal_gamma = self.gamma
+        self._posterior_gamma = (
+            (1.0 + self.gamma) / self.gamma
+            if self.gamma is not None else None
+        )
 
         self._model: Optional[nn.Module] = None
         self._best_model: Optional[nn.Module] = None
@@ -325,9 +329,6 @@ class GaussianFullCov(StepwiseEstimator):
     # ==================== Model Building ====================
 
     def _build_model(self, batch) -> nn.Module:
-        from falcon.estimators.embedded_posterior import EmbeddedPosterior
-        from falcon.embeddings import instantiate_embedding
-
         theta = self._to_tensor(batch[f"{self.theta_key}.value"])
         conditions = {
             k: self._to_tensor(batch[f"{k}.value"])
@@ -343,23 +344,20 @@ class GaussianFullCov(StepwiseEstimator):
 
         theta_latent = self.simulator_instance.inverse(theta, mode="standard_normal")
 
-        raw_embedding = self.cfg.embedding
-        embedding_config = (
-            OmegaConf.to_container(raw_embedding, resolve=True)
-            if raw_embedding is not None
-            else None
-        )
-        embedding = instantiate_embedding(embedding_config).to(self.device)
+        embedding = instantiate_embedding(self.embedding).to(self.device)
         embedding.eval()
         with torch.no_grad():
             conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
             embedded = embedding(conditions_device)
 
-        network_config = OmegaConf.to_container(self.cfg.network, resolve=True)
         posterior = _GaussianPosterior(
             param_dim=theta_latent.shape[1],
             condition_dim=embedded.shape[1],
-            **network_config,
+            hidden_dim=self.hidden_dim,
+            num_layers=self.num_layers,
+            momentum=self.momentum,
+            min_var=self.min_var,
+            eig_update_freq=self.eig_update_freq,
         ).to(self.device)
 
         debug(f"GaussianFullCov model built: param_dim={theta_latent.shape[1]}")
@@ -372,16 +370,19 @@ class GaussianFullCov(StepwiseEstimator):
             {k: v.clone() for k, v in self._model.state_dict().items()}
         )
 
-        opt_cfg = self.cfg.optimizer
-        self._optimizer = AdamW(self._model.parameters(), lr=opt_cfg.lr, betas=opt_cfg.betas)
+        self._optimizer = AdamW(
+            self._model.parameters(),
+            lr=self.lr,
+            betas=self.betas,
+        )
         self._scheduler = (
             ReduceLROnPlateau(
                 self._optimizer,
                 mode="min",
-                factor=opt_cfg.lr_decay_factor,
-                patience=opt_cfg.scheduler_patience,
+                factor=self.lr_decay_factor,
+                patience=self.lr_patience,
             )
-            if opt_cfg.lr_decay_factor < 1.0 else None
+            if self.lr_decay_factor < 1.0 else None
         )
         self.networks_initialized = True
         debug("GaussianFullCov initialised.")
@@ -403,11 +404,11 @@ class GaussianFullCov(StepwiseEstimator):
 
         loss = self._model.loss(theta_latent, conditions)
 
-        if self.cfg.inference.discard_samples:
+        if self.discard_samples:
             with torch.no_grad():
                 self._model.eval()
                 log_prob = self._model.log_prob(theta_latent, conditions).cpu()
-            discard_mask = (log_prob - theta_logprob) < self.cfg.inference.log_ratio_threshold
+            discard_mask = (log_prob - theta_logprob) < self.log_ratio_threshold
             batch.discard(discard_mask)
 
         return loss, {"loss": loss.item()}
@@ -485,7 +486,7 @@ class GaussianFullCov(StepwiseEstimator):
         return self._sample(num_samples, conditions, gamma=self._posterior_gamma)
 
     def sample_proposal(self, num_samples: int, conditions=None) -> dict:
-        if self._total_epochs_trained < self.loop_config.prior_epochs:
+        if self._total_epochs_trained < self.prior_epochs:
             return self.sample_prior(num_samples)
         result = self._sample(num_samples, conditions, gamma=self._proposal_gamma)
         log({
@@ -526,16 +527,19 @@ class GaussianFullCov(StepwiseEstimator):
         self._model = self._create_model(self._init_theta, self._init_conditions)
         self._best_model = copy.deepcopy(self._model)
 
-        opt_cfg = self.cfg.optimizer
-        self._optimizer = AdamW(self._model.parameters(), lr=opt_cfg.lr, betas=opt_cfg.betas)
+        self._optimizer = AdamW(
+            self._model.parameters(),
+            lr=self.lr,
+            betas=self.betas,
+        )
         self._scheduler = (
             ReduceLROnPlateau(
                 self._optimizer,
                 mode="min",
-                factor=opt_cfg.lr_decay_factor,
-                patience=opt_cfg.scheduler_patience,
+                factor=self.lr_decay_factor,
+                patience=self.lr_patience,
             )
-            if opt_cfg.lr_decay_factor < 1.0 else None
+            if self.lr_decay_factor < 1.0 else None
         )
         self.networks_initialized = True
 
