@@ -154,15 +154,26 @@ class NodeWrapper:
         # Status tracking for monitoring
         self._status = "initializing"
 
-        simulator_cls = LazyLoader(node.simulator_cls)
-        self.simulator_instance = simulator_cls(**node.simulator_config)
+        # Live instances (from Python API) are used directly; string / class
+        # paths go through LazyLoader for deferred import + instantiation.
+        if isinstance(node.simulator_cls, (str, type)):
+            simulator_cls = LazyLoader(node.simulator_cls)
+            self.simulator_instance = simulator_cls(**node.simulator_config)
+        else:
+            self.simulator_instance = node.simulator_cls
 
         # Condition keys for embedding (evidence + scaffolds)
         self.condition_keys = self.node.evidence + self.node.scaffolds
         debug(f"Condition keys: {self.condition_keys}")
 
         if node.estimator_cls is not None:
-            estimator_cls = LazyLoader(node.estimator_cls)
+            # Config builders (_FlowConfigBuilder etc.) and classes both work
+            # through LazyLoader's __call__ protocol.  Raw instances of an
+            # already-constructed estimator are used directly.
+            if isinstance(node.estimator_cls, (str, type)):
+                estimator_cls = LazyLoader(node.estimator_cls)
+            else:
+                estimator_cls = LazyLoader(node.estimator_cls)
             self.estimator_instance = estimator_cls(
                 self.simulator_instance,
                 theta_key=node.name,

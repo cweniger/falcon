@@ -95,21 +95,114 @@ def shutdown() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Default config for programmatic Graph-based runs
+# ---------------------------------------------------------------------------
+
+_DEFAULT_GRAPH_CONFIG = {
+    "logging": {
+        "local": {"enabled": True, "dir": "${paths.graph}"},
+    },
+    "paths": {
+        "imports": [],
+        "graph": "${run_dir}/graph",
+        "samples": "${run_dir}/samples",
+    },
+    "buffer": {
+        "min_samples": 4096,
+        "max_samples": 32768,
+        "validation_samples": 256,
+        "simulate_count": 64,
+        "simulate_when_full": True,
+        "simulate_interval": 1,
+        "snapshot_every": 0,
+    },
+    "sample": {
+        "posterior": {"n": 1000},
+    },
+}
+
+
+def _cls_to_target(cls_or_instance) -> str:
+    """Return a ``_target_`` string or a ``<live object: ...>`` placeholder."""
+    if isinstance(cls_or_instance, str):
+        return cls_or_instance
+    obj = cls_or_instance
+    if isinstance(obj, type):
+        cls = obj
+    else:
+        cls = type(obj)
+    mod = getattr(cls, "__module__", None)
+    qualname = getattr(cls, "__qualname__", cls.__name__)
+    if mod in (None, "__main__") or not isinstance(cls_or_instance, type):
+        return f"<live object: {qualname}>"
+    return f"{mod}.{qualname}"
+
+
+def _graph_to_config_dict(graph) -> dict:
+    """Serialise a Graph to a config dict with live-object placeholders."""
+    import numpy as np
+    result = {}
+    for node in graph.node_list:
+        nd: dict = {}
+        if node.parents:
+            nd["parents"] = list(node.parents)
+        if node.evidence:
+            nd["evidence"] = list(node.evidence)
+        if node.scaffolds:
+            nd["scaffolds"] = list(node.scaffolds)
+
+        # Simulator
+        sim = node.simulator_cls
+        target = _cls_to_target(sim)
+        if target.startswith("<live"):
+            nd["simulator"] = target
+        else:
+            nd["simulator"] = {"_target_": target, **node.simulator_config}
+
+        # Estimator
+        if node.estimator_cls is not None:
+            est = node.estimator_cls
+            target = _cls_to_target(est)
+            if target.startswith("<live"):
+                nd["estimator"] = target
+            else:
+                nd["estimator"] = {"_target_": target, **node.estimator_config}
+
+        # Observed
+        if node.observed:
+            arr = graph._api_observations.get(node.name)
+            if arr is not None:
+                nd["observed"] = (
+                    f"<live array: shape={list(arr.shape)}, dtype={arr.dtype}>"
+                )
+            else:
+                nd["observed"] = True
+
+        # Ray actor config
+        if node.actor_config:
+            nd["ray"] = dict(node.actor_config)
+
+        result[node.name] = nd
+    return result
+
+
+# ---------------------------------------------------------------------------
 # Config preparation (shared between launch() and the CLI)
 # ---------------------------------------------------------------------------
 
 
 def _prepare_config(
-    target: Union[Config, DictConfig, dict, str, Path],
+    target,
     output: Optional[Union[str, Path]],
     overrides: Optional[List[str]],
 ):
     """Resolve *target* into a runnable OmegaConf config with ``run_dir`` set.
 
     Returns:
-        (cfg, output_dir_path)
+        (cfg, output_dir_path, prebuilt_graph_or_None)
     """
     from datetime import datetime
+    from falcon.core.graph import Graph
     from falcon.core.run_name import generate_run_dir
 
     OmegaConf.register_new_resolver("now", lambda fmt: datetime.now().strftime(fmt), replace=True)
@@ -123,22 +216,29 @@ def _prepare_config(
     run_dir_path = Path(run_dir)
     saved_config = run_dir_path / "config.yml"
 
-    # If resuming an existing run, use the saved config
+    prebuilt_graph = None
+
+    # If resuming an existing run, use the saved config (ignore target)
     if saved_config.exists():
         cfg = OmegaConf.load(saved_config)
+    elif isinstance(target, Graph):
+        prebuilt_graph = target
+        base = OmegaConf.create(_DEFAULT_GRAPH_CONFIG)
+        graph_dict = _graph_to_config_dict(target)
+        cfg = OmegaConf.merge(base, {"graph": OmegaConf.create(graph_dict)})
+    elif isinstance(target, Config):
+        cfg = target._dict_config
+    elif isinstance(target, DictConfig):
+        cfg = target
+    elif isinstance(target, dict):
+        cfg = OmegaConf.create(target)
+    elif isinstance(target, (str, Path)):
+        cfg = OmegaConf.load(target)
     else:
-        if isinstance(target, Config):
-            cfg = target._dict_config
-        elif isinstance(target, DictConfig):
-            cfg = target
-        elif isinstance(target, dict):
-            cfg = OmegaConf.create(target)
-        elif isinstance(target, (str, Path)):
-            cfg = OmegaConf.load(target)
-        else:
-            raise TypeError(
-                f"launch() target must be a Config, path, or dict; got {type(target).__name__}"
-            )
+        raise TypeError(
+            f"launch() target must be a Graph, Config, path, or dict; "
+            f"got {type(target).__name__}"
+        )
 
     # Apply overrides
     if overrides:
@@ -153,7 +253,7 @@ def _prepare_config(
     if not saved_config.exists():
         OmegaConf.save(cfg, saved_config)
 
-    return cfg, run_dir_path
+    return cfg, run_dir_path, prebuilt_graph
 
 
 # ---------------------------------------------------------------------------
@@ -199,13 +299,20 @@ def launch(
     from falcon.cli import _run_pipeline
     from falcon.core.run_loader import load_run
 
-    cfg, output_dir = _prepare_config(target, output, overrides)
+    cfg, output_dir, prebuilt_graph = _prepare_config(target, output, overrides)
 
     # Lazy Ray init
     import ray
     if not ray.is_initialized():
         init()
 
-    _run_pipeline(cfg, auto_sample=auto_sample, timeout=timeout)
+    obs = prebuilt_graph._api_observations if prebuilt_graph is not None else None
+    _run_pipeline(
+        cfg,
+        auto_sample=auto_sample,
+        timeout=timeout,
+        graph=prebuilt_graph,
+        observations=obs,
+    )
 
     return load_run(output_dir)

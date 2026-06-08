@@ -173,8 +173,13 @@ class Flow(StepwiseEstimator):
         # Device setup
         self.device = self._setup_device(config.device)
 
-        # Embedding network
-        embedding_config = OmegaConf.to_container(config.embedding, resolve=True)
+        # Embedding network (None → pass-through identity embedding)
+        raw_embedding = config.embedding
+        embedding_config = (
+            OmegaConf.to_container(raw_embedding, resolve=True)
+            if raw_embedding is not None
+            else None
+        )
         self._embedding = instantiate_embedding(embedding_config).to(self.device)
 
         # Flow networks (initialized lazily)

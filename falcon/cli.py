@@ -492,6 +492,8 @@ def _run_pipeline(
     log_handler=None,
     on_graph_ready=None,
     summary_sink=None,
+    graph=None,
+    observations=None,
 ) -> Path:
     """Pure training pipeline, decoupled from CLI frontend and Ray lifecycle.
 
@@ -509,6 +511,10 @@ def _run_pipeline(
             training starts; used by the TUI to start its status polling thread.
         summary_sink: Optional list; the end-of-run summary lines are appended
             to it so the caller can echo them after display teardown.
+        graph: Pre-built Graph object (from the Python API).  When provided,
+            ``cfg.graph`` is not parsed; this graph is used directly.
+        observations: Dict of node_name -> np.ndarray from graph._api_observations.
+            Only used when *graph* is provided.
 
     Returns:
         output_dir Path.
@@ -565,12 +571,19 @@ def _run_pipeline(
     info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
 
     # Build graph and observations
-    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
-    observations = {
-        k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
-    }
+    if graph is None:
+        graph, obs_raw = create_graph_from_config(cfg.graph, _cfg=cfg)
+        observations_tensors = {
+            k: torch.from_numpy(v).unsqueeze(0) for k, v in obs_raw.items()
+        }
+    else:
+        import numpy as np
+        observations_tensors = {
+            k: torch.from_numpy(np.asarray(v)).unsqueeze(0)
+            for k, v in (observations or {}).items()
+        }
     info(str(graph))
-    for name, shape in observations.items():
+    for name, shape in observations_tensors.items():
         info(f"Observed: {name} {list(shape.shape)}")
 
     graph_path = Path(path_cfg["graph"])
@@ -598,14 +611,14 @@ def _run_pipeline(
             log_config=logging_cfg,
         )
 
-        deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
+        deployed_graph.launch(dataset_manager, observations_tensors, graph_path=graph_path, stop_check=stop_check)
 
         # Auto-sample posterior
         sample_cfg = cfg.get("sample", {}).get("posterior", {})
         num_posterior_samples = sample_cfg.get("n", 0)
         if auto_sample and num_posterior_samples > 0:
             info(f"Generating {num_posterior_samples} posterior samples...")
-            sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations)
+            sample_refs = deployed_graph.sample_posterior(num_posterior_samples, observations_tensors)
             samples = deployed_graph._refs_to_arrays(sample_refs)
             _save_samples(samples=samples, sample_cfg=sample_cfg, sample_type="posterior",
                           graph=graph, cfg=cfg, info_fn=info)
@@ -615,7 +628,7 @@ def _run_pipeline(
         num_ppd_samples = ppd_cfg.get("n", 0)
         if auto_sample and num_ppd_samples > 0:
             info(f"Generating {num_ppd_samples} PPD samples...")
-            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations)
+            sample_refs = deployed_graph.sample_ppd(num_ppd_samples, observations_tensors)
             samples = deployed_graph._refs_to_arrays(sample_refs)
             _save_samples(samples=samples, sample_cfg=ppd_cfg, sample_type="ppd",
                           graph=graph, cfg=cfg, info_fn=info)

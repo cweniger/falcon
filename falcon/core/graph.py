@@ -55,7 +55,13 @@ class Node:
 
 
 class Graph:
-    def __init__(self, node_list):
+    def __init__(self, node_list=None):
+        # Observations supplied directly as arrays via add_node(observed=array)
+        self._api_observations = {}
+        self._build(list(node_list) if node_list is not None else [])
+
+    def _build(self, node_list):
+        """(Re)compute all derived topology from *node_list*."""
         # Storing the node list
         self.node_list = node_list
         self.node_dict = {node.name: node for node in node_list}
@@ -89,7 +95,8 @@ class Graph:
             if name in backward_set:
                 continue
             backward_set.add(name)
-            for parent in self.forward_deps[name]:
+            # Guard: node may reference a not-yet-added peer
+            for parent in self.forward_deps.get(name, []):
                 if parent not in backward_set:
                     queue.append(parent)
 
@@ -111,6 +118,79 @@ class Graph:
         self.backward_order = self._topological_sort(
             backward_names, self.backward_deps
         )
+
+    def add_node(
+        self,
+        name: str,
+        simulator,
+        estimator=None,
+        *,
+        parents=None,
+        evidence=None,
+        scaffolds=None,
+        observed=None,
+        num_actors: int = 1,
+        sample_chunk_size: int = 0,
+        **ray_kwargs,
+    ) -> "Graph":
+        """Add a node to the graph and return *self* for chaining.
+
+        Args:
+            name: Node name (must be unique in this graph).
+            simulator: Simulator class, string ``_target_``, or a live instance.
+                Live instances (e.g. ``Product([...])``) are shipped to Ray
+                actors via cloudpickle.
+            estimator: Estimator class, string ``_target_``, config builder
+                (e.g. ``Flow(loop_max_epochs=300)``), or ``None`` for
+                observation-only nodes.
+            parents: List of parent node names (forward / simulation direction).
+            evidence: List of evidence node names (inference direction).
+            scaffolds: List of scaffold node names.
+            observed: Observed value — a numpy/torch array (used directly), or
+                ``True`` / a file-path string (YAML semantics).
+            num_actors: Number of Ray actors to spawn for this node.
+            sample_chunk_size: Chunk size for sampling (0 = no chunking).
+            **ray_kwargs: Node-level Ray actor options, prefixed with ``ray_``
+                (e.g. ``ray_num_gpus=0.5``, ``ray_num_cpus=2``,
+                ``ray_runtime_env={...}``).  The ``ray_`` prefix is stripped
+                before passing to Ray.
+
+        Returns:
+            *self*, so calls can be chained.
+        """
+        import numpy as np
+
+        # Collect actor config from ray_* kwargs
+        actor_config = {}
+        for key, val in ray_kwargs.items():
+            if not key.startswith("ray_"):
+                raise TypeError(
+                    f"add_node() got unexpected keyword argument '{key}'. "
+                    f"Ray actor options must be prefixed with 'ray_' "
+                    f"(e.g. ray_num_gpus=0.5)."
+                )
+            actor_config[key[4:]] = val  # strip "ray_" prefix
+
+        # Handle observed= as a live array
+        if observed is not None and not isinstance(observed, (str, bool)):
+            self._api_observations[name] = np.asarray(observed)
+            observed = True  # mark as observed for the Node
+
+        node = Node(
+            name=name,
+            simulator_cls=simulator,
+            estimator_cls=estimator,
+            parents=list(parents or []),
+            evidence=list(evidence or []),
+            scaffolds=list(scaffolds or []),
+            observed=bool(observed) if observed is not None else False,
+            actor_config=actor_config,
+            num_actors=num_actors,
+            sample_chunk_size=sample_chunk_size,
+        )
+
+        self._build(self.node_list + [node])
+        return self
 
     def get_parents(self, node_name):
         return self.forward_deps[node_name]
