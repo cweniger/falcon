@@ -53,7 +53,7 @@ buffer:
   simulate_chunk_size: 128
   simulate_when_full: true
   simulate_interval: 0.1
-  snapshot_every: 1
+  snapshot_every: 10
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
@@ -79,7 +79,7 @@ graph:
 
     estimator:
       _target_: falcon.estimators.GaussianFullCov
-      max_epochs: 100
+      max_epochs: 1000
       lr: 0.01
       gamma: 0.5
       embedding:
@@ -88,7 +88,7 @@ graph:
         n_components: 32
         momentum: 0.1
       batch_size: 128
-      prior_epochs: 40
+      prior_epochs: 20
       early_stop_patience: 128
       hidden_dim: 128
       num_layers: 3
