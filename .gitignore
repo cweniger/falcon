@@ -108,10 +108,7 @@ runs/
 **/wandb/
 
 # Falcon-specific output directories
-**/default-store-dir/
-**/default-graph-dir/
-**/outputs/
-**/*.zarr/
+**/output/
 
 # Data files
 #*.npz
