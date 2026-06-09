@@ -369,11 +369,6 @@ class GaussianFullCov(StepwiseEstimator):
         self._best_model.load_state_dict(
             {k: v.clone() for k, v in self._model.state_dict().items()}
         )
-        # Share the embedding: _best_model.embedding is always the current trained
-        # one. DynamicSVD components are plain attrs (not in state_dict), so deepcopy
-        # freezes them at None (initial eval-mode pass skips update). Sharing ensures
-        # sampling uses the live SVD basis rather than returning torch.randn.
-        self._best_model.embedding = self._model.embedding
 
         self._optimizer = AdamW(
             self._model.parameters(),
@@ -391,6 +386,20 @@ class GaussianFullCov(StepwiseEstimator):
         )
         self.networks_initialized = True
         debug("GaussianFullCov initialised.")
+
+    def _sync_embedding_to_best(self) -> None:
+        """Copy DynamicSVD plain-attr state from _model to _best_model.
+
+        DynamicSVD components/eigenvalues/_R are not registered buffers so they
+        are invisible to load_state_dict. This copies them alongside the network
+        weights so _best_model always reflects the full state at the best epoch.
+        """
+        from falcon.embeddings.svd import DynamicSVD
+        for src, dst in zip(self._model.modules(), self._best_model.modules()):
+            if isinstance(src, DynamicSVD) and isinstance(dst, DynamicSVD):
+                for attr in ('components', 'eigenvalues', '_R'):
+                    val = getattr(src, attr)
+                    setattr(dst, attr, val.clone() if val is not None else None)
 
     # ==================== Loss ====================
 
@@ -445,6 +454,7 @@ class GaussianFullCov(StepwiseEstimator):
             self._best_model.load_state_dict(
                 {k: v.clone() for k, v in self._model.state_dict().items()}
             )
+            self._sync_embedding_to_best()
             log({"checkpoint": epoch})
 
         if self._scheduler is not None:
