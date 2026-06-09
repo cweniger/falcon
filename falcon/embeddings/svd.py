@@ -31,14 +31,14 @@ class DynamicSVD(torch.nn.Module):
     def __init__(
         self,
         n_components: int = 10,
-        buffer_size: int = 256,
+        buffer_size: Optional[int] = None,
         momentum: float = 0.1,
         shrinkage: bool = True,
         whitener=None,
     ) -> None:
         super().__init__()
         self.n_components = n_components
-        self.buffer_size = buffer_size
+        self.buffer_size = buffer_size if buffer_size is not None else 4 * n_components
         self.momentum = momentum
         self.shrinkage = shrinkage
         self.whitener = whitener
@@ -108,18 +108,25 @@ class DynamicSVD(torch.nn.Module):
     def forward(self, x: torch.Tensor, signal: Optional[torch.Tensor] = None) -> torch.Tensor:
         """Project to stable k-dimensional coefficients.
 
+        When in training mode, automatically accumulates x into the buffer and
+        triggers an SVD update when the buffer is full. This makes DynamicSVD
+        usable as a drop-in nn.Module embedding without a separate update() call.
+
         Args:
             x: Input data, shape (batch_size, D).
-            signal: Unused at inference (whitener stats are frozen). Accepted
-                    for interface symmetry with update().
+            signal: If provided and a whitener is attached, used to estimate
+                    noise for whitener updates (passed through to update()).
 
         Returns:
             Coefficients of shape (batch_size, k), ~unit variance. Returns
             zeros before the first SVD update.
         """
+        if self.training:
+            with torch.no_grad():
+                self.update(x.detach(), signal)
+
         if self.components is None:
-            d = x.shape[0]
-            return torch.zeros(d, self.n_components, dtype=x.dtype, device=x.device)
+            return torch.randn(x.shape[0], self.n_components, dtype=x.dtype, device=x.device)
 
         x_white = self.whitener(x) if self.whitener is not None else x
         c = x_white @ self.components.T

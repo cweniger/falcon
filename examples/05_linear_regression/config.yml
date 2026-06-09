@@ -2,8 +2,8 @@
 # Falcon Example Configuration: 05_linear_regression
 # -----------------------------------------------------------------------------
 # Linear regression with sinusoidal basis functions:
-#   y = Phi @ theta + noise
-#   Phi[i, k] = sin((k+1) * x_i), x in [0, 2*pi), 20000 bins, 10 parameters
+#   x = Phi @ theta + noise,  mu = Phi @ theta (noiseless signal)
+#   Phi[i, k] = sin((k+1) * t_i), t in [0, 2*pi), 1000 bins, 10 parameters
 #
 # Prior: theta ~ N(0, I)
 # Noise: N(0, sigma^2 * I), sigma = 0.1
@@ -46,21 +46,22 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_samples: 4096
-  max_samples: 4096
+  min_samples: 2048
+  max_samples: 2048
   validation_samples: 256
-  simulate_count: 1024
+  simulate_count: 128
   simulate_chunk_size: 128
   simulate_when_full: true
-  simulate_interval: 5
-  snapshot_every: 0
+  simulate_interval: 0.1
+  snapshot_every: 1
 
 # -----------------------------------------------------------------------------
 # Graph definition using SNPE_gaussian estimator
 # -----------------------------------------------------------------------------
 graph:
   theta:
-    evidence: [y]
+    evidence: [x]
+    scaffolds: [mu]
 
     simulator:
       _target_: falcon.priors.Product
@@ -78,45 +79,54 @@ graph:
 
     estimator:
       _target_: falcon.estimators.GaussianFullCov
-      max_epochs: 1000
-      lr: 0.001
-      gamma: 0.2
+      max_epochs: 100
+      lr: 0.01
+      gamma: 0.5
       embedding:
-        _target_: model.E_fft_whiten
-        #_target_: model.E_fft_norm
-        _input_: [y]
-        n_bins: 1000000
-        n_features: 128
-        n_modes: 128
+        _target_: falcon.embeddings.DynamicSVD
+        _input_: [x, mu]
+        n_components: 32
+        momentum: 0.1
       batch_size: 128
-      early_stop_patience: 32
-      cache_sync_every: 1
-      cache_on_device: false
+      prior_epochs: 40
+      early_stop_patience: 128
       hidden_dim: 128
       num_layers: 3
-      momentum: 0.1
+      momentum: 0.01
+
       min_var: 1.0e-20
       eig_update_freq: 1
+
       betas: [0.9, 0.9]
-      lr_decay_factor: 0.5
+      lr_decay_factor: 1
       lr_patience: 16
       discard_samples: false
       log_ratio_threshold: -20.0
+      cache_sync_every: 1
+      cache_on_device: false
 
     sample_chunk_size: 128
     ray:
-      num_gpus: 0.5
+      num_gpus: 1
 
-  y:
+  mu:
     parents: [theta]
     simulator:
-      _target_: model.LinearSimulator
-      sigma: 0.1
-      n_bins: 1000000
-    observed: "./data/mock_data.npz['y']"
+      _target_: model.SignalSimulator
+      n_bins: 1000
     sample_chunk_size: 128
     ray:
-      num_gpus: 0.5
+      num_gpus: 0
+
+  x:
+    parents: [mu]
+    simulator:
+      _target_: model.NoiseSimulator
+      sigma: 0.1
+    observed: "./data/mock_data.npz['x']"
+    sample_chunk_size: 128
+    ray:
+      num_gpus: 0
 
 # -----------------------------------------------------------------------------
 # Sampling configuration
