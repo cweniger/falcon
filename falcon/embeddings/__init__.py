@@ -5,8 +5,8 @@ normalization utilities, and dimensionality reduction.
 """
 
 from falcon.embeddings.builder import instantiate_embedding, EmbeddingWrapper
-from falcon.embeddings.norms import RunningNorm, LazyOnlineNorm, DiagonalWhitener, hartley_transform
-from falcon.embeddings.svd import PCAProjector
+from falcon.embeddings.norms import RunningNorm, LazyOnlineNorm, DiagonalWhitener, ToeplitzWhitener, hartley_transform
+from falcon.embeddings.svd import PCAProjector, DynamicSVD
 
 __all__ = [
     "instantiate_embedding",
@@ -14,6 +14,8 @@ __all__ = [
     "RunningNorm",
     "LazyOnlineNorm",
     "DiagonalWhitener",
+    "ToeplitzWhitener",
     "hartley_transform",
     "PCAProjector",
+    "DynamicSVD",
 ]

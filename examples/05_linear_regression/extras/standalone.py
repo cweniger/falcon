@@ -39,6 +39,7 @@ import time
 import torch
 import torch.nn as nn
 import numpy as np
+from falcon.embeddings import DynamicSVD, DiagonalWhitener
 
 
 # Number of parameters (fixed)
@@ -88,7 +89,7 @@ def get_config():
                         help='Disable input/output diagonal whitening')
     # Embedding
     parser.add_argument('--embedding', type=str, default='fft_norm',
-                        choices=['none', 'linear', 'fft', 'fft_norm', 'gated'],
+                        choices=['none', 'linear', 'fft', 'fft_norm', 'gated', 'svd'],
                         help='Embedding mode: none, linear, fft, fft_norm, or gated')
     parser.add_argument('--n_features', type=int, default=128,
                         help='Embedding output dimension (input to MLP)')
@@ -320,6 +321,9 @@ def build_embedding(mode, n_bins, n_features, n_modes=0):
         return FFTNormEmbedding(n_bins, n_features, n_modes=n_modes), n_features
     elif mode == 'gated':
         return GatedEmbedding(n_bins, n_features), n_features
+    elif mode == 'svd':
+        whitener = DiagonalWhitener(dim=n_bins)
+        return DynamicSVD(n_components=n_features, buffer_size=256, whitener=whitener), n_features
     else:
         raise ValueError(f"Unknown embedding mode: {mode}")
 
@@ -396,12 +400,15 @@ class NormalizedMLP(nn.Module):
     def update_stats(self, z, x):
         """Update running mean and std. z=theta (D-dim), x=y (obs_dim-dim)."""
         with torch.no_grad():
-            self.input_mean.lerp_(x.mean(dim=0), self.momentum)
-            self.output_mean.lerp_(z.mean(dim=0), self.momentum)
+            if self.embedding_mode == 'svd':
+                self.embedding.update(x)
+            else:
+                self.input_mean.lerp_(x.mean(dim=0), self.momentum)
+                input_var = x.var(dim=0).clamp(min=self.min_var)
+                self.input_std.lerp_(input_var.sqrt(), self.momentum)
 
-            input_var = x.var(dim=0).clamp(min=self.min_var)
+            self.output_mean.lerp_(z.mean(dim=0), self.momentum)
             output_var = z.var(dim=0).clamp(min=self.min_var)
-            self.input_std.lerp_(input_var.sqrt(), self.momentum)
             self.output_std.lerp_(output_var.sqrt(), self.momentum)
 
     def update_covariance(self, z, x):
@@ -421,9 +428,10 @@ class NormalizedMLP(nn.Module):
 
     def forward_mean(self, x):
         """Predict mean: whiten -> embed -> MLP -> de-whiten."""
-        if self.no_whiten:
+        if self.no_whiten or self.embedding_mode == 'svd':
             h = self.embedding(x)
-            return self.net(h)
+            r = self.net(h)
+            return self.output_mean + self.output_std * r
         x_white = (x - self.input_mean) / self.input_std
         h = self.embedding(x_white)
         r = self.net(h)  # (batch, D)
