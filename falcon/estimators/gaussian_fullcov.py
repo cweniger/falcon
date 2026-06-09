@@ -369,6 +369,11 @@ class GaussianFullCov(StepwiseEstimator):
         self._best_model.load_state_dict(
             {k: v.clone() for k, v in self._model.state_dict().items()}
         )
+        # Share the embedding: _best_model.embedding is always the current trained
+        # one. DynamicSVD components are plain attrs (not in state_dict), so deepcopy
+        # freezes them at None (initial eval-mode pass skips update). Sharing ensures
+        # sampling uses the live SVD basis rather than returning torch.randn.
+        self._best_model.embedding = self._model.embedding
 
         self._optimizer = AdamW(
             self._model.parameters(),

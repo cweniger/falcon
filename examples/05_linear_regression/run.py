@@ -109,6 +109,30 @@ def plot_corner(samples, script_dir, out_path):
     print(f"Saved: {out_path}")
 
 
+def plot_buffer_mean(run_dir, out_path, window=50):
+    files = sorted((run_dir / "buffer/snapshots").glob("*.npz"))
+    if not files:
+        print("No buffer snapshots found.")
+        return
+    theta = np.stack([np.load(f)["theta.value"] for f in files])
+    n, d = theta.shape
+    cmap = plt.get_cmap("tab10")
+
+    fig, ax = plt.subplots(figsize=(12, 4))
+    for i in range(d):
+        means = [theta[max(0, j - window):j, i].mean() for j in range(window, n)]
+        ax.plot(range(window, n), means, color=cmap(i % 10), alpha=0.7, lw=0.8, label=f"$\\theta_{i}$")
+    ax.axhline(0, color="k", lw=0.5, ls="--")
+    ax.set_xlabel("Sample index")
+    ax.set_ylabel(f"Rolling mean (window={window})")
+    ax.set_title("Rolling mean of buffer samples per parameter")
+    ax.legend(ncol=5, fontsize=7)
+    plt.tight_layout()
+    plt.savefig(out_path, dpi=150)
+    plt.close()
+    print(f"Saved: {out_path}")
+
+
 def plot_buffer(run_dir, out_scatter, out_std, window=50):
     files = sorted((run_dir / "buffer/snapshots").glob("*.npz"))
     if not files:
@@ -199,6 +223,7 @@ def main():
         sys.exit(1)
 
     plot_corner(samples, script_dir, run_dir / "corner.png")
+    plot_buffer_mean(run_dir, run_dir / "buffer_mean.png")
     plot_buffer(run_dir, run_dir / "buffer_scatter.png", run_dir / "buffer_std.png")
     plot_loss(run_dir, run_dir / "loss.png")
 
