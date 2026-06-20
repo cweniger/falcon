@@ -111,12 +111,14 @@ runs/
 **/default-store-dir/
 **/default-graph-dir/
 **/outputs/
+**/output/
 **/*.zarr/
 
 # Data files
 #*.npz
 
 *.out
+*.log
 
 # MkDocs build output
 site/

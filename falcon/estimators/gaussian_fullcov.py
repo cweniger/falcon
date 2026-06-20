@@ -109,14 +109,15 @@ class _GaussianPosterior(nn.Module):
     def sample(self, conditions: torch.Tensor, gamma: Optional[float] = None) -> torch.Tensor:
         """Sample from posterior, optionally tempered.
 
-        Internal computation is float64 (output buffer precision).
-        Result is cast to conditions' dtype on return.
+        Result dtype matches the parameter-space buffers (i.e. the precision of the
+        training parameters), not the conditions dtype, which may be downcast to
+        float32 by the embedding layer.
 
         Args:
             conditions: Condition tensor of shape (batch, condition_dim)
             gamma: Tempering parameter. None = untempered, <1 = widened.
         """
-        out_dtype = conditions.dtype
+        out_dtype = self._output_mean.dtype
         mean = self._forward_mean(conditions)
         V = self._residual_eigvecs
         d = self._residual_eigvals
