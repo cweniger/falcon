@@ -269,15 +269,12 @@ class EmbeddingWrapper(nn.Module):
         return work_dict[self.output_keys[-1]]
 
 
-def Apply(target, inputs=None, **kwargs):
+def apply(target, inputs=None, **kwargs):
     """Applies a module to named condition keys. Returns a pipeline config dict.
 
-    Use for user nn.Module classes and multi-stage composition:
-        Apply(MyNet, ["x", "y"], hidden=128)
-        Apply(MLP, [DiagonalWhitener(["x"], dim=100), "y"])
-
-    Falcon built-ins (DiagonalWhitener, PCAProjector, ...) call Apply internally,
-    so you can write DiagonalWhitener(["x"], dim=100) directly.
+    Use for any nn.Module class and multi-stage composition:
+        apply(MyNet, ["x", "y"], hidden=128)
+        apply(MLP, [apply(DiagonalWhitener, ["x"], dim=100), "y"])
     """
     return {"_target_": target, "_input_": inputs, **kwargs}
 
