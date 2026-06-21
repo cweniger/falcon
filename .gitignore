@@ -81,6 +81,9 @@ docs/_build/
 # Pyre type checker
 .pyre/
 
+# Claude
+.claude/
+
 # mypy
 .mypy_cache/
 .dmypy.json
