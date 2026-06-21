@@ -269,6 +269,19 @@ class EmbeddingWrapper(nn.Module):
         return work_dict[self.output_keys[-1]]
 
 
+def Apply(target, inputs=None, **kwargs):
+    """Applies a module to named condition keys. Returns a pipeline config dict.
+
+    Use for user nn.Module classes and multi-stage composition:
+        Apply(MyNet, ["x", "y"], hidden=128)
+        Apply(MLP, [DiagonalWhitener(["x"], dim=100), "y"])
+
+    Falcon built-ins (DiagonalWhitener, PCAProjector, ...) call Apply internally,
+    so you can write DiagonalWhitener(["x"], dim=100) directly.
+    """
+    return {"_target_": target, "_input_": inputs, **kwargs}
+
+
 def _collect_input_keys(config: Union[Dict, str, List]) -> List[str]:
     keys = []
     if isinstance(config, str):
@@ -325,6 +338,15 @@ def _flatten_config_to_modules(
         input_keys_for_module = [nested_output_keys[-1]]
 
     instance = cls(**kwargs)
+    # cls may be a factory function (e.g. DiagonalWhitener) that returns an Apply dict.
+    # Detect and resolve one level so YAML configs stay backward compatible.
+    if isinstance(instance, dict) and "_target_" in instance:
+        inner_cls = instance["_target_"]
+        if isinstance(inner_cls, str):
+            mod, attr = inner_cls.rsplit(".", 1)
+            inner_cls = getattr(importlib.import_module(mod), attr)
+        inner_kwargs = {k: v for k, v in instance.items() if k not in ("_target_", "_input_")}
+        instance = inner_cls(**inner_kwargs)
     temp_counter += 1
     output_key = f"temp_{temp_counter}"
     modules.append(instance)
