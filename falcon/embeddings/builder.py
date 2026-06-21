@@ -269,14 +269,14 @@ class EmbeddingWrapper(nn.Module):
         return work_dict[self.output_keys[-1]]
 
 
-def apply(target, inputs=None, **kwargs):
+def apply(target, *inputs, **kwargs):
     """Applies a module to named condition keys. Returns a pipeline config dict.
 
     Use for any nn.Module class and multi-stage composition:
-        apply(MyNet, ["x", "y"], hidden=128)
-        apply(MLP, [apply(DiagonalWhitener, ["x"], dim=100), "y"])
+        apply(MyNet, "x", "y", hidden=128)
+        apply(MLP, apply(DiagonalWhitener, "x", dim=100), "y")
     """
-    return {"_target_": target, "_input_": inputs, **kwargs}
+    return {"_target_": target, "_input_": list(inputs) if inputs else None, **kwargs}
 
 
 def _collect_input_keys(config: Union[Dict, str, List]) -> List[str]:
