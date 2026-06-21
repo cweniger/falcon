@@ -338,15 +338,6 @@ def _flatten_config_to_modules(
         input_keys_for_module = [nested_output_keys[-1]]
 
     instance = cls(**kwargs)
-    # cls may be a factory function (e.g. DiagonalWhitener) that returns an Apply dict.
-    # Detect and resolve one level so YAML configs stay backward compatible.
-    if isinstance(instance, dict) and "_target_" in instance:
-        inner_cls = instance["_target_"]
-        if isinstance(inner_cls, str):
-            mod, attr = inner_cls.rsplit(".", 1)
-            inner_cls = getattr(importlib.import_module(mod), attr)
-        inner_kwargs = {k: v for k, v in instance.items() if k not in ("_target_", "_input_")}
-        instance = inner_cls(**inner_kwargs)
     temp_counter += 1
     output_key = f"temp_{temp_counter}"
     modules.append(instance)

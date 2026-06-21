@@ -3,10 +3,9 @@ import torch.nn as nn
 from torch.nn.parameter import UninitializedParameter
 
 from falcon.core.logger import log
-from falcon.embeddings.builder import Apply
 
 
-class _RunningNorm(nn.Module):
+class RunningNorm(nn.Module):
     def __init__(
         self,
         momentum=0.01,
@@ -38,6 +37,7 @@ class _RunningNorm(nn.Module):
         dim = self.dim
 
         if not self.initialized:
+            # Initialize running statistics based on the first minibatch
             self.running_mean = x.mean(dim=dim, keepdim=True).detach()
             self.running_var = ((x - self.running_mean) ** 2).mean(
                 dim=dim, keepdim=True
@@ -46,6 +46,7 @@ class _RunningNorm(nn.Module):
             self.initialized = True
 
         if self.training:
+            # Compute batch mean and variance over specified dims
             batch_mean = x.mean(dim=dim, keepdim=True).detach()
             batch_var = ((x - self.running_mean) ** 2).mean(dim=dim, keepdim=True).detach()
 
@@ -58,6 +59,7 @@ class _RunningNorm(nn.Module):
             else:
                 momentum_eff = self.momentum
 
+            # Update running statistics (match shape explicitly)
             self.running_mean = (
                 1 - momentum_eff
             ) * self.running_mean + momentum_eff * batch_mean
@@ -71,9 +73,11 @@ class _RunningNorm(nn.Module):
                     1 - momentum_eff
                 ) * self.running_var + momentum_eff * batch_var
 
+            # Update minimum variance if monotonic_variance is enabled
             if self.monotonic_variance:
                 self.min_variance = torch.minimum(self.min_variance, self.running_var)
 
+            # Log normalization statistics
             if self.log_prefix:
                 log({
                     "mean_min": self.running_mean.min().item(),
@@ -81,7 +85,7 @@ class _RunningNorm(nn.Module):
                     "std_min": self.running_var.sqrt().min().item(),
                     "std_max": self.running_var.sqrt().max().item(),
                 }, prefix=self.log_prefix)
-
+        # Use minimum variance for normalization if monotonic_variance is enabled
         effective_var = (
             self.min_variance if self.monotonic_variance else self.running_var
         )
@@ -103,31 +107,20 @@ class _RunningNorm(nn.Module):
         return effective_var.sqrt().prod()
 
 
-def RunningNorm(inputs=None, *, momentum=0.01, epsilon=1e-20, output_dtype=None,
-                dim=(0,), log_prefix=None, adaptive_momentum=False,
-                monotonic_variance=True, use_log_update=False):
-    """Typed factory for RunningNorm embedding. Returns a pipeline config dict.
-
-    In a notebook, use: RunningNorm(["x"], momentum=0.01)
-    In YAML, use:  _target_: falcon.embeddings.RunningNorm  (inputs via _input_)
-    """
-    return Apply(_RunningNorm, inputs, momentum=momentum, epsilon=epsilon,
-                 output_dtype=output_dtype, dim=dim, log_prefix=log_prefix,
-                 adaptive_momentum=adaptive_momentum, monotonic_variance=monotonic_variance,
-                 use_log_update=use_log_update)
-
-
 # Backwards compatibility alias
 LazyOnlineNorm = RunningNorm
 
 
 def hartley_transform(x):
-    """Hartley transform: H(x) = Re(FFT(x)) - Im(FFT(x)). Its own inverse."""
+    """
+    Hartley transform: H(x) = Re(FFT(x)) - Im(FFT(x))
+    It is its own inverse: H(H(x)) = x
+    """
     fft = torch.fft.fft(x, dim=-1, norm="ortho")
     return fft.real - fft.imag
 
 
-class _DiagonalWhitener(torch.nn.Module):
+class DiagonalWhitener(torch.nn.Module):
     def __init__(self, dim, momentum=0.1, eps=1e-8, use_fourier=False, track_mean=True):
         """
         dim: number of features (last dimension of x)
@@ -147,7 +140,10 @@ class _DiagonalWhitener(torch.nn.Module):
         self.initialized = False
 
     def update(self, x):
-        """Update running mean and variance from current batch."""
+        """
+        Update running mean and variance from current batch
+        x: Tensor of shape (batch_size, dim)
+        """
         if self.use_fourier:
             x = hartley_transform(x)
 
@@ -169,7 +165,10 @@ class _DiagonalWhitener(torch.nn.Module):
             self.running_mean *= 0
 
     def __call__(self, x):
-        """Apply whitening: (x - mean) / std."""
+        """
+        Apply whitening: (x - mean) / std
+        If use_fourier, whitening happens in Hartley space and is transformed back.
+        """
         if self.use_fourier:
             x = hartley_transform(x)
 
@@ -182,48 +181,43 @@ class _DiagonalWhitener(torch.nn.Module):
         return x_white
 
     def _mean_var_to_scaling(self, mean, var):
-        return torch.cat([0.5 * torch.log(var) + 1, mean], dim=-1)
+        return torch.cat([0.5 * torch.log(var) + 1, mean], dim=-1)  # (..., scaling_dim)
 
     # TODO: Currently not used anywhere, add tests?
     def get_scaling(self):
-        return self._mean_var_to_scaling(self.running_mean, self.running_var)
+        return self._mean_var_to_scaling(
+            self.running_mean, self.running_var
+        )  # (scaling_dim,)
+        # return torch.cat([0.1*torch.log(self.running_var)+1, self.running_mean], dim = -1)  # (scaling_dim,)
 
     # TODO: Currently not used anywhere, add tests?
     def get_logdet_jac(self):
-        return torch.log(self.running_var.sqrt()).sum(dim=-1)
+        return torch.log(self.running_var.sqrt()).sum(dim=-1)  # (,)
 
     # TODO: Currently not used anywhere, add tests?
     def batch_forward(self, x):
         batch_dim = len(x)
 
-        batch_mean = x.mean(dim=0).detach()
-        batch_var = x.var(dim=0, unbiased=False).detach() + self.eps**2
+        batch_mean = x.mean(dim=0).detach()  # (x_dim,)
+        batch_var = x.var(dim=0, unbiased=False).detach() + self.eps**2  # (x_dim,)
 
-        mean = batch_mean.unsqueeze(0).repeat(batch_dim, 1)
-        var = batch_var.unsqueeze(0).repeat(batch_dim, 1)
+        mean = batch_mean.unsqueeze(0).repeat(batch_dim, 1)  # (batch_dim, x_dim)
+        var = batch_var.unsqueeze(0).repeat(batch_dim, 1)  # (batch_dim, x_dim)
 
+        # Randomize mean and variance per sample
         mean = mean + torch.randn_like(x) * var**0.5
         var = var * torch.exp(torch.randn_like(x) * 0.5 - 0.5)
 
         x_scaled = (x - mean) / (var.sqrt() + self.eps)
 
+        # Log batch statistics
         log({
             "batch_mean": batch_mean.mean().item(),
             "batch_var": batch_var.mean().item(),
         }, prefix="whitener")
 
         scaling = self._mean_var_to_scaling(mean, var)
+
         logdet_jac = torch.log(var.sqrt()).sum(dim=-1)
 
         return x_scaled, scaling, logdet_jac
-
-
-def DiagonalWhitener(inputs=None, *, dim, momentum=0.1, eps=1e-8,
-                     use_fourier=False, track_mean=True):
-    """Typed factory for DiagonalWhitener embedding. Returns a pipeline config dict.
-
-    In a notebook, use: DiagonalWhitener(["x"], dim=100)
-    In YAML, use:  _target_: falcon.embeddings.DiagonalWhitener  (inputs via _input_)
-    """
-    return Apply(_DiagonalWhitener, inputs, dim=dim, momentum=momentum,
-                 eps=eps, use_fourier=use_fourier, track_mean=track_mean)
