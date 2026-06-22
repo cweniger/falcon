@@ -54,8 +54,7 @@ cd examples/01_minimal && falcon launch -o output/run_01
 - `networks.py`: MLP builder utility
 
 **Priors** (`falcon/priors/`):
-- `Hypercube` (`hypercube.py`): Bidirectional hypercube-to-target distribution mapping
-- `Product` (`product.py`): Product of independent marginals with fixed parameter support
+- `Product` (`product.py`): Product of independent marginals; supports `mode="hypercube"` (for Flow) and `mode="standard_normal"` (for Gaussian), plus `"fixed"` parameters
 
 **Embeddings** (`falcon/embeddings/`):
 - `instantiate_embedding` (`builder.py`): Declarative embedding builder supporting nested configurations
@@ -89,7 +88,7 @@ graph:
   theta:                          # Latent parameters node
     evidence: [x]                 # Inferred from observation x
     simulator:                    # Prior distribution
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -100.0, 100.0]
     estimator:                    # Posterior network
@@ -155,8 +154,7 @@ graph:
 - `falcon/estimators/flow.py`: Flow-based posterior estimation (conditional + marginal flows)
 - `falcon/estimators/flow_density.py`: sbi-backed flow networks (only sbi import point)
 - `falcon/estimators/gaussian.py`: Gaussian posterior estimation via LossBasedEstimator
-- `falcon/priors/hypercube.py`: Hypercube mapping prior distribution
-- `falcon/priors/product.py`: Product prior with latent space transformations
+- `falcon/priors/product.py`: Product prior with latent space transformations (hypercube and standard_normal modes)
 - `falcon/embeddings/builder.py`: Declarative embedding pipeline builder
 - `falcon/interactive.py`: Interactive TUI display for launch mode
 - `examples/`: 01_minimal, 02_bimodal, 03_composite, 04_gaussian, 05_linear_regression

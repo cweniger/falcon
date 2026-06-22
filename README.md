@@ -46,7 +46,7 @@ graph:
   z:                                    # Latent parameters
     evidence: [x]
     simulator:
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -5.0, 5.0]
     estimator:
