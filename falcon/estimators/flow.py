@@ -428,14 +428,14 @@ class Flow(StepwiseEstimator):
     def _update_best_weights(self, network_type: str) -> None:
         if network_type == "conditional":
             self._best_conditional_flow.load_state_dict(
-                {k: v.clone() for k, v in self._conditional_flow.state_dict().items()}
+                self._conditional_flow.state_dict()
             )
             self._best_embedding.load_state_dict(
-                {k: v.clone() for k, v in self._embedding.state_dict().items()}
+                self._embedding.state_dict()
             )
         else:
             self._best_marginal_flow.load_state_dict(
-                {k: v.clone() for k, v in self._marginal_flow.state_dict().items()}
+                self._marginal_flow.state_dict()
             )
 
     def _compute_discard_mask(self, theta, theta_logprob, conditions):
