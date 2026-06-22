@@ -1,6 +1,7 @@
 import os
 import re
 import warnings
+from typing import Union
 
 import numpy as np
 from omegaconf import OmegaConf
@@ -436,6 +437,50 @@ def _validate_node_references(nodes: list, node_names: set) -> None:
                     )
 
 
+def _collect_input_keys(config: Union[dict, str, list]) -> list:
+    """Recursively collect all leaf _input_ keys from an embedding config."""
+    keys = []
+    if isinstance(config, str):
+        keys.append(config)
+    elif isinstance(config, list):
+        for item in config:
+            keys.extend(_collect_input_keys(item))
+    elif isinstance(config, dict) and "_input_" in config:
+        keys.extend(_collect_input_keys(config["_input_"]))
+    return list(set(keys))
+
+
+def _validate_evidence_vs_embedding(node_name: str, evidence: list, estimator_config: dict, scaffolds: list) -> None:
+    """Warn if evidence keys don't match embedding _input_ keys minus scaffolds.
+
+    A mismatch is a silent bug: the graph trains without error but the posterior
+    learns from the wrong nodes.
+    """
+    embedding_config = estimator_config.get("embedding")
+    if embedding_config is None:
+        return
+
+    input_keys = set(_collect_input_keys(embedding_config))
+    scaffold_set = set(scaffolds)
+    expected_evidence = input_keys - scaffold_set
+
+    evidence_set = set(evidence)
+    if evidence_set != expected_evidence:
+        missing = expected_evidence - evidence_set
+        extra = evidence_set - expected_evidence
+        parts = []
+        if missing:
+            parts.append(f"missing from 'evidence': {sorted(missing)}")
+        if extra:
+            parts.append(f"in 'evidence' but not in embedding '_input_': {sorted(extra)}")
+        warnings.warn(
+            f"Node '{node_name}': evidence/embedding mismatch — {'; '.join(parts)}. "
+            f"Expected evidence={sorted(expected_evidence)} derived from embedding '_input_' minus scaffolds.",
+            UserWarning,
+            stacklevel=4,
+        )
+
+
 def create_graph_from_config(graph_config, _cfg=None):
     """Create a computational graph from YAML configuration.
 
@@ -513,6 +558,10 @@ def create_graph_from_config(graph_config, _cfg=None):
         else:
             estimator_cls = None
             estimator_config = {}
+
+        # Validate evidence vs embedding _input_ keys
+        if estimator_config:
+            _validate_evidence_vs_embedding(node_name, evidence, estimator_config, scaffolds)
 
         # Create the node
         node = Node(
