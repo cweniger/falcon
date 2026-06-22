@@ -15,7 +15,7 @@ from falcon.core.logger import Logger, set_logger, log, info, warning, error
 class PathConfig:
     """Configuration for file-system paths."""
 
-    graph: str = MISSING
+    graph: Optional[str] = None
     samples: Optional[str] = None
     buffer: Optional[str] = None
     imports: Optional[List[str]] = None  # directories prepended to sys.path in Ray workers

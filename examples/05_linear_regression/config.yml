@@ -30,7 +30,6 @@ logging:
     dir: ${run_dir}
   local:
     enabled: true
-    dir: ${paths.graph}
   console:
     level: DEBUG
 
@@ -39,8 +38,6 @@ logging:
 # -----------------------------------------------------------------------------
 paths:
   imports: ["./src"]
-  graph: ${run_dir}/graph
-  samples: ${run_dir}/samples
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters

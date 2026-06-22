@@ -234,13 +234,18 @@ def load_config(config_name: str = "config.yml", run_dir: str = None, overrides:
 
 
 def _resolve_paths(cfg):
-    """Merge cfg.paths against PathConfig and return a plain dict."""
+    """Merge cfg.paths against PathConfig and return a plain dict with defaults applied."""
     from omegaconf import OmegaConf
     from falcon.core.raystore import PathConfig as _PathConfig
-    return OmegaConf.to_container(
+    result = OmegaConf.to_container(
         OmegaConf.merge(OmegaConf.structured(_PathConfig), cfg.paths),
         resolve=True,
     )
+    run_dir = cfg.run_dir
+    result["graph"] = result["graph"] or f"{run_dir}/graph"
+    result["samples"] = result["samples"] or f"{run_dir}/samples"
+    result["buffer"] = result["buffer"] or f"{run_dir}/buffer"
+    return result
 
 
 class TeeOutput:
@@ -329,7 +334,7 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
     lines.append(f"falcon launch {status}")
     lines.append(f"Output:  {output_dir}")
     paths = _resolve_paths(cfg)
-    lines.append(f"Samples: {paths['samples'] or f'{cfg.run_dir}/samples'}")
+    lines.append(f"Samples: {paths['samples']}")
     graph_path = Path(paths['graph'])
     lines.append(f"Logs:    {graph_path / 'driver' / 'output.log'}  (driver)")
     try:
@@ -461,7 +466,7 @@ def _save_samples(samples, sample_cfg, sample_type, graph, cfg, info_fn=print):
         info_fn(f"  {key}: {value.shape}")
 
     # Determine output directory (flat structure)
-    samples_dir = _resolve_paths(cfg)["samples"] or f"{cfg.run_dir}/samples"
+    samples_dir = _resolve_paths(cfg)["samples"]
     output_dir = Path(samples_dir) / sample_type
     output_dir.mkdir(parents=True, exist_ok=True)
 
@@ -605,7 +610,7 @@ def _run_pipeline(
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
         buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
-        buffer_base = path_cfg["buffer"] or str(Path(cfg.run_dir) / "buffer")
+        buffer_base = path_cfg["buffer"]
         dataset_manager = falcon.get_ray_dataset_manager(
             buffer_cfg,
             snapshots_path=str(Path(buffer_base) / "snapshots"),

@@ -100,12 +100,10 @@ def shutdown() -> None:
 
 _DEFAULT_GRAPH_CONFIG = {
     "logging": {
-        "local": {"enabled": True, "dir": "${paths.graph}"},
+        "local": {"enabled": True},
     },
     "paths": {
         "imports": [],
-        "graph": "${run_dir}/graph",
-        "samples": "${run_dir}/samples",
     },
     "buffer": {
         "min_samples": 4096,

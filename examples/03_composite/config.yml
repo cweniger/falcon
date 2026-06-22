@@ -7,13 +7,10 @@ logging:
     dir: ${run_dir}
   local:
     enabled: true
-    dir: ${paths.graph}
 
 # Directory configuration
 paths:
   imports: ["./src"]
-  graph: ${run_dir}/graph
-  samples: ${run_dir}/samples
 
 # Training buffer parameters
 buffer:
