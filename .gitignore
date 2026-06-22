@@ -107,19 +107,15 @@ dmypy.json
 .DS_Store
 
 # Custom
-runs/
 **/wandb/
 
 # Falcon-specific output directories
-**/default-store-dir/
-**/default-graph-dir/
-**/outputs/
 **/output/
-**/*.zarr/
 
 # Data files
 #*.npz
 
+# Log files
 *.out
 *.log
 

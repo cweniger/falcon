@@ -70,54 +70,7 @@ class Add:
         return result.numpy()
 
 
-# class E(torch.nn.Module):
-#     """Embedding network with PCA projection and whitening.
 
-#     This network implements streaming PCA and whitening for dimensionality
-#     reduction and preprocessing of high-dimensional observations.
-#     """
-#     def __init__(self, log_prefix=None):
-#         super(E, self).__init__()
-#         # Import PCA components from their specific modules
-#         from falcon.embeddings import PCAProjector
-#         from falcon.embeddings import DiagonalWhitener
-
-#         self.projector = PCAProjector(buffer_size=128)
-#         self.whitener = DiagonalWhitener(NBINS, use_fourier=False)
-#         self.linear = torch.nn.LazyLinear(NPAR * 2)
-#         self.log_prefix = log_prefix + ":" if log_prefix else ""
-
-#     def forward(self, x, *args):
-#         falcon.log({f"{self.log_prefix}input_min": x.min().item()})
-#         falcon.log({f"{self.log_prefix}input_max": x.max().item()})
-#         if args[0] is not None and self.training:  # Scaffolds provided
-#             m, n = args
-#             # Update whitener with noise component
-#             self.whitener.update(n+m)
-#             # Apply whitening to signal component
-#             white_m = self.whitener(m)
-#             # Update PCA projector with whitened signal
-#             self.projector.update(white_m)
-
-#         # Apply PCA projection to observation
-#         try:
-#             #falcon.log({"E:x_input_histogram": wandb.Histogram(x.detach().cpu().flatten().numpy())})
-#             x = self.whitener(x)
-#             #falcon.log({"E:x_whitened_histogram": wandb.Histogram(x.detach().cpu().flatten().numpy())})
-#             x = self.projector(x).float()
-#             #falcon.log({"E:x_projected_histogram": wandb.Histogram(x.detach().cpu().flatten().numpy())})
-#         except:
-#             x = x.float()
-
-#         # Apply linear transformation
-#         x = x/NBINS
-#         x = self.linear(x)
-#         #falcon.log({"E:x_linear_compression": wandb.Histogram(x.detach().cpu().flatten().numpy())})
-
-
-#         falcon.log({f"{self.log_prefix}output_min": x.min().item()})
-#         falcon.log({f"{self.log_prefix}output_max": x.max().item()})
-#         return x
 class E(torch.nn.Module):
     def __init__(self, log_prefix=None):
         super().__init__()

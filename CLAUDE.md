@@ -59,7 +59,7 @@ cd examples/01_minimal && falcon launch -o output/run_01
 **Embeddings** (`falcon/embeddings/`):
 - `instantiate_embedding` (`builder.py`): Declarative embedding builder supporting nested configurations
 - `LazyOnlineNorm`, `DiagonalWhitener` (`norms.py`): Online normalization utilities
-- `PCAProjector` (`svd.py`): Streaming PCA for dimensionality reduction
+- `DynamicSVD` (`svd.py`): Streaming SVD with Procrustes-stabilized output and optional whitening
 
 **Logging** (`falcon/core/logger.py`, `falcon/core/local_logger.py`, `falcon/core/wandb_logger.py`):
 - `Logger`: Unified logging with pluggable backends

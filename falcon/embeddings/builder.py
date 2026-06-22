@@ -136,7 +136,7 @@ config = {
             '_target_': 'falcon.embeddings.ObservationEncoder',
             'embedding_dim': 64,
             '_input_': {
-                '_target_': 'falcon.embeddings.PCAProjector',
+                '_target_': 'falcon.embeddings.DynamicSVD',
                 'n_components': 32,
                 '_input_': {
                     '_target_': 'falcon.embeddings.DiagonalWhitener',
@@ -148,7 +148,7 @@ config = {
     ]
 }
 
-# Creates pipeline: x_obs -> Whitener -> PCA -> Encoder -> [theta, encoded] -> PosteriorNet
+# Creates pipeline: x_obs -> Whitener -> DynamicSVD -> Encoder -> [theta, encoded] -> PosteriorNet
 embedding = instantiate_embedding(config)
 
 # Training mode: provide both theta and x_obs

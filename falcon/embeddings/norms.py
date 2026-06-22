@@ -120,6 +120,40 @@ def hartley_transform(x):
     return fft.real - fft.imag
 
 
+class ToeplitzWhitener(torch.nn.Module):
+    """Whitener for 1D time series assuming stationary (Toeplitz) noise covariance.
+
+    Estimates per-frequency variance via EMA in Hartley space and whitens by
+    dividing by the estimated std. Noise is assumed zero-mean.
+
+    update(noise)  — update EMA variance from a batch of noise samples
+    __call__(x)    — whiten x (Hartley → divide by std → inverse Hartley)
+    """
+
+    def __init__(self, momentum: float = 0.1, eps: float = 1e-8) -> None:
+        super().__init__()
+        self.momentum = momentum
+        self.eps = eps
+        self.register_buffer("running_var", None)
+        self.initialized = False
+
+    def update(self, noise: torch.Tensor) -> None:
+        """Update EMA variance from noise samples of shape (batch_size, T)."""
+        h = hartley_transform(noise)
+        batch_var = h.var(dim=0, unbiased=False).detach()
+        if not self.initialized:
+            self.running_var = batch_var
+            self.initialized = True
+        else:
+            self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
+
+    def __call__(self, x: torch.Tensor) -> torch.Tensor:
+        """Whiten x of shape (batch_size, T)."""
+        h = hartley_transform(x)
+        h_white = h / torch.sqrt(self.running_var + self.eps)
+        return hartley_transform(h_white)
+
+
 class DiagonalWhitener(torch.nn.Module):
     def __init__(self, dim, momentum=0.1, eps=1e-8, use_fourier=False, track_mean=True):
         """

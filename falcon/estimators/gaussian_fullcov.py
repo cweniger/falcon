@@ -379,9 +379,6 @@ class GaussianFullCov(StepwiseEstimator):
     def _initialize_model(self, batch) -> None:
         self._model = self._build_model(batch)
         self._best_model = copy.deepcopy(self._model)
-        self._best_model.load_state_dict(
-            {k: v.clone() for k, v in self._model.state_dict().items()}
-        )
 
         self._build_optimizer()
         self.networks_initialized = True
@@ -437,9 +434,7 @@ class GaussianFullCov(StepwiseEstimator):
 
         if val_loss < self._best_loss:
             self._best_loss = val_loss
-            self._best_model.load_state_dict(
-                {k: v.clone() for k, v in self._model.state_dict().items()}
-            )
+            self._best_model.load_state_dict(self._model.state_dict())
             log({"checkpoint": epoch})
 
         if self._scheduler is not None:
@@ -525,12 +520,14 @@ class GaussianFullCov(StepwiseEstimator):
         self._init_theta = data["theta"]
         self._init_conditions = data["conditions"]
         self._model = self._create_model(self._init_theta, self._init_conditions)
-        self._best_model = copy.deepcopy(self._model)
+        self._best_model = self._create_model(self._init_theta, self._init_conditions)
+
+        saved_state = torch.load(node_dir / "model.pth")
+        self._best_model.load_state_dict(saved_state)
+        self._model.load_state_dict(saved_state)
 
         self._build_optimizer()
         self.networks_initialized = True
 
         tep = node_dir / "total_epochs_trained.pth"
         self._total_epochs_trained = torch.load(tep) if tep.exists() else 0
-
-        self._best_model.load_state_dict(torch.load(node_dir / "model.pth"))
