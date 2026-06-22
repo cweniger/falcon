@@ -137,6 +137,18 @@ class DynamicSVD(torch.nn.Module):
 
         return c @ self._R.T
 
+    def get_extra_state(self):
+        return {
+            'components': self.components,
+            'eigenvalues': self.eigenvalues,
+            '_R': self._R,
+        }
+
+    def set_extra_state(self, state):
+        self.components = state['components']
+        self.eigenvalues = state['eigenvalues']
+        self._R = state['_R']
+
     def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
         """Wiener-filter and reconstruct in whitened D-dimensional space."""
         if self.components is None:
