@@ -15,8 +15,7 @@ falcon/
 │   ├── gaussian        # Gaussian posterior estimation
 │   └── flow_density    # Normalizing flow networks
 ├── priors/            # Prior distributions
-│   ├── hypercube       # Hypercube mapping prior
-│   └── product         # Product of marginals
+│   └── product         # Product of independent marginals
 └── embeddings/        # Observation embeddings
     ├── builder         # Declarative embedding pipelines
     ├── norms           # Online normalization utilities
@@ -44,7 +43,6 @@ falcon/
 
 | Class | Description |
 |-------|-------------|
-| [`Hypercube`](hypercube.md) | Hypercube-to-target distribution mapping |
 | [`Product`](product.md) | Product of independent marginals with latent space transforms |
 
 ## Embeddings
@@ -68,7 +66,7 @@ from falcon import Graph, Node, CompositeNode, DeployedGraph
 from falcon.estimators import Flow, Gaussian
 
 # Priors
-from falcon.priors import Hypercube, Product
+from falcon.priors import Product
 
 # Embeddings
 from falcon.embeddings import instantiate_embedding, LazyOnlineNorm, PCAProjector

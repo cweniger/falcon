@@ -204,7 +204,7 @@ graph:
     evidence: [x]
 
     simulator:
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]

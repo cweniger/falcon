@@ -46,7 +46,7 @@ graph:
   z:                                    # Latent parameters
     evidence: [x]
     simulator:
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -5.0, 5.0]
     estimator:
@@ -65,7 +65,6 @@ graph:
 falcon launch [-o DIR] [-c CONFIG] [key=value ...]
 falcon sample prior|posterior|proposal -o DIR
 falcon graph                            # Visualize graph structure
-falcon monitor                          # Real-time TUI dashboard (requires pip install "falcon[monitor]")
 ```
 
 ## Examples

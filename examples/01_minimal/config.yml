@@ -68,7 +68,7 @@ graph:
     evidence: [x]                       # Node z is inferred from observed x
 
     simulator:                          # Defines the prior distribution for z
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:                           # Uniform priors for each parameter dimension
         - ['uniform', -100.0, 100.0]
         - ['uniform', -100.0, 100.0]

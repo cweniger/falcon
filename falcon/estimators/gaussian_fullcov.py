@@ -109,14 +109,15 @@ class _GaussianPosterior(nn.Module):
     def sample(self, conditions: torch.Tensor, gamma: Optional[float] = None) -> torch.Tensor:
         """Sample from posterior, optionally tempered.
 
-        Internal computation is float64 (output buffer precision).
-        Result is cast to conditions' dtype on return.
+        Result dtype matches the parameter-space buffers (i.e. the precision of the
+        training parameters), not the conditions dtype, which may be downcast to
+        float32 by the embedding layer.
 
         Args:
             conditions: Condition tensor of shape (batch, condition_dim)
             gamma: Tempering parameter. None = untempered, <1 = widened.
         """
-        out_dtype = conditions.dtype
+        out_dtype = self._output_mean.dtype
         mean = self._forward_mean(conditions)
         V = self._residual_eigvecs
         d = self._residual_eigvals
@@ -326,6 +327,18 @@ class GaussianFullCov(StepwiseEstimator):
         self._optimizer = None
         self._scheduler = None
 
+    # ==================== Optimizer ====================
+
+    def _build_optimizer(self):
+        self._optimizer = AdamW(self._model.parameters(), lr=self.lr, betas=self.betas)
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer, mode="min",
+                factor=self.lr_decay_factor, patience=self.lr_patience,
+            )
+            if self.lr_decay_factor < 1.0 else None
+        )
+
     # ==================== Model Building ====================
 
     def _build_model(self, batch) -> nn.Module:
@@ -370,20 +383,7 @@ class GaussianFullCov(StepwiseEstimator):
             {k: v.clone() for k, v in self._model.state_dict().items()}
         )
 
-        self._optimizer = AdamW(
-            self._model.parameters(),
-            lr=self.lr,
-            betas=self.betas,
-        )
-        self._scheduler = (
-            ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=self.lr_decay_factor,
-                patience=self.lr_patience,
-            )
-            if self.lr_decay_factor < 1.0 else None
-        )
+        self._build_optimizer()
         self.networks_initialized = True
         debug("GaussianFullCov initialised.")
 
@@ -542,20 +542,7 @@ class GaussianFullCov(StepwiseEstimator):
         self._model = self._create_model(self._init_theta, self._init_conditions)
         self._best_model = copy.deepcopy(self._model)
 
-        self._optimizer = AdamW(
-            self._model.parameters(),
-            lr=self.lr,
-            betas=self.betas,
-        )
-        self._scheduler = (
-            ReduceLROnPlateau(
-                self._optimizer,
-                mode="min",
-                factor=self.lr_decay_factor,
-                patience=self.lr_patience,
-            )
-            if self.lr_decay_factor < 1.0 else None
-        )
+        self._build_optimizer()
         self.networks_initialized = True
 
         tep = node_dir / "total_epochs_trained.pth"

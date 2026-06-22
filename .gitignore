@@ -81,6 +81,9 @@ docs/_build/
 # Pyre type checker
 .pyre/
 
+# Claude
+.claude/
+
 # mypy
 .mypy_cache/
 .dmypy.json
@@ -104,7 +107,6 @@ dmypy.json
 .DS_Store
 
 # Custom
-runs/
 **/wandb/
 
 # Falcon-specific output directories
@@ -113,7 +115,9 @@ runs/
 # Data files
 #*.npz
 
+# Log files
 *.out
+*.log
 
 # MkDocs build output
 site/

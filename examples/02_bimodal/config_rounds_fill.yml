@@ -29,7 +29,7 @@ graph:
   z:
     evidence: [x]
     simulator: 
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors: 
         - ['uniform', -10000.0, 10000.0]
         - ['uniform', -10000.0, 10000.0]
