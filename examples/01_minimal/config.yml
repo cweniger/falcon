@@ -38,15 +38,12 @@ logging:
     dir: ${run_dir}                       # Directory for wandb files
   local:
     enabled: true                         # Local file-based logging
-    dir: ${paths.graph}                   # Reuses graph directory for metrics
 
 # -----------------------------------------------------------------------------
 # Directory configuration
 # -----------------------------------------------------------------------------
 paths:
   imports: ["./src"]                      # Local folder(s) with user-defined code (e.g. model.py)
-  graph: ${run_dir}/graph               # Directory for serialized graph and trained networks
-  samples: ${run_dir}/samples           # Directory for generated samples (posterior, prior, etc.)
 
 # -----------------------------------------------------------------------------
 # Training buffer parameters
@@ -108,4 +105,4 @@ graph:
 sample:
   posterior:
     n: 1000                             # Number of posterior samples to draw
-    # Output: ${paths.samples}/posterior/
+    # Output: ${run_dir}/samples/posterior/
