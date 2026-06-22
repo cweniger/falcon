@@ -470,35 +470,9 @@ class DeployedGraph:
         self.import_dirs = import_dirs or []
         self.log_config = log_config or {}
         self.wrapped_nodes_dict = {}
-        self.monitor_bridge = None
+        self._dataset_manager_actor = None
 
-        self._create_monitor_bridge()
         self.deploy_nodes()
-
-    def _create_monitor_bridge(self):
-        """Create the MonitorBridge actor for falcon monitor TUI."""
-        from falcon.core.monitor_bridge import MonitorBridge
-        run_dir = str(self.import_dirs[0]) if self.import_dirs else "unknown"
-        try:
-            # Name the actor so falcon monitor can discover it
-            self.monitor_bridge = MonitorBridge.options(
-                name="falcon:monitor_bridge",
-                lifetime="detached",  # Keep alive even if creator dies
-            ).remote(run_dir=run_dir)
-        except ValueError as e:
-            # Actor with this name might already exist from a previous run
-            if "already exists" in str(e):
-                try:
-                    self.monitor_bridge = ray.get_actor("falcon:monitor_bridge")
-                except Exception:
-                    warning("Could not connect to existing monitor bridge")
-                    self.monitor_bridge = None
-            else:
-                warning(f"Could not create monitor bridge: {e}")
-                self.monitor_bridge = None
-        except Exception as e:
-            warning(f"Could not create monitor bridge: {e}")
-            self.monitor_bridge = None
 
     def _check_resource_budget(self):
         """Raise if node GPU/CPU requests exceed cluster capacity."""
@@ -572,10 +546,6 @@ class DeployedGraph:
                     )
                 ray.get(done[0])  # re-raise any actor-side exception
                 info(f"  ✓ {name}")
-
-                # Register node with monitor bridge
-                if self.monitor_bridge:
-                    ray.get(self.monitor_bridge.register_node.remote(name, actor))
             except ray.exceptions.RayActorError as e:
                 raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
 
@@ -779,6 +749,23 @@ class DeployedGraph:
         all_values = ray.get(all_refs)  # ONE call
         return {key: np.stack(all_values[start:end]) for key, (start, end) in key_slices.items()}
 
+    def get_status(self, timeout: float = 2.0) -> dict:
+        """Return aggregated status from all node actors and the dataset manager."""
+        node_refs = {name: actor.get_status.remote() for name, actor in self.wrapped_nodes_dict.items()}
+        nodes = {}
+        for name, ref in node_refs.items():
+            try:
+                nodes[name] = ray.get(ref, timeout=timeout)
+            except Exception as e:
+                nodes[name] = {"status": "error", "error": str(e)}
+        buffer = {}
+        if self._dataset_manager_actor is not None:
+            try:
+                buffer = ray.get(self._dataset_manager_actor.get_store_stats.remote(), timeout=timeout)
+            except Exception:
+                pass
+        return {"nodes": nodes, "buffer": buffer}
+
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
         ray.get([node.shutdown.remote() for node in self.wrapped_nodes_dict.values()])
@@ -800,13 +787,7 @@ class DeployedGraph:
             self.load(graph_path)
 
         dataset_manager = dataset_manager.dataset_manager_actor
-
-        # Register dataset manager with monitor bridge for monitoring
-        if self.monitor_bridge:
-            ray.get(self.monitor_bridge.register_dataset_manager.remote(dataset_manager))
-            # Set log directory so monitor bridge can read log files
-            if graph_path is not None:
-                ray.get(self.monitor_bridge.set_log_dir.remote(str(graph_path)))
+        self._dataset_manager_actor = dataset_manager
 
         # Initial data generation: load from disk first, then generate remaining
         # Nodes handle chunking internally based on their sample_chunk_size config

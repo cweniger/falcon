@@ -363,10 +363,8 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
     except Exception:
         pass
     try:
-        import ray
-        bridge = getattr(deployed_graph, "monitor_bridge", None) if deployed_graph else None
-        if bridge is not None:
-            status_dict = ray.get(bridge.get_status.remote(), timeout=5.0)
+        if deployed_graph is not None:
+            status_dict = deployed_graph.get_status(timeout=5.0)
             nodes = status_dict.get("nodes", {})
             if nodes:
                 lines.append("Nodes:")
@@ -491,6 +489,7 @@ def _run_pipeline(
     stop_check=None,
     log_handler=None,
     on_graph_ready=None,
+    on_deployed=None,
     summary_sink=None,
     graph=None,
     observations=None,
@@ -600,6 +599,8 @@ def _run_pipeline(
             import_dirs=path_cfg["imports"],
             log_config=logging_cfg,
         )
+        if on_deployed is not None:
+            on_deployed(deployed_graph)
 
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
@@ -721,6 +722,8 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         interactive_handler.setLevel(logging.INFO)
         log_handler = interactive_handler
 
+    deployed_ref = [None]  # shared reference set by on_deployed once DeployedGraph is ready
+
     # Build on_graph_ready: TUI sets log dir and starts status polling thread
     def on_graph_ready(graph_path):
         if display is None:
@@ -730,31 +733,35 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         def poll_status():
             import time
             while display.is_running:
-                try:
-                    bridge = ray.get_actor("falcon:monitor_bridge")
-                    status = ray.get(bridge.get_status.remote())
-                    for name, node_status in status.get("nodes", {}).items():
-                        display.update_node(
-                            name=name,
-                            status=node_status.get("status", "unknown"),
-                            current_epoch=node_status.get("current_epoch", 0),
-                            total_epochs=node_status.get("total_epochs", 0),
-                            loss=node_status.get("loss"),
-                            samples=node_status.get("samples", 0),
+                dg = deployed_ref[0]
+                if dg is not None:
+                    try:
+                        status = dg.get_status()
+                        for name, node_status in status.get("nodes", {}).items():
+                            display.update_node(
+                                name=name,
+                                status=node_status.get("status", "unknown"),
+                                current_epoch=node_status.get("current_epoch", 0),
+                                total_epochs=node_status.get("total_epochs", 0),
+                                loss=node_status.get("loss"),
+                                samples=node_status.get("samples", 0),
+                            )
+                        display.update_node(name="dataset", status="active")
+                        buffer = status.get("buffer", {})
+                        display.update_buffer(
+                            training=buffer.get("training", 0),
+                            validation=buffer.get("validation", 0),
                         )
-                    display.update_node(name="dataset", status="active")
-                    buffer = status.get("buffer", {})
-                    display.update_buffer(
-                        training=buffer.get("training", 0),
-                        validation=buffer.get("validation", 0),
-                    )
-                except Exception:
-                    pass
+                    except Exception:
+                        pass
                 with display._lock:
                     display._draw_footer()
                 time.sleep(1.0)
 
         threading.Thread(target=poll_status, daemon=True).start()
+
+    def on_deployed(dg):
+        deployed_ref[0] = dg
 
     summary_lines = []
     try:
@@ -765,6 +772,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
             stop_check=stop_check,
             log_handler=log_handler,
             on_graph_ready=on_graph_ready,
+            on_deployed=on_deployed,
             summary_sink=summary_lines,
         )
     finally:
@@ -876,19 +884,6 @@ def sample_mode(cfg, sample_type: str) -> None:
     driver_logger.shutdown()
 
 
-def monitor_mode(address: str = "auto", refresh: float = 1.0):
-    """Monitor mode: Launch the TUI monitor directly (no subprocess)."""
-    try:
-        from falcon.monitor import init_ray_for_monitor, FalconMonitor
-    except ImportError:
-        print("falcon monitor requires falcon-sbi[monitor]")
-        sys.exit(1)
-    if not init_ray_for_monitor(address):
-        sys.exit(1)
-    app = FalconMonitor(ray_address=address, refresh_interval=refresh)
-    app.run()
-
-
 def _get_version():
     """Get package version string."""
     from importlib.metadata import version, PackageNotFoundError
@@ -900,7 +895,7 @@ def _get_version():
 
 def parse_args():
     """Parse falcon CLI arguments."""
-    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph", "monitor"]:
+    if len(sys.argv) < 2 or sys.argv[1] not in ["sample", "launch", "graph"]:
         print(f"{BANNER} v{_get_version()}")
         print()
         print("Usage:")
@@ -919,26 +914,6 @@ def parse_args():
 
     mode = sys.argv[1]
     args = sys.argv[2:]
-
-    # Handle monitor mode separately (doesn't need config)
-    if mode == "monitor":
-        address = "auto"
-        refresh = 1.0
-        i = 0
-        while i < len(args):
-            arg = args[i]
-            if arg == "--address" and i + 1 < len(args):
-                address = args[i + 1]
-                i += 1
-            elif arg.startswith("--address="):
-                address = arg.split("=", 1)[1]
-            elif arg == "--refresh" and i + 1 < len(args):
-                refresh = float(args[i + 1])
-                i += 1
-            elif arg.startswith("--refresh="):
-                refresh = float(arg.split("=", 1)[1])
-            i += 1
-        return mode, None, None, None, None, False, 16, True, None, address, refresh
 
     sample_type = None
     if mode == "sample":
@@ -1003,21 +978,16 @@ def parse_args():
             overrides.append(arg)
         i += 1
 
-    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, None, None
+    return mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout
 
 
 def main():
     """Main CLI entry point."""
-    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout, address, refresh = parse_args()
+    mode, sample_type, config_name, run_dir, overrides, interactive, log_lines, auto_sample, timeout = parse_args()
 
     # Print startup banner (skip for interactive mode - it will draw its own)
     if not interactive:
         print(f"{BANNER} v{_get_version()}", flush=True)
-
-    # Monitor mode doesn't need config loading
-    if mode == "monitor":
-        monitor_mode(address=address, refresh=refresh)
-        return
 
     cfg = load_config(config_name, run_dir, overrides)
 
