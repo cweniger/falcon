@@ -67,7 +67,7 @@ graph:
   theta:
     evidence: [x]
     simulator:
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -10.0, 10.0]
     estimator:

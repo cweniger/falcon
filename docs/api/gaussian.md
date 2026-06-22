@@ -16,7 +16,7 @@ Key features:
 
 !!! note
     `Gaussian` requires a [`Product`](product.md) prior (with `"standard_normal"` mode)
-    as the simulator, not [`Hypercube`](hypercube.md).
+    as the simulator.
 
 ## Configuration
 

@@ -51,7 +51,6 @@ nav:
           - Gaussian: api/gaussian.md
           - FlowDensity: api/flow-density.md
       - Priors:
-          - Hypercube: api/hypercube.md
           - Product: api/product.md
       - Embeddings: api/embeddings.md
 

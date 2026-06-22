@@ -29,8 +29,8 @@ graph:
   z1:
     evidence: [x]
     simulator: 
-      _target_: falcon.priors.Hypercube
-      priors: 
+      _target_: falcon.priors.Product
+      priors:
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
         - ['uniform', -1.0, 1.0]
@@ -78,7 +78,7 @@ graph:
   z2:
     evidence: [x]
     simulator:
-      _target_: falcon.priors.Hypercube
+      _target_: falcon.priors.Product
       priors:
         - ['uniform', -1.2, 1.2]
         - ['uniform', -1.2, 1.2]
