@@ -722,46 +722,44 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         interactive_handler.setLevel(logging.INFO)
         log_handler = interactive_handler
 
-    deployed_ref = [None]  # shared reference set by on_deployed once DeployedGraph is ready
-
-    # Build on_graph_ready: TUI sets log dir and starts status polling thread
+    # Build on_graph_ready: TUI sets log dir
     def on_graph_ready(graph_path):
         if display is None:
             return
         display.set_log_dir(str(graph_path))
 
+    # Build on_deployed: start status polling once DeployedGraph is ready
+    def on_deployed(dg):
+        if display is None:
+            return
+
         def poll_status():
             import time
             while display.is_running:
-                dg = deployed_ref[0]
-                if dg is not None:
-                    try:
-                        status = dg.get_status()
-                        for name, node_status in status.get("nodes", {}).items():
-                            display.update_node(
-                                name=name,
-                                status=node_status.get("status", "unknown"),
-                                current_epoch=node_status.get("current_epoch", 0),
-                                total_epochs=node_status.get("total_epochs", 0),
-                                loss=node_status.get("loss"),
-                                samples=node_status.get("samples", 0),
-                            )
-                        display.update_node(name="dataset", status="active")
-                        buffer = status.get("buffer", {})
-                        display.update_buffer(
-                            training=buffer.get("training", 0),
-                            validation=buffer.get("validation", 0),
+                try:
+                    status = dg.get_status()
+                    for name, node_status in status.get("nodes", {}).items():
+                        display.update_node(
+                            name=name,
+                            status=node_status.get("status", "unknown"),
+                            current_epoch=node_status.get("current_epoch", 0),
+                            total_epochs=node_status.get("total_epochs", 0),
+                            loss=node_status.get("loss"),
+                            samples=node_status.get("samples", 0),
                         )
-                    except Exception:
-                        pass
+                    display.update_node(name="dataset", status="active")
+                    buffer = status.get("buffer", {})
+                    display.update_buffer(
+                        training=buffer.get("training", 0),
+                        validation=buffer.get("validation", 0),
+                    )
+                except Exception:
+                    pass
                 with display._lock:
                     display._draw_footer()
                 time.sleep(1.0)
 
         threading.Thread(target=poll_status, daemon=True).start()
-
-    def on_deployed(dg):
-        deployed_ref[0] = dg
 
     summary_lines = []
     try:
