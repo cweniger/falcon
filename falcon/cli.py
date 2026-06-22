@@ -683,86 +683,86 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         shutdown_handler = _GracefulShutdown()
         shutdown_handler.install()
 
-    # Initialize Ray
-    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
-    ray_init_args = cfg.get("ray", {}).get("init", {})
-    console_level = logging_cfg.get("console", {}).get("level", None)
-    ray_init_args.setdefault("log_to_driver", console_level is not None)
-    ray_init_args.setdefault("namespace", "falcon")
-    ray_init_args.setdefault("logging_level", "ERROR")
-    ray.init(**ray_init_args)
-
-    # Build stop_check: handles Ctrl+C, display stop, and timeout
-    _start_time = _time.time()
-    _timeout_logged = False
-
-    def stop_check():
-        nonlocal _timeout_logged
-        if display and display.stop_requested:
-            return True
-        if shutdown_handler and shutdown_handler.stop_requested:
-            return True
-        if timeout is not None:
-            elapsed = _time.time() - _start_time
-            if elapsed >= timeout:
-                if not _timeout_logged:
-                    from falcon.core.logger import info
-                    info(f"Timeout reached ({timeout}s), stopping gracefully...")
-                    _timeout_logged = True
-                return True
-        return False
-
-    # Build log handler for TUI routing (replaces stdout in the driver logger)
-    log_handler = None
-    if display:
-        interactive_handler = logging.StreamHandler(_InteractiveStream(display))
-        interactive_handler.setFormatter(logging.Formatter(
-            '%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'
-        ))
-        interactive_handler.setLevel(logging.INFO)
-        log_handler = interactive_handler
-
-    # Build on_graph_ready: TUI sets log dir
-    def on_graph_ready(graph_path):
-        if display is None:
-            return
-        display.set_log_dir(str(graph_path))
-
-    # Build on_deployed: start status polling once DeployedGraph is ready
-    def on_deployed(dg):
-        if display is None:
-            return
-
-        def poll_status():
-            import time
-            while display.is_running:
-                try:
-                    status = dg.get_status()
-                    for name, node_status in status.get("nodes", {}).items():
-                        display.update_node(
-                            name=name,
-                            status=node_status.get("status", "unknown"),
-                            current_epoch=node_status.get("current_epoch", 0),
-                            total_epochs=node_status.get("total_epochs", 0),
-                            loss=node_status.get("loss"),
-                            samples=node_status.get("samples", 0),
-                        )
-                    display.update_node(name="dataset", status="active")
-                    buffer = status.get("buffer", {})
-                    display.update_buffer(
-                        training=buffer.get("training", 0),
-                        validation=buffer.get("validation", 0),
-                    )
-                except Exception:
-                    pass
-                with display._lock:
-                    display._draw_footer()
-                time.sleep(1.0)
-
-        threading.Thread(target=poll_status, daemon=True).start()
-
     summary_lines = []
     try:
+        # Initialize Ray
+        logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+        ray_init_args = cfg.get("ray", {}).get("init", {})
+        console_level = logging_cfg.get("console", {}).get("level", None)
+        ray_init_args.setdefault("log_to_driver", console_level is not None)
+        ray_init_args.setdefault("namespace", "falcon")
+        ray_init_args.setdefault("logging_level", "ERROR")
+        ray.init(**ray_init_args)
+
+        # Build stop_check: handles Ctrl+C, display stop, and timeout
+        _start_time = _time.time()
+        _timeout_logged = False
+
+        def stop_check():
+            nonlocal _timeout_logged
+            if display and display.stop_requested:
+                return True
+            if shutdown_handler and shutdown_handler.stop_requested:
+                return True
+            if timeout is not None:
+                elapsed = _time.time() - _start_time
+                if elapsed >= timeout:
+                    if not _timeout_logged:
+                        from falcon.core.logger import info
+                        info(f"Timeout reached ({timeout}s), stopping gracefully...")
+                        _timeout_logged = True
+                    return True
+            return False
+
+        # Build log handler for TUI routing (replaces stdout in the driver logger)
+        log_handler = None
+        if display:
+            interactive_handler = logging.StreamHandler(_InteractiveStream(display))
+            interactive_handler.setFormatter(logging.Formatter(
+                '%(asctime)s [%(levelname)s] %(message)s', datefmt='%H:%M:%S'
+            ))
+            interactive_handler.setLevel(logging.INFO)
+            log_handler = interactive_handler
+
+        # Build on_graph_ready: TUI sets log dir
+        def on_graph_ready(graph_path):
+            if display is None:
+                return
+            display.set_log_dir(str(graph_path))
+
+        # Build on_deployed: start status polling once DeployedGraph is ready
+        def on_deployed(dg):
+            if display is None:
+                return
+
+            def poll_status():
+                import time
+                while display.is_running:
+                    try:
+                        status = dg.get_status()
+                        for name, node_status in status.get("nodes", {}).items():
+                            display.update_node(
+                                name=name,
+                                status=node_status.get("status", "unknown"),
+                                current_epoch=node_status.get("current_epoch", 0),
+                                total_epochs=node_status.get("total_epochs", 0),
+                                loss=node_status.get("loss"),
+                                samples=node_status.get("samples", 0),
+                            )
+                        display.update_node(name="dataset", status="active")
+                        buffer = status.get("buffer", {})
+                        display.update_buffer(
+                            training=buffer.get("training", 0),
+                            validation=buffer.get("validation", 0),
+                        )
+                    except Exception:
+                        pass
+                    with display._lock:
+                        display._draw_footer()
+                    time.sleep(1.0)
+
+            threading.Thread(target=poll_status, daemon=True).start()
+
         _run_pipeline(
             cfg,
             auto_sample=auto_sample,
