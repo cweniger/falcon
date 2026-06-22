@@ -1,0 +1,135 @@
+# =============================================================================
+# 15_three_words: Three words ('HI', 'BYE', 'SBI') in one 64x64 image,
+# each inferred by its own NSF Flow network (4+6+6 = 16 params total).
+#
+# Demonstrates composite inference scaling to three parallel networks
+# with non-trivial overlap between word regions.
+#
+# Tight stopping: patience=32, max_epochs=250, lr_patience=6.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 3072
+  max_samples: 3072
+  validation_samples: 384
+  simulate_count: 384
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_hi:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 250
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.WordCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 6
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.34
+
+  z_bye:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 250
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.WordCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 6
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.34
+
+  z_sbi:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 250
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.WordCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 6
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.32
+
+  x:
+    parents: [z_hi, z_bye, z_sbi]
+    simulator:
+      _target_: model.ThreeWordSimulator
+      image_size: 64
+      font_size: 13
+      noise_level: 3.5
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500

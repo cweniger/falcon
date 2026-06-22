@@ -1,0 +1,106 @@
+# =============================================================================
+# 08_letters_noise: Two-component inference from a noisy 'HI' image.
+#
+# z_pos   = [x_H, y_H, x_I, y_I] ~ Uniform(-1,1)^4   (letter positions)
+# z_noise = [log_brightness, log_noise] ~ Uniform(-1,1)^2 (rendering params)
+# x = composite noisy rendered image (32x32)
+#
+# Two parallel GaussianFullCov networks, each with 0.5 GPU.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 2048
+  max_samples: 2048
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_pos:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 500
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.PosEmbedding
+        out_dim: 32
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.5
+
+  z_noise:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 500
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.NoiseEmbedding
+        out_dim: 16
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 32
+      num_layers: 2
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.5
+
+  x:
+    parents: [z_pos, z_noise]
+    simulator:
+      _target_: model.ImageSimulator
+      text: "HI"
+      image_size: 32
+      font_size: 12
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500

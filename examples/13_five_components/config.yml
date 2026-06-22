@@ -1,0 +1,194 @@
+# =============================================================================
+# 13_five_components: Five-component scene — words + circle + cross + background.
+#
+# z_hi    (4) NSF Flow  — 'HI' letter positions
+# z_bye   (6) NSF Flow  — 'BYE' letter positions
+# z_dot   (3) NSF Flow  — circle center + radius
+# z_cross (3) Gaussian  — cross center + arm length
+# z_bg    (1) Gaussian  — log background level
+#
+# Tighter stopping (patience=32, max_epochs=300) to keep runtime under 15 min.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 3072
+  max_samples: 3072
+  validation_samples: 384
+  simulate_count: 384
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_hi:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.25
+
+  z_bye:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.25
+
+  z_dot:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.25
+
+  z_cross:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 300
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.125
+
+  z_bg:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 300
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.GlobalStats
+        out_dim: 16
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      hidden_dim: 32
+      num_layers: 2
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.125
+
+  x:
+    parents: [z_hi, z_bye, z_dot, z_cross, z_bg]
+    simulator:
+      _target_: model.FiveCompSimulator
+      image_size: 64
+      font_size: 13
+      noise_level: 3.0
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500

@@ -1,0 +1,112 @@
+# =============================================================================
+# 09_two_words: Infer positions of two words 'HI' and 'BYE' in a shared image.
+#
+# z_hi  = [x_H, y_H, x_I, y_I]          ~ Uniform(-1,1)^4
+# z_bye = [x_B, y_B, x_Y, y_Y, x_E, y_E] ~ Uniform(-1,1)^6
+# x = composite 32x32 noisy image
+#
+# Two parallel GaussianFullCov networks, each sees the full image x.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 2048
+  max_samples: 2048
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_hi:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 600
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.WordEmbedding
+        out_dim: 32
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.5
+
+  z_bye:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 600
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.WordEmbedding
+        out_dim: 32
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.5
+
+  x:
+    parents: [z_hi, z_bye]
+    simulator:
+      _target_: model.TwoWordSimulator
+      word1: "HI"
+      word2: "BYE"
+      image_size: 32
+      font_size: 11
+      noise_level: 5.0
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500

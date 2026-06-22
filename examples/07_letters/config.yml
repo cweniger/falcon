@@ -1,0 +1,78 @@
+# =============================================================================
+# 07_letters: Infer positions of two letters 'HI' in a noisy 32x32 image.
+#
+# z = [x_H, y_H, x_I, y_I] ~ Uniform(-1, 1)^4
+# x = noisy rendered image (32x32, Poisson noise)
+#
+# Single GaussianFullCov network with a small CNN embedding.
+# Runs in ~5 minutes.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 2048
+  max_samples: 2048
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 500
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.SimpleImageEmbedding
+        image_size: 32
+        out_dim: 32
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.5
+
+  x:
+    parents: [z]
+    simulator:
+      _target_: model.LetterSimulator
+      text: "HI"
+      image_size: 32
+      font_size: 12
+      noise_level: 5.0
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 1000

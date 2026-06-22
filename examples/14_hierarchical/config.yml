@@ -1,0 +1,148 @@
+# =============================================================================
+# 14_hierarchical: Hierarchical graph with global layout + relative letter positions.
+#
+# Graph:
+#   z_layout  (2) Uniform(-1,1) — global (dx,dy) offset for all letters
+#   z_hi_rel  (4) Uniform(-1,1) — 'HI' relative positions
+#   z_bye_rel (6) Uniform(-1,1) — 'BYE' relative positions
+#   img_hi    = HiRenderer(z_layout, z_hi_rel)    [intermediate]
+#   img_bye   = ByeRenderer(z_layout, z_bye_rel)  [intermediate]
+#   x         = CompositeRenderer(img_hi, img_bye) [observed]
+#
+# Three parallel estimators observe x and infer their respective latents.
+# The hierarchical forward model is explicit: layout shifts ALL letters.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 3072
+  max_samples: 3072
+  validation_samples: 384
+  simulate_count: 384
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_layout:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.34
+
+  z_hi_rel:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.33
+
+  z_bye_rel:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 300
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 32
+      lr_decay_factor: 0.5
+      lr_patience: 8
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.33
+
+  img_hi:
+    parents: [z_layout, z_hi_rel]
+    simulator:
+      _target_: model.HiRenderer
+      image_size: 64
+      font_size: 13
+
+  img_bye:
+    parents: [z_layout, z_bye_rel]
+    simulator:
+      _target_: model.ByeRenderer
+      image_size: 64
+      font_size: 13
+
+  x:
+    parents: [img_hi, img_bye]
+    simulator:
+      _target_: model.CompositeRenderer
+      noise_level: 4.0
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500

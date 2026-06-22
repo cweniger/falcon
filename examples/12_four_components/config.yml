@@ -1,0 +1,166 @@
+# =============================================================================
+# 12_four_components: Four-component scene inference in 64x64 image.
+#
+# z_hi   = [x_H, y_H, x_I, y_I]            ~ Uniform(-1,1)^4  — Flow/NSF
+# z_bye  = [x_B, y_B, x_Y, y_Y, x_E, y_E] ~ Uniform(-1,1)^6  — Flow/NSF
+# z_dot  = [cx, cy, r]                      ~ Uniform(-1,1)^3  — GaussianFullCov
+# z_bg   = [log_bg]                         ~ Uniform(-1,1)^1  — GaussianFullCov
+# x = 64x64 noisy scene
+#
+# Two Flow networks (0.35 GPU each) + two Gaussian networks (0.15 GPU each).
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 4096
+  max_samples: 4096
+  validation_samples: 512
+  simulate_count: 512
+  simulate_when_full: true
+  simulate_interval: 5
+  snapshot_every: 10
+
+graph:
+  z_hi:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 500
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.35
+
+  z_bye:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Hypercube
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.Flow
+      max_epochs: 500
+      net_type: nsf
+      lr: 0.001
+      gamma: 0.5
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+      use_best_models: true
+    ray:
+      num_gpus: 0.35
+
+  z_dot:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 600
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.SceneCNN
+        out_dim: 64
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 64
+      num_layers: 3
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.15
+
+  z_bg:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -1.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 600
+      lr: 0.001
+      gamma: 0.3
+      embedding:
+        _target_: model.GlobalStats
+        out_dim: 16
+        _input_: [x]
+      batch_size: 128
+      early_stop_patience: 64
+      hidden_dim: 32
+      num_layers: 2
+      momentum: 0.05
+      min_var: 1.0e-20
+      eig_update_freq: 1
+      lr_decay_factor: 0.5
+      lr_patience: 16
+      discard_samples: false
+      log_ratio_threshold: -20.0
+    ray:
+      num_gpus: 0.15
+
+  x:
+    parents: [z_hi, z_bye, z_dot, z_bg]
+    simulator:
+      _target_: model.FourCompSimulator
+      image_size: 64
+      font_size: 14
+      noise_level: 3.0
+    observed: "./data/obs.npz['x']"
+
+sample:
+  posterior:
+    n: 500
