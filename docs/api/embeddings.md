@@ -73,13 +73,27 @@ embedding:
 #### DiagonalWhitener
 
 Diagonal whitening with optional Hartley transform preprocessing and
-momentum-based running statistics.
+momentum-based running statistics. `dim` is required and must equal
+the number of features in the flattened input.
 
 ```yaml
 embedding:
   _target_: falcon.embeddings.DiagonalWhitener
   _input_: [x]
-  dim: 64    # required: number of input dimensions
+  dim: 64    # must match flattened input size
+```
+
+#### ToeplitzWhitener
+
+Whitening for 1D signals with Toeplitz-structured covariance (e.g. stationary
+time series). Uses a Hartley-space EMA to track and whiten correlations
+efficiently without storing the full covariance matrix.
+
+```yaml
+embedding:
+  _target_: falcon.embeddings.ToeplitzWhitener
+  _input_: [x]
+  momentum: 0.1
 ```
 
 #### hartley_transform
@@ -100,7 +114,9 @@ network.
 embedding:
   _target_: falcon.embeddings.DynamicSVD
   _input_: [x]
-  n_components: 32
+  n_components: 32     # output dimension
+  buffer_size: 128     # samples accumulated before each SVD update (default: 4 × n_components)
+  momentum: 0.1        # blending weight for each SVD update
 ```
 
 ## Class Reference
@@ -116,6 +132,10 @@ embedding:
       show_source: true
 
 ::: falcon.embeddings.norms.DiagonalWhitener
+    options:
+      show_source: true
+
+::: falcon.embeddings.norms.ToeplitzWhitener
     options:
       show_source: true
 

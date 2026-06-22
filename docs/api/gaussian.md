@@ -57,9 +57,15 @@ estimator:
 | `eig_update_freq` | int | 1 | Eigendecomposition update frequency |
 
 The training loop, optimizer, and inference parameters (`max_epochs`, `batch_size`,
-`early_stop_patience`, `lr`, `lr_decay_factor`, `lr_patience`, `gamma`,
-`discard_samples`, `log_ratio_threshold`, etc.) are identical to those in
+`early_stop_patience`, `lr`, `lr_decay_factor`, `lr_patience`, `prior_epochs`,
+`gamma`, `discard_samples`, `log_ratio_threshold`, etc.) are identical to those in
 [Flow](flow.md#configuration-reference).
+
+!!! note "gamma for GaussianFullCov"
+    Unlike `Flow`, where `gamma` controls importance-sampling breadth, in
+    `GaussianFullCov` it controls eigenvalue tempering of the covariance matrix.
+    Smaller `gamma` (e.g. `0.1`) produces a broader proposal relative to the
+    posterior; the relationship is not the same as in `Flow`.
 
 ## Complete Example
 

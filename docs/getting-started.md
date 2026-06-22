@@ -35,9 +35,11 @@ Create `model.py` with a forward model:
 import numpy as np
 
 class Simulator:
-    """Simple Gaussian simulator."""
+    """Simple Gaussian simulator: x = theta + noise."""
 
     def simulate_batch(self, batch_size, theta):
+        # theta shape: (batch_size, n_params)
+        # return shape must match the observed data shape
         noise = np.random.randn(*theta.shape) * 0.1
         return theta + noise
 ```
@@ -87,12 +89,18 @@ graph:
 ```python
 import numpy as np
 
-# Generate synthetic observation
-true_theta = 2.5
-obs = true_theta + np.random.randn(100) * 0.1
+# Single observed value for true_theta = 2.5.
+# Shape must match what simulate_batch returns for one sample.
+true_theta = np.array([[2.5]])        # shape (1, 1): one sample, one parameter
+obs = true_theta + np.random.randn(1, 1) * 0.1   # shape (1, 1)
 
 np.savez("data/obs.npz", x=obs)
 ```
+
+!!! note "Embedding"
+    This minimal example omits an `embedding:` key. Without one, Falcon passes the
+    raw observation tensor directly into the flow. For real problems where `x` has
+    many dimensions, add an embedding network to compress it to a summary statistic.
 
 ### 4. Run Training
 
@@ -114,7 +122,7 @@ falcon sample posterior -o output/run_01
 | `falcon sample prior` | Sample from prior |
 | `falcon sample posterior` | Sample from learned posterior |
 | `falcon sample proposal` | Sample from proposal distribution |
-| `falcon sample ppd` | Sample posterior predictive distribution |
+| `falcon sample ppd` | Sample posterior predictive distribution (forward model evaluated at posterior samples) |
 | `falcon graph` | Display graph structure |
 
 ## Next Steps
