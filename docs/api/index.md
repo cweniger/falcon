@@ -52,7 +52,7 @@ falcon/
 | [`instantiate_embedding`](embeddings.md) | Declarative embedding pipeline builder |
 | [`LazyOnlineNorm`](embeddings.md#falcon.embeddings.norms.LazyOnlineNorm) | Online normalization |
 | [`DiagonalWhitener`](embeddings.md#falcon.embeddings.norms.DiagonalWhitener) | Diagonal whitening |
-| [`PCAProjector`](embeddings.md#falcon.embeddings.svd.PCAProjector) | Streaming PCA projector |
+| [`DynamicSVD`](embeddings.md#falcon.embeddings.svd.DynamicSVD) | Streaming SVD with Procrustes stabilization |
 
 ## Quick Import
 
@@ -69,7 +69,7 @@ from falcon.estimators import Flow, Gaussian
 from falcon.priors import Product
 
 # Embeddings
-from falcon.embeddings import instantiate_embedding, LazyOnlineNorm, PCAProjector
+from falcon.embeddings import instantiate_embedding, LazyOnlineNorm, DynamicSVD
 
 # Utilities
 from falcon import read_run, load_run, read_samples

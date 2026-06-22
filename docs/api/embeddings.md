@@ -88,15 +88,16 @@ preprocessing step.
 
 ### Dimensionality Reduction
 
-#### PCAProjector
+#### DynamicSVD
 
-Streaming dual PCA projector with momentum-based updates. Performs online SVD for
-dimensionality reduction with variance-based prior (ridge-like regularization)
-and optional output normalization.
+Streaming SVD with Procrustes-stabilized output and optional whitening. Maintains
+an eigenbasis via momentum-blended updates; Procrustes alignment keeps output
+coefficients stable across updates, making it safe to feed directly into a neural
+network.
 
 ```yaml
 embedding:
-  _target_: falcon.embeddings.PCAProjector
+  _target_: falcon.embeddings.DynamicSVD
   _input_: [x]
   n_components: 32
 ```
@@ -119,6 +120,6 @@ embedding:
 
 ::: falcon.embeddings.norms.hartley_transform
 
-::: falcon.embeddings.svd.PCAProjector
+::: falcon.embeddings.svd.DynamicSVD
     options:
       show_source: true
