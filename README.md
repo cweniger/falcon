@@ -22,7 +22,7 @@ For development:
 ```bash
 git clone https://github.com/cweniger/falcon.git
 cd falcon
-pip install -e ".[monitor]"
+pip install -e ".[all]"
 ```
 
 ## Quick Start
@@ -63,7 +63,7 @@ graph:
 
 ```bash
 falcon launch [-o DIR] [-c CONFIG] [key=value ...]
-falcon sample prior|posterior|proposal -o DIR
+falcon sample prior|posterior|proposal|ppd -o DIR
 falcon graph                            # Visualize graph structure
 ```
 

@@ -4,7 +4,7 @@ Full covariance Gaussian posterior estimation.
 
 ## Overview
 
-`Gaussian` provides a simpler alternative to [Flow](flow.md) for posterior
+`GaussianFullCov` provides a simpler alternative to [Flow](flow.md) for posterior
 estimation. Instead of normalizing flows, it models the posterior as a
 multivariate Gaussian with full covariance, using eigenvalue-based operations.
 
@@ -15,43 +15,38 @@ Key features:
 - Simpler and more interpretable than flow-based methods
 
 !!! note
-    `Gaussian` requires a [`Product`](product.md) prior (with `"standard_normal"` mode)
-    as the simulator.
+    `GaussianFullCov` requires a [`Product`](product.md) prior with `"standard_normal"` mode.
 
 ## Configuration
 
-Gaussian is configured through the same four groups as Flow: `loop`, `network`,
-`optimizer`, and `inference`.
+Like `Flow`, all `GaussianFullCov` parameters are specified **flat** directly
+under `estimator:` in YAML — no nested group keys.
 
 ```yaml
 estimator:
-  _target_: falcon.estimators.Gaussian
-  loop:
-    max_epochs: 1000
-    batch_size: 128
-    early_stop_patience: 32
-  network:
-    hidden_dim: 128
-    num_layers: 3
-    momentum: 0.10
-    min_var: 1.0e-20
-    eig_update_freq: 1
+  _target_: falcon.estimators.GaussianFullCov
+  max_epochs: 1000
+  batch_size: 128
+  early_stop_patience: 32
+  hidden_dim: 128
+  num_layers: 3
+  momentum: 0.01
+  min_var: 1.0e-20
+  eig_update_freq: 1
   embedding:
     _target_: model.E_identity
     _input_: [x]
-  optimizer:
-    lr: 0.01
-    lr_decay_factor: 0.5
-    scheduler_patience: 16
-  inference:
-    gamma: 1.0
-    discard_samples: false
-    log_ratio_threshold: -20.0
+  lr: 0.01
+  lr_decay_factor: 1.0
+  lr_patience: 8
+  gamma: 0.5
+  discard_samples: false
+  log_ratio_threshold: -20.0
 ```
 
 ## Configuration Reference
 
-### Network (`network`)
+### Network Parameters
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
@@ -61,8 +56,10 @@ estimator:
 | `min_var` | float | 1e-20 | Minimum variance for numerical stability |
 | `eig_update_freq` | int | 1 | Eigendecomposition update frequency |
 
-The `loop`, `optimizer`, and `inference` groups share the same parameters as
-[Flow](flow.md#training-loop-loop).
+The training loop, optimizer, and inference parameters (`max_epochs`, `batch_size`,
+`early_stop_patience`, `lr`, `lr_decay_factor`, `lr_patience`, `gamma`,
+`discard_samples`, `log_ratio_threshold`, etc.) are identical to those in
+[Flow](flow.md#configuration-reference).
 
 ## Complete Example
 
@@ -79,28 +76,24 @@ graph:
         - ['normal', 0.0, 1.0]
 
     estimator:
-      _target_: falcon.estimators.Gaussian
-      loop:
-        max_epochs: 1000
-        batch_size: 128
-        early_stop_patience: 32
-      network:
-        hidden_dim: 128
-        num_layers: 3
-        momentum: 0.10
-        min_var: 1.0e-20
-        eig_update_freq: 1
+      _target_: falcon.estimators.GaussianFullCov
+      max_epochs: 8000
+      batch_size: 128
+      early_stop_patience: 128
+      hidden_dim: 128
+      num_layers: 3
+      momentum: 0.01
+      min_var: 1.0e-20
+      eig_update_freq: 1
       embedding:
         _target_: model.E_identity
         _input_: [x]
-      optimizer:
-        lr: 0.01
-        lr_decay_factor: 0.5
-        scheduler_patience: 16
-      inference:
-        gamma: 1.0
-        discard_samples: false
-        log_ratio_threshold: -20.0
+      lr: 0.01
+      lr_decay_factor: 1.0
+      lr_patience: 8
+      gamma: 0.1
+      discard_samples: false
+      log_ratio_threshold: -20.0
 
     ray:
       num_gpus: 1
@@ -119,14 +112,15 @@ sample:
 
 ## Class Reference
 
-::: falcon.estimators.gaussian.Gaussian
-
-::: falcon.estimators.gaussian.GaussianPosterior
+::: falcon.estimators.gaussian_fullcov.GaussianFullCov
     options:
       show_source: true
-
-## Configuration Classes
-
-::: falcon.estimators.gaussian.GaussianConfig
-
-::: falcon.estimators.gaussian.NetworkConfig
+      members:
+        - __init__
+        - train_step
+        - val_step
+        - sample_prior
+        - sample_posterior
+        - sample_proposal
+        - save
+        - load

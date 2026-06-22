@@ -4,7 +4,7 @@ This guide walks you through setting up and running your first Falcon project.
 
 ## Prerequisites
 
-- Python 3.9+
+- Python 3.10+
 - PyTorch 2.0+
 
 ## Installation
@@ -54,7 +54,7 @@ logging:
     enabled: true
 
 paths:
-  import: "."
+  imports: ["."]
 
 buffer:
   min_samples: 1000
@@ -72,10 +72,8 @@ graph:
         - ['uniform', -10.0, 10.0]
     estimator:
       _target_: falcon.estimators.Flow
-      loop:
-        max_epochs: 100
-      network:
-        net_type: zuko_nice
+      max_epochs: 100
+      net_type: zuko_nice
 
   x:
     parents: [theta]
@@ -116,8 +114,8 @@ falcon sample posterior -o output/run_01
 | `falcon sample prior` | Sample from prior |
 | `falcon sample posterior` | Sample from learned posterior |
 | `falcon sample proposal` | Sample from proposal distribution |
+| `falcon sample ppd` | Sample posterior predictive distribution |
 | `falcon graph` | Display graph structure |
-| `falcon monitor` | Launch TUI dashboard |
 
 ## Next Steps
 

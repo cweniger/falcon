@@ -46,7 +46,7 @@ Or install from source:
 ```bash
 git clone https://github.com/cweniger/falcon.git
 cd falcon
-pip install -e .
+pip install -e ".[all]"
 ```
 
 ## Next Steps

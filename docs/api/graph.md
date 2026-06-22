@@ -19,6 +19,7 @@ correct execution order.
     options:
       members:
         - __init__
+        - add_node
         - get_parents
         - get_evidence
         - get_simulator_cls

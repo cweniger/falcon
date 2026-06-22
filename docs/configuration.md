@@ -68,6 +68,8 @@ buffer:
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
 | `snapshot_every` | int | `0` | Save every Nth sample to `{paths.buffer}/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
+| `simulate_chunk_size` | int | `0` | Max samples per individual simulation call (0 = full `simulate_count` in one call) |
+| `initial_samples_path` | str | `null` | Path to a pre-existing sample type directory to pre-load into the buffer on startup |
 
 ### `graph`
 
@@ -88,17 +90,13 @@ graph:
 
     estimator:                     # Posterior learner (optional)
       _target_: falcon.estimators.Flow
-      loop:
-        max_epochs: 300
-      network:
-        net_type: nsf
+      max_epochs: 300
+      net_type: nsf
       embedding:
         _target_: model.MyEmbedding
         _input_: [x]
-      optimizer:
-        lr: 0.01
-      inference:
-        gamma: 0.5
+      lr: 0.01
+      gamma: 0.5
 
     ray:                          # Ray actor configuration
       num_gpus: 0
@@ -124,36 +122,31 @@ simulator:
 The posterior learner. Falcon provides two estimators:
 
 - [`falcon.estimators.Flow`](api/flow.md) — Flow-based posterior estimation (recommended for most cases)
-- [`falcon.estimators.Gaussian`](api/gaussian.md) — Full covariance Gaussian posterior
+- [`falcon.estimators.GaussianFullCov`](api/gaussian.md) — Full covariance Gaussian posterior
+
+All estimator parameters are specified **flat** directly under `estimator:` — there
+are no nested group keys (`loop`, `network`, etc.). The `embedding` key is special:
+it takes a nested `_target_` / `_input_` block as usual.
 
 ```yaml
 estimator:
   _target_: falcon.estimators.Flow
-
-  loop:
-    max_epochs: 300
-    batch_size: 128
-    early_stop_patience: 50
-    cache_sync_every: 0
-    max_cache_samples: 0
-    cache_on_device: false
-
-  network:
-    net_type: nsf          # nsf, maf, zuko_nice, etc.
-    theta_norm: true
-
+  max_epochs: 300
+  batch_size: 128
+  early_stop_patience: 50
+  cache_sync_every: 0
+  max_cache_samples: 0
+  cache_on_device: false
+  net_type: nsf          # nsf, maf, zuko_nice, etc.
+  theta_norm: true
   embedding:
     _target_: model.Embedding
     _input_: [x]
-
-  optimizer:
-    lr: 0.01
-    lr_decay_factor: 0.1
-    scheduler_patience: 8
-
-  inference:
-    gamma: 0.5             # Proposal width (0=posterior, 1=prior)
-    discard_samples: true
+  lr: 0.01
+  lr_decay_factor: 0.1
+  lr_patience: 8
+  gamma: 0.5             # Proposal width (0=posterior, 1=prior)
+  discard_samples: true
 ```
 
 ### `ray`
@@ -192,5 +185,5 @@ observed: "./data/obs.npz['x']"
 Override any parameter via CLI:
 
 ```bash
-falcon launch buffer.max_epochs=1000 graph.theta.estimator.optimizer.lr=0.001
+falcon launch buffer.max_samples=32768 graph.theta.estimator.optimizer.lr=0.001
 ```

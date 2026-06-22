@@ -11,7 +11,7 @@ bijective map to a chosen latent space. It extends the abstract base class
 `Product` supports two latent-space modes:
 
 - **`"hypercube"`**: Maps to/from a bounded hypercube (used with [Flow](flow.md))
-- **`"standard_normal"`**: Maps to/from standard normal space (used with [Gaussian](gaussian.md))
+- **`"standard_normal"`**: Maps to/from standard normal space (used with [GaussianFullCov](gaussian.md))
 
 ## Supported Distributions
 
@@ -23,7 +23,7 @@ bijective map to a chosen latent space. It extends the abstract base class
 | `sine` | `low`, `high` | Sine-weighted distribution |
 | `uvol` | `low`, `high` | Uniform-in-volume |
 | `triangular` | `a`, `c`, `b` | Triangular distribution (min, mode, max) |
-| `lognormal` | `mean`, `std` | Log-normal distribution |
+| `lognormal` | `mean`, `std` | Log-normal distribution (only supported with `"standard_normal"` mode) |
 | `fixed` | `value` | Fixed (non-inferred) parameter |
 
 ### Fixed Parameters
@@ -73,7 +73,7 @@ simulator:
     - ['uniform', -100.0, 100.0]
 ```
 
-### With Gaussian estimator
+### With GaussianFullCov estimator
 
 ```yaml
 simulator:
