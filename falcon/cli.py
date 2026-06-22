@@ -398,182 +398,185 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         shutdown_handler = _GracefulShutdown()
         shutdown_handler.install()
 
-    # Get output directory from config
-    output_dir = Path(cfg.run_dir)
-
-    # Generate wandb group if not set - use run-dir folder name
-    logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
-    if logging_cfg.get("wandb", {}).get("enabled", False):
-        if not logging_cfg.get("wandb", {}).get("group"):
-            # Use the run-dir folder name as the group name
-            logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
-
-    # Ensure local dir is set to graph path
-    logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
-
-    # Create driver logger and set as module-level logger
-    # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
-    driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
-    set_logger(driver_logger)
-
-    # If interactive mode, replace console handler with one that routes to display
-    if display:
-        for handler in driver_logger._logger.handlers[:]:
-            if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
-                driver_logger._logger.removeHandler(handler)
-                # Add custom handler that routes to display
-                interactive_handler = logging.StreamHandler(_InteractiveStream(display))
-                interactive_handler.setFormatter(logging.Formatter(
-                    '%(asctime)s [%(levelname)s] %(message)s',
-                    datefmt='%H:%M:%S'
-                ))
-                interactive_handler.setLevel(logging.INFO)
-                driver_logger._logger.addHandler(interactive_handler)
-                break
-
-    # Log startup info
-    info(f"falcon v{falcon.__version__}")
-    info(f"Output: {output_dir}")
-
-    # Initialize Ray
-    ray_init_args = cfg.get("ray", {}).get("init", {})
-    # Forward actor stdout/stderr to driver when console.level is set,
-    # so node log messages and crash output reach the terminal.
-    console_level = logging_cfg.get("console", {}).get("level", None)
-    ray_init_args.setdefault("log_to_driver", console_level is not None)
-    # Use a fixed namespace so falcon monitor can discover actors
-    ray_init_args.setdefault("namespace", "falcon")
-    # Suppress Ray startup banner
-    ray_init_args.setdefault("logging_level", "ERROR")
-    ray.init(**ray_init_args)
-
-    # Show Ray cluster info with resources
-    ctx = ray.get_runtime_context()
-    gcs_address = ctx.gcs_address
-    is_local = ray_init_args.get("address") is None
-    ray_status = "new local instance" if is_local else "existing cluster"
-    resources = ray.cluster_resources()
-    cpu = int(resources.get("CPU", 0))
-    gpu = int(resources.get("GPU", 0))
-    mem_gb = resources.get("memory", 0) / (1024**3)
-
-    info(f"Ray: {gcs_address} ({ray_status})")
-    info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
-
-    ########################
-    ### Model definition ###
-    ########################
-
-    # Instantiate model components directly from graph
-    graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
-
-    # Convert observations to tensors, adding batch dimension
-    observations = {
-        k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
-    }
-
-    # Log graph info
-    info(str(graph))
-    for name, shape in observations.items():
-        info(f"Observed: {name} {list(shape.shape)}")
-
-    ####################
-    ### Run analysis ###
-    ####################
-
-    # 1) Deploy graph (pass logging config)
-    deployed_graph = falcon.DeployedGraph(
-        graph,
-        model_path=cfg.paths.get("import"),
-        log_config=logging_cfg,
-    )
-
-    # 2) Prepare dataset manager for deployed graph and store initial samples
-    dataset_manager = falcon.get_ray_dataset_manager(
-        min_samples=cfg.buffer.min_samples,
-        max_samples=cfg.buffer.max_samples,
-        validation_samples=cfg.buffer.validation_samples,
-        simulate_count=cfg.buffer.simulate_count,
-        simulate_interval=cfg.buffer.simulate_interval,
-        simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
-        simulate_when_full=cfg.buffer.simulate_when_full,
-        initial_samples_path=cfg.buffer.get("initial_samples_path", None),
-        samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
-        store_fraction=cfg.buffer.get("store_fraction", 0.0),
-        log_config=logging_cfg,
-    )
-
-    # 3) Start status polling thread for interactive mode
-    status_thread = None
-    graph_path = Path(cfg.paths.graph)
-    if display:
-        # Set log directory so display can read node output.log files
-        display.set_log_dir(str(graph_path))
-
-        def poll_status():
-            """Background thread to poll MonitorBridge and update display."""
-            import time
-            while display.is_running:
-                try:
-                    bridge = ray.get_actor("falcon:monitor_bridge")
-                    status = ray.get(bridge.get_status.remote())
-
-                    # Update nodes
-                    for name, node_status in status.get("nodes", {}).items():
-                        display.update_node(
-                            name=name,
-                            status=node_status.get("status", "unknown"),
-                            current_epoch=node_status.get("current_epoch", 0),
-                            total_epochs=node_status.get("total_epochs", 0),
-                            loss=node_status.get("loss"),
-                            samples=node_status.get("samples", 0),
-                        )
-
-                    # Add dataset manager as a viewable node (for its output.log)
-                    display.update_node(name="dataset", status="active")
-
-                    # Update buffer stats
-                    buffer = status.get("buffer", {})
-                    display.update_buffer(
-                        training=buffer.get("training", 0),
-                        validation=buffer.get("validation", 0),
-                    )
-                except Exception:
-                    pass  # MonitorBridge may not be ready yet
-
-                # Redraw footer to refresh log tail
-                with display._lock:
-                    display._draw_footer()
-
-                time.sleep(1.0)
-
-        status_thread = threading.Thread(target=poll_status, daemon=True)
-        status_thread.start()
-
-    # 4) Launch training & simulations
-    # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
-    import time as _time
-    _start_time = _time.time()
-    _timeout_logged = False
-
-    def stop_check():
-        nonlocal _timeout_logged
-        # Check user interrupt (Ctrl+C)
-        if display and display.stop_requested:
-            return True
-        if shutdown_handler and shutdown_handler.stop_requested:
-            return True
-        # Check timeout
-        if timeout is not None:
-            elapsed = _time.time() - _start_time
-            if elapsed >= timeout:
-                if not _timeout_logged:
-                    info(f"Timeout reached ({timeout}s), stopping gracefully...")
-                    _timeout_logged = True
-                return True
-        return False
+    deployed_graph = None
+    driver_logger = None
 
     try:
+        # Get output directory from config
+        output_dir = Path(cfg.run_dir)
+
+        # Generate wandb group if not set - use run-dir folder name
+        logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
+        if logging_cfg.get("wandb", {}).get("enabled", False):
+            if not logging_cfg.get("wandb", {}).get("group"):
+                # Use the run-dir folder name as the group name
+                logging_cfg.setdefault("wandb", {})["group"] = output_dir.name
+
+        # Ensure local dir is set to graph path
+        logging_cfg.setdefault("local", {})["dir"] = str(cfg.paths.graph)
+
+        # Create driver logger and set as module-level logger
+        # This enables falcon.info(), falcon.log() etc. for DeployedGraph and other components
+        driver_logger = Logger("driver", logging_cfg, capture_exceptions=True)
+        set_logger(driver_logger)
+
+        # If interactive mode, replace console handler with one that routes to display
+        if display:
+            for handler in driver_logger._logger.handlers[:]:
+                if isinstance(handler, logging.StreamHandler) and handler.stream == sys.stdout:
+                    driver_logger._logger.removeHandler(handler)
+                    # Add custom handler that routes to display
+                    interactive_handler = logging.StreamHandler(_InteractiveStream(display))
+                    interactive_handler.setFormatter(logging.Formatter(
+                        '%(asctime)s [%(levelname)s] %(message)s',
+                        datefmt='%H:%M:%S'
+                    ))
+                    interactive_handler.setLevel(logging.INFO)
+                    driver_logger._logger.addHandler(interactive_handler)
+                    break
+
+        # Log startup info
+        info(f"falcon v{falcon.__version__}")
+        info(f"Output: {output_dir}")
+
+        # Initialize Ray
+        ray_init_args = cfg.get("ray", {}).get("init", {})
+        # Forward actor stdout/stderr to driver when console.level is set,
+        # so node log messages and crash output reach the terminal.
+        console_level = logging_cfg.get("console", {}).get("level", None)
+        ray_init_args.setdefault("log_to_driver", console_level is not None)
+        # Use a fixed namespace so falcon monitor can discover actors
+        ray_init_args.setdefault("namespace", "falcon")
+        # Suppress Ray startup banner
+        ray_init_args.setdefault("logging_level", "ERROR")
+        ray.init(**ray_init_args)
+
+        # Show Ray cluster info with resources
+        ctx = ray.get_runtime_context()
+        gcs_address = ctx.gcs_address
+        is_local = ray_init_args.get("address") is None
+        ray_status = "new local instance" if is_local else "existing cluster"
+        resources = ray.cluster_resources()
+        cpu = int(resources.get("CPU", 0))
+        gpu = int(resources.get("GPU", 0))
+        mem_gb = resources.get("memory", 0) / (1024**3)
+
+        info(f"Ray: {gcs_address} ({ray_status})")
+        info(f"Resources: {cpu} CPU, {gpu} GPU, {mem_gb:.1f} GB")
+
+        ########################
+        ### Model definition ###
+        ########################
+
+        # Instantiate model components directly from graph
+        graph, observations = create_graph_from_config(cfg.graph, _cfg=cfg)
+
+        # Convert observations to tensors, adding batch dimension
+        observations = {
+            k: torch.from_numpy(v).unsqueeze(0) for k, v in observations.items()
+        }
+
+        # Log graph info
+        info(str(graph))
+        for name, shape in observations.items():
+            info(f"Observed: {name} {list(shape.shape)}")
+
+        ####################
+        ### Run analysis ###
+        ####################
+
+        # 1) Deploy graph (pass logging config)
+        deployed_graph = falcon.DeployedGraph(
+            graph,
+            model_path=cfg.paths.get("import"),
+            log_config=logging_cfg,
+        )
+
+        # 2) Prepare dataset manager for deployed graph and store initial samples
+        dataset_manager = falcon.get_ray_dataset_manager(
+            min_samples=cfg.buffer.min_samples,
+            max_samples=cfg.buffer.max_samples,
+            validation_samples=cfg.buffer.validation_samples,
+            simulate_count=cfg.buffer.simulate_count,
+            simulate_interval=cfg.buffer.simulate_interval,
+            simulate_chunk_size=cfg.buffer.get("simulate_chunk_size", 0),
+            simulate_when_full=cfg.buffer.simulate_when_full,
+            initial_samples_path=cfg.buffer.get("initial_samples_path", None),
+            samples_path=cfg.paths.get("samples", f"{cfg.run_dir}/samples_dir"),
+            store_fraction=cfg.buffer.get("store_fraction", 0.0),
+            log_config=logging_cfg,
+        )
+
+        # 3) Start status polling thread for interactive mode
+        status_thread = None
+        graph_path = Path(cfg.paths.graph)
+        if display:
+            # Set log directory so display can read node output.log files
+            display.set_log_dir(str(graph_path))
+
+            def poll_status():
+                """Background thread to poll MonitorBridge and update display."""
+                import time
+                while display.is_running:
+                    try:
+                        bridge = ray.get_actor("falcon:monitor_bridge")
+                        status = ray.get(bridge.get_status.remote())
+
+                        # Update nodes
+                        for name, node_status in status.get("nodes", {}).items():
+                            display.update_node(
+                                name=name,
+                                status=node_status.get("status", "unknown"),
+                                current_epoch=node_status.get("current_epoch", 0),
+                                total_epochs=node_status.get("total_epochs", 0),
+                                loss=node_status.get("loss"),
+                                samples=node_status.get("samples", 0),
+                            )
+
+                        # Add dataset manager as a viewable node (for its output.log)
+                        display.update_node(name="dataset", status="active")
+
+                        # Update buffer stats
+                        buffer = status.get("buffer", {})
+                        display.update_buffer(
+                            training=buffer.get("training", 0),
+                            validation=buffer.get("validation", 0),
+                        )
+                    except Exception:
+                        pass  # MonitorBridge may not be ready yet
+
+                    # Redraw footer to refresh log tail
+                    with display._lock:
+                        display._draw_footer()
+
+                    time.sleep(1.0)
+
+            status_thread = threading.Thread(target=poll_status, daemon=True)
+            status_thread.start()
+
+        # 4) Launch training & simulations
+        # Create stop check callback for graceful shutdown (handles Ctrl+C and timeout)
+        import time as _time
+        _start_time = _time.time()
+        _timeout_logged = False
+
+        def stop_check():
+            nonlocal _timeout_logged
+            # Check user interrupt (Ctrl+C)
+            if display and display.stop_requested:
+                return True
+            if shutdown_handler and shutdown_handler.stop_requested:
+                return True
+            # Check timeout
+            if timeout is not None:
+                elapsed = _time.time() - _start_time
+                if elapsed >= timeout:
+                    if not _timeout_logged:
+                        info(f"Timeout reached ({timeout}s), stopping gracefully...")
+                        _timeout_logged = True
+                    return True
+            return False
+
         deployed_graph.launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
         #############################
@@ -605,7 +608,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         ### Clean up resources ###
         ##########################
 
-        # Stop interactive display first (restores terminal)
+        # Stop interactive display first (restores terminal so errors print visibly)
         if display:
             display.stop()
 
@@ -613,8 +616,10 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, posterior_s
         if shutdown_handler:
             shutdown_handler.uninstall()
 
-        deployed_graph.shutdown()
-        driver_logger.shutdown()
+        if deployed_graph is not None:
+            deployed_graph.shutdown()
+        if driver_logger is not None:
+            driver_logger.shutdown()
 
 
 def sample_mode(cfg, sample_type: str) -> None:
