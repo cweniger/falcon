@@ -119,7 +119,7 @@ class DynamicSVD(torch.nn.Module):
 
         Returns:
             Coefficients of shape (batch_size, k), ~unit variance. Returns
-            zeros before the first SVD update.
+            random noise before the first SVD update (avoids all-zero gradients).
         """
         if self.training:
             with torch.no_grad():

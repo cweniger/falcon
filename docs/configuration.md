@@ -62,7 +62,7 @@ buffer:
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
 | `min_samples` | int | — | Minimum training samples required before training starts |
-| `max_samples` | int | — | Maximum training samples retained; older samples are disfavoured once this is exceeded |
+| `max_samples` | int | — | Maximum training samples retained; the oldest samples are permanently removed when this is exceeded |
 | `validation_samples` | int | — | Number of samples held out for validation (used for early stopping) |
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
@@ -79,10 +79,10 @@ Define the computational graph. Each key is a node name:
 graph:
   node_name:
     parents: [parent1, parent2]    # Forward model dependencies
-    evidence: [evidence1]          # Inference dependencies
-    scaffolds: [scaffold1]         # Additional conditioning
+    evidence: [evidence1]          # Inference dependencies (drive backward traversal)
+    scaffolds: [scaffold1]         # Extra conditioning inputs (passed to estimator but not inferred)
     observed: "./path/to/data.npz" # Observation file
-    resample: false                # Enable adaptive resampling
+    resample: false                # If true, re-draw samples from proposal each round instead of accumulating
 
     simulator:                     # Forward model
       _target_: module.ClassName
@@ -145,7 +145,7 @@ estimator:
   lr: 0.01
   lr_decay_factor: 0.1
   lr_patience: 8
-  gamma: 0.5             # Proposal width (0=posterior, 1=prior)
+  gamma: 0.5             # Proposal breadth (0=tight around posterior, higher=broader)
   discard_samples: true
 ```
 
@@ -180,10 +180,26 @@ observed: "./data/obs.npz"
 observed: "./data/obs.npz['x']"
 ```
 
+## `sample`
+
+Configure automatic post-training sampling. Each key under `sample` matches a
+sample type (`prior`, `posterior`, `proposal`, `ppd`):
+
+```yaml
+sample:
+  posterior:
+    n: 1000          # Number of samples to draw
+  ppd:
+    n: 500           # Posterior predictive samples (requires observed nodes with parents)
+```
+
+If `n > 0`, sampling runs automatically after training completes. Samples are
+written to `{paths.samples}/{type}/`.
+
 ## Overriding Configuration
 
 Override any parameter via CLI:
 
 ```bash
-falcon launch buffer.max_samples=32768 graph.theta.estimator.optimizer.lr=0.001
+falcon launch buffer.max_samples=32768 graph.theta.estimator.lr=0.001
 ```

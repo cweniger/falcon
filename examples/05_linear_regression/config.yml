@@ -53,7 +53,7 @@ buffer:
   snapshot_every: 10
 
 # -----------------------------------------------------------------------------
-# Graph definition using SNPE_gaussian estimator
+# Graph definition using GaussianFullCov estimator
 # -----------------------------------------------------------------------------
 graph:
   theta:

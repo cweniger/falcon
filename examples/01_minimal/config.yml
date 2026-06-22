@@ -24,7 +24,7 @@
 #   • All outputs (simulations, trained models, logs) are written under
 #     ${run_dir}, which is set via --output or auto-generated.
 #   • ${run_dir} is referenced by graph, samples, and WandB logging paths.
-#   • Resuming: specify existing --output to load saved config.yaml
+#   • Resuming: specify an existing --output directory to resume from its saved config.yml
 # =============================================================================
 
 # -----------------------------------------------------------------------------

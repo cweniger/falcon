@@ -109,13 +109,15 @@ Controls posterior sampling and amortization.
 | `out_of_bounds_penalty` | float | 100.0 | Log-weight penalty applied to out-of-bounds proposals |
 | `nan_replacement` | float | -100.0 | Log-weight substituted for NaN values during importance sampling |
 
-#### Understanding `gamma` (Amortization)
+#### Understanding `gamma`
 
-The `gamma` parameter controls the trade-off between focused and amortized inference:
+`gamma` controls how broadly the proposal distribution covers the parameter space:
 
-- **`gamma=0`**: Fully focused on the specific observation (best for single-observation inference)
-- **`gamma=1`**: Fully amortized (network generalizes across observations)
-- **`gamma=0.5`**: Balanced (default, good for most cases)
+- **`gamma=0`**: Proposal equals the posterior — tightest possible proposal, best for refining a good posterior estimate
+- **Higher `gamma`**: Broader proposal — more exploration, more robust to poorly-initialized posteriors
+- **`gamma=0.5`**: Default, works well in most cases
+
+Note: `gamma` is not the same as "amortization" in the NPE literature. It sets the de-weighting of the conditional flow relative to the marginal during importance sampling.
 
 ## Embedding Networks
 

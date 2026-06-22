@@ -1,10 +1,10 @@
 # =============================================================================
 # Falcon Example Configuration: 04_gaussian
 # -----------------------------------------------------------------------------
-# Demonstrates SNPE_gaussian with an exponential forward model:
+# Demonstrates GaussianFullCov with an exponential forward model:
 #   x = exp(z) + noise
 #
-# SNPE_gaussian uses a full covariance Gaussian posterior instead of
+# GaussianFullCov uses a full covariance Gaussian posterior instead of
 # normalizing flows. Benefits:
 #   - Simpler and more interpretable
 #   - Covariance matrix shows parameter correlations directly
@@ -51,7 +51,7 @@ buffer:
   snapshot_every: 10
 
 # -----------------------------------------------------------------------------
-# Graph definition using SNPE_gaussian estimator
+# Graph definition using GaussianFullCov estimator
 # -----------------------------------------------------------------------------
 graph:
   z:

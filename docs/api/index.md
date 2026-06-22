@@ -13,10 +13,10 @@ falcon/
 ├── estimators/        # Posterior estimation
 │   ├── flow            # Flow-based posterior estimation
 │   ├── gaussian_fullcov  # Gaussian posterior estimation
-│   ├── flow_density    # Normalizing flow networks
-│   ├── stepwise_base   # Base training loop classes
-│   ├── networks        # MLP builder utilities
-│   └── embedded_posterior  # Embedding + posterior wrapper
+│   ├── flow_density    # Normalizing flow networks (internal, used by Flow)
+│   ├── stepwise_base   # Epoch-based training base class (internal)
+│   ├── networks        # MLP builder utility (internal)
+│   └── embedded_posterior  # Embedding + posterior wrapper (internal)
 ├── priors/            # Prior distributions
 │   └── product         # Product of independent marginals
 └── embeddings/        # Observation embeddings

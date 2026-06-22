@@ -17,14 +17,14 @@ bijective map to a chosen latent space. It extends the abstract base class
 
 | Type | Parameters | Description |
 |------|------------|-------------|
-| `uniform` | `low`, `high` | Uniform distribution |
+| `uniform` | `low`, `high` | Uniform distribution over [`low`, `high`] |
 | `normal` | `mean`, `std` | Gaussian distribution |
-| `cosine` | `low`, `high` | Cosine-weighted distribution |
-| `sine` | `low`, `high` | Sine-weighted distribution |
-| `uvol` | `low`, `high` | Uniform-in-volume |
-| `triangular` | `a`, `c`, `b` | Triangular distribution (min, mode, max) |
-| `lognormal` | `mean`, `std` | Log-normal distribution (only supported with `"standard_normal"` mode) |
-| `fixed` | `value` | Fixed (non-inferred) parameter |
+| `cosine` | `low`, `high` | Distribution with pdf ∝ cos(θ) — use for inclination-like angles |
+| `sine` | `low`, `high` | Distribution with pdf ∝ sin(θ) — use for declination-like angles |
+| `uvol` | `low`, `high` | Uniform-in-volume (pdf ∝ r²) — use for a radial coordinate in 3D |
+| `triangular` | `a`, `c`, `b` | Triangular distribution (min `a`, mode `c`, max `b`) |
+| `lognormal` | `mean`, `std` | Log-normal distribution. Only supported with `"standard_normal"` mode; raises `ValueError` with `"hypercube"` mode |
+| `fixed` | `value` | Fixed (non-inferred) parameter — excluded from the latent space |
 
 ### Fixed Parameters
 
@@ -53,13 +53,19 @@ prior = Product(
     ]
 )
 
-# Sample from prior
+# Sample from prior — output shape is (1000, prior.full_param_dim)
 samples = prior.simulate_batch(1000)
 
 # Transform to/from latent space
 z = prior.inverse(samples, mode="standard_normal")
 x = prior.forward(z, mode="standard_normal")
 ```
+
+!!! note "param_dim vs full_param_dim"
+    `prior.param_dim` is the number of *free* (non-fixed) parameters — the
+    dimension of the latent space seen by estimators. `prior.full_param_dim`
+    is the total output dimension including `fixed` parameters. The simulator
+    always receives the full vector.
 
 ## YAML Configuration
 
