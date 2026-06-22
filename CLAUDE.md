@@ -26,9 +26,6 @@ falcon sample proposal -o output/exp01          # Sample from proposal distribut
 # Visualize graph structure
 falcon graph                                     # Display ASCII graph visualization
 
-# Real-time monitoring (requires: pip install "falcon-sbi[monitor]")
-falcon monitor                                   # TUI dashboard for training progress
-
 # Run examples
 cd examples/01_minimal && falcon launch -o output/run_01
 ```
@@ -149,7 +146,7 @@ graph:
 
 ## Key Files
 
-- `falcon/cli.py`: Entry point, implements `launch_mode`, `sample_mode`, `graph_mode`, `monitor_mode`
+- `falcon/cli.py`: Entry point, implements `launch_mode`, `sample_mode`, `graph_mode`
 - `falcon/core/graph.py`: Graph, Node, and CompositeNode definitions
 - `falcon/core/deployed_graph.py`: Runtime execution with Ray
 - `falcon/core/base_estimator.py`: Abstract estimator interface

@@ -802,7 +802,7 @@ class DeployedGraph:
         info(f"Initial samples ready ({num_loaded} loaded, {num_to_generate} generated)")
 
         info("")
-        info("Starting analysis. Monitor with: falcon monitor")
+        info("Starting analysis.")
 
         # Training - start all training nodes
         train_futures = {}  # Map future -> node_name for completion tracking

@@ -65,7 +65,6 @@ graph:
 falcon launch [-o DIR] [-c CONFIG] [key=value ...]
 falcon sample prior|posterior|proposal -o DIR
 falcon graph                            # Visualize graph structure
-falcon monitor                          # Real-time TUI dashboard (requires pip install "falcon[monitor]")
 ```
 
 ## Examples
