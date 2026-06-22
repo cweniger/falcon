@@ -291,6 +291,34 @@ def _collect_input_keys(config: Union[Dict, str, List]) -> List[str]:
     return list(set(keys))
 
 
+def _instantiate_sub_targets(value: Any) -> Any:
+    """Recursively instantiate any dict with _target_ but no _input_ as a module.
+
+    Constructor kwargs that are themselves _target_ dicts (e.g. ``whitener:
+    {_target_: DiagonalWhitener, dim: 17280}``) would otherwise be passed as
+    raw dicts, causing the receiving module to call dict.update() instead of
+    the module's own .update() method.  This function resolves them first.
+
+    Dicts that also carry _input_ are pipeline steps handled by
+    _flatten_config_to_modules, not sub-modules, and are left untouched.
+    """
+    if isinstance(value, dict):
+        if "_target_" in value and "_input_" not in value:
+            target = value["_target_"]
+            if isinstance(target, str):
+                module_name, class_name = target.rsplit(".", 1)
+                cls = getattr(importlib.import_module(module_name), class_name)
+            else:
+                cls = target
+            sub_kwargs = {k: _instantiate_sub_targets(v)
+                          for k, v in value.items() if k != "_target_"}
+            return cls(**sub_kwargs)
+        return {k: _instantiate_sub_targets(v) for k, v in value.items()}
+    if isinstance(value, list):
+        return [_instantiate_sub_targets(v) for v in value]
+    return value
+
+
 def _flatten_config_to_modules(
     config: Dict[str, Any], temp_counter: int = 0
 ) -> Tuple[List[nn.Module], List[List[str]], List[str], int]:
@@ -305,7 +333,8 @@ def _flatten_config_to_modules(
         cls = getattr(importlib.import_module(module_name), class_name)
 
     input_config = config["_input_"]
-    kwargs = {k: v for k, v in config.items() if k not in ["_target_", "_input_"]}
+    kwargs = {k: _instantiate_sub_targets(v)
+              for k, v in config.items() if k not in ["_target_", "_input_"]}
 
     if isinstance(input_config, str):
         input_keys_for_module = [input_config]
