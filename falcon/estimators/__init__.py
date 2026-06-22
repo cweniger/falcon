@@ -8,18 +8,14 @@ Flow requires the sbi package: pip install falcon-sbi[sbi]
 
 from falcon.estimators.stepwise_base import (
     StepwiseEstimator,
-    LossBasedEstimator,
     TrainingLoopConfig,
 )
-from falcon.estimators.gaussian import Gaussian
 from falcon.estimators.gaussian_fullcov import GaussianFullCov
 
 __all__ = [
     "Flow",
-    "Gaussian",
     "GaussianFullCov",
     "StepwiseEstimator",
-    "LossBasedEstimator",
     "TrainingLoopConfig",
 ]
 
