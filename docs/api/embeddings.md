@@ -79,6 +79,7 @@ momentum-based running statistics.
 embedding:
   _target_: falcon.embeddings.DiagonalWhitener
   _input_: [x]
+  dim: 64    # required: number of input dimensions
 ```
 
 #### hartley_transform

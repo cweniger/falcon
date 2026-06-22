@@ -7,6 +7,7 @@ The abstract base class defining the estimator interface.
 All estimators in Falcon must implement this interface. The base class defines
 methods for:
 
+- Runtime wiring (`setup`)
 - Training (`train`)
 - Sampling (`sample_prior`, `sample_posterior`, `sample_proposal`)
 - Persistence (`save`, `load`)
@@ -18,6 +19,7 @@ methods for:
     options:
       show_source: true
       members:
+        - setup
         - train
         - sample_prior
         - sample_posterior

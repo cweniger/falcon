@@ -12,8 +12,11 @@ falcon/
 │   └── base_estimator  # Estimator interface
 ├── estimators/        # Posterior estimation
 │   ├── flow            # Flow-based posterior estimation
-│   ├── gaussian        # Gaussian posterior estimation
-│   └── flow_density    # Normalizing flow networks
+│   ├── gaussian_fullcov  # Gaussian posterior estimation
+│   ├── flow_density    # Normalizing flow networks
+│   ├── stepwise_base   # Base training loop classes
+│   ├── networks        # MLP builder utilities
+│   └── embedded_posterior  # Embedding + posterior wrapper
 ├── priors/            # Prior distributions
 │   └── product         # Product of independent marginals
 └── embeddings/        # Observation embeddings
@@ -36,7 +39,7 @@ falcon/
 | Class | Description |
 |-------|-------------|
 | [`Flow`](flow.md) | Flow-based posterior estimation (normalizing flows) |
-| [`Gaussian`](gaussian.md) | Full covariance Gaussian posterior |
+| [`GaussianFullCov`](gaussian.md) | Full covariance Gaussian posterior |
 | [`FlowDensity`](flow-density.md) | Normalizing flow `nn.Module` (internal) |
 
 ## Priors
@@ -63,7 +66,7 @@ import falcon
 from falcon import Graph, Node, CompositeNode, DeployedGraph
 
 # Estimators
-from falcon.estimators import Flow, Gaussian
+from falcon.estimators import Flow, GaussianFullCov
 
 # Priors
 from falcon.priors import Product

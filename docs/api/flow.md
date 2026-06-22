@@ -17,32 +17,24 @@ Key features:
 
 ## Configuration
 
-Flow is configured through four groups: `loop`, `network`, `optimizer`, and `inference`.
-The `embedding` configuration sits as a sibling of `network`, not nested inside it.
+All `Flow` parameters are specified **flat** directly under `estimator:` in YAML.
+There are no nested group keys — everything is a top-level keyword argument to `Flow.__init__`.
 
 ```yaml
 estimator:
   _target_: falcon.estimators.Flow
-
-  loop:
-    # Training loop parameters
-
-  network:
-    # Neural network architecture
-
+  max_epochs: 300
+  net_type: nsf
+  lr: 0.01
+  gamma: 0.5
   embedding:
-    # Observation embedding network
-
-  optimizer:
-    # Learning rate and scheduling
-
-  inference:
-    # Sampling and amortization settings
+    _target_: model.MyEmbedding
+    _input_: [x]
 ```
 
 ## Configuration Reference
 
-### Training Loop (`loop`)
+### Training Loop
 
 Controls the training process.
 
@@ -54,16 +46,8 @@ Controls the training process.
 | `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
 | `max_cache_samples` | int | 0 | Maximum samples to cache (0 = cache all available) |
 | `cache_on_device` | bool | false | Keep cached training data on the estimator's device (e.g. GPU) |
-
-```yaml
-loop:
-  max_epochs: 100
-  batch_size: 128
-  early_stop_patience: 16
-  cache_sync_every: 0
-  max_cache_samples: 0
-  cache_on_device: false
-```
+| `prior_epochs` | int | 0 | Epochs to sample from prior before switching to proposal |
+| `device` | str | null | Device string (e.g. `"cuda:0"`); auto-detected if `null` |
 
 #### Data Caching
 
@@ -73,7 +57,7 @@ Training data is loaded into a local cache that is periodically synced with the 
 - **`max_cache_samples`**: Caps the number of samples held in the cache. Set to `0` to cache everything. A positive value randomly subsamples, which helps limit GPU memory usage for very large buffers.
 - **`cache_on_device`**: When `true`, cached tensors are moved to the estimator's device (typically GPU) once during sync rather than per-batch. This eliminates CPU-to-GPU transfer overhead during training but increases device memory usage.
 
-### Network Architecture (`network`)
+### Network Architecture
 
 Defines the neural network structure.
 
@@ -85,18 +69,9 @@ Defines the neural network structure.
 | `use_log_update` | bool | false | Use log-space variance updates |
 | `adaptive_momentum` | bool | false | Sample-dependent momentum |
 
-```yaml
-network:
-  net_type: zuko_nice
-  theta_norm: true
-  norm_momentum: 0.01
-  use_log_update: false
-  adaptive_momentum: false
-```
-
 ### Embedding
 
-The embedding network processes observations before they enter the flow. It is configured as a **sibling** of `network` (not nested inside it).
+The embedding network processes observations before they enter the flow.
 
 ```yaml
 embedding:
@@ -106,7 +81,7 @@ embedding:
 
 See [Embeddings](embeddings.md) for details on the declarative embedding system, including multi-input and nested pipeline configurations.
 
-### Optimizer (`optimizer`)
+### Optimizer
 
 Controls learning rate and scheduling.
 
@@ -114,16 +89,10 @@ Controls learning rate and scheduling.
 |-----------|------|---------|-------------|
 | `lr` | float | 0.01 | Initial learning rate |
 | `lr_decay_factor` | float | 0.1 | LR multiplier when plateau detected |
-| `scheduler_patience` | int | 8 | Epochs without improvement before LR decay |
+| `lr_patience` | int | 8 | Epochs without improvement before LR decay |
+| `betas` | tuple | (0.9, 0.9) | AdamW beta coefficients |
 
-```yaml
-optimizer:
-  lr: 0.01
-  lr_decay_factor: 0.1
-  scheduler_patience: 8
-```
-
-### Inference (`inference`)
+### Inference
 
 Controls posterior sampling and amortization.
 
@@ -133,21 +102,12 @@ Controls posterior sampling and amortization.
 | `discard_samples` | bool | true | Discard low-likelihood samples during training |
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
-| `use_best_models_during_inference` | bool | true | Use best validation model for sampling |
+| `use_best_models` | bool | true | Use best validation model for sampling |
 | `num_proposals` | int | 256 | Candidate samples drawn from the flow for importance sampling |
 | `reference_samples` | int | 128 | Samples used to evaluate the reference posterior |
 | `hypercube_bound` | float | 2.0 | Out-of-bounds threshold in hypercube space |
 | `out_of_bounds_penalty` | float | 100.0 | Log-weight penalty applied to out-of-bounds proposals |
 | `nan_replacement` | float | -100.0 | Log-weight substituted for NaN values during importance sampling |
-
-```yaml
-inference:
-  gamma: 0.5
-  discard_samples: true
-  log_ratio_threshold: -20
-  sample_reference_posterior: false
-  use_best_models_during_inference: true
-```
 
 #### Understanding `gamma` (Amortization)
 
@@ -212,32 +172,23 @@ graph:
 
     estimator:
       _target_: falcon.estimators.Flow
-
-      loop:
-        max_epochs: 100
-        batch_size: 128
-        early_stop_patience: 16
-        cache_sync_every: 0
-        max_cache_samples: 0
-
-      network:
-        net_type: zuko_nice
-        theta_norm: true
-        norm_momentum: 0.01
-
+      max_epochs: 100
+      batch_size: 128
+      early_stop_patience: 16
+      cache_sync_every: 0
+      max_cache_samples: 0
+      net_type: zuko_nice
+      theta_norm: true
+      norm_momentum: 0.01
       embedding:
         _target_: model.E
         _input_: [x]
-
-      optimizer:
-        lr: 0.01
-        lr_decay_factor: 0.1
-        scheduler_patience: 8
-
-      inference:
-        gamma: 0.5
-        discard_samples: true
-        log_ratio_threshold: -20
+      lr: 0.01
+      lr_decay_factor: 0.1
+      lr_patience: 8
+      gamma: 0.5
+      discard_samples: true
+      log_ratio_threshold: -20
 
     ray:
       num_gpus: 0
@@ -275,9 +226,11 @@ buffer:
   simulate_count: 0       # No simulation
   simulate_when_full: false
 
-# Higher gamma for amortization
-inference:
-  gamma: 0.8
+graph:
+  z:
+    estimator:
+      _target_: falcon.estimators.Flow
+      gamma: 0.8          # Higher gamma for amortization
 ```
 
 ### Round-Based Training
@@ -290,10 +243,13 @@ buffer:
   max_samples: 8000
   simulate_count: 8000    # Full renewal
   simulate_when_full: true
-  simulate_interval: 30        # Less frequent
+  simulate_interval: 30
 
-inference:
-  discard_samples: true        # Remove poor samples
+graph:
+  z:
+    estimator:
+      _target_: falcon.estimators.Flow
+      discard_samples: true   # Remove poor samples
 ```
 
 ## Logged Metrics
@@ -302,11 +258,12 @@ Flow logs the following metrics during training:
 
 | Metric | Description |
 |--------|-------------|
-| `loss/train` | Training loss (negative log-likelihood) |
-| `loss/val` | Validation loss |
+| `train:loss` | Training loss (negative log-likelihood) |
+| `val:loss` | Validation loss |
 | `lr` | Current learning rate |
 | `epoch` | Training epoch |
-| `best_val_loss` | Best validation loss seen |
+| `checkpoint:conditional` | Epoch when conditional flow was checkpointed |
+| `checkpoint:marginal` | Epoch when marginal flow was checkpointed |
 
 ## Tips
 
@@ -335,13 +292,5 @@ Flow logs the following metrics during training:
         - load
 
 ## Configuration Classes
-
-::: falcon.estimators.flow.FlowConfig
-
-::: falcon.estimators.flow.NetworkConfig
-
-::: falcon.estimators.flow.OptimizerConfig
-
-::: falcon.estimators.flow.InferenceConfig
 
 ::: falcon.estimators.stepwise_base.TrainingLoopConfig
