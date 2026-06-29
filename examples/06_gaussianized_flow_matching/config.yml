@@ -1,0 +1,87 @@
+# GaussianizedFlowMatching on a moderate 5D bimodal posterior (2^5 = 32 modes).
+
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 06_gfm
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 4096
+  max_samples: 16384
+  validation_samples: 512
+  simulate_count: 1024
+  simulate_when_full: false
+  simulate_interval: 10
+
+graph:
+  z:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -3.0, 3.0]
+        - ['uniform', -3.0, 3.0]
+        - ['uniform', -3.0, 3.0]
+        - ['uniform', -3.0, 3.0]
+        - ['uniform', -3.0, 3.0]
+    estimator:
+      _target_: falcon.estimators.GaussianizedFlowMatching
+      max_epochs: 250
+      lr: 0.005
+      gamma: 0.5
+      embedding:
+        _target_: model.E
+        _input_: [x]
+      batch_size: 256
+      early_stop_patience: 80
+      prior_epochs: 0
+      hidden_dim: 128
+      num_layers: 3
+      momentum: 0.01
+      eig_update_freq: 1
+      flow_hidden: 256
+      flow_layers: 4
+      time_dim: 64
+      ema_decay: 0.999
+      sample_steps: 64
+      density_steps: 32
+      divergence: exact
+      lr_decay_factor: 0.5
+      lr_patience: 25
+      discard_samples: false
+      num_proposals: 256
+      proposal_mixture_beta: 0.5
+      prior_sigma_bound: 6.0
+      use_best_models: true
+    ray:
+      num_gpus: 1
+
+  m:
+    parents: [z]
+    simulator: model.Signal
+
+  n:
+    simulator: model.Noise
+
+  x:
+    parents: [m, n]
+    simulator: model.Add
+    observed: "./data/x_obs.npy"
+
+sample:
+  prior:
+    n: 2000
+  proposal:
+    n: 2000
+  posterior:
+    n: 2000
