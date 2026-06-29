@@ -46,6 +46,7 @@ Documentation = "https://cweniger.github.io/falcon/"
 [tool.setuptools_scm]
 
 [tool.setuptools.packages.find]
+where = ["src"]
 include = ["falcon*"]
 
 [tool.pytest.ini_options]
