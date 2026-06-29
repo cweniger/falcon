@@ -54,6 +54,7 @@ class FlowDensity(torch.nn.Module):
                 momentum=norm_momentum,
                 use_log_update=use_log_update,
                 adaptive_momentum=adaptive_momentum,
+                log_prefix = "FlowDensity:OnlineNorm",
             )
             if theta_norm
             else None

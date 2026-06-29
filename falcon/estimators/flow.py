@@ -44,6 +44,11 @@ class Flow(StepwiseEstimator):
         sample_reference_posterior: Sample reference posterior for proposals.
         use_best_models: Use best-checkpoint networks for sampling.
         num_proposals: Importance sampling proposal count.
+        proposal_mixture_beta: Fraction of proposals drawn from the conditional
+            flow in the multiple-importance-sampling mixture (balance heuristic);
+            the rest are drawn from the marginal flow. ``1.0`` = conditional
+            only (reproduces the single-proposal behaviour), ``0.0`` = marginal
+            only, ``0.5`` = even defensive mixture.
         reference_samples: Reference posterior sample count.
         hypercube_bound: Hypercube clipping bound for proposals.
         out_of_bounds_penalty: Log-weight penalty for out-of-bounds samples.
@@ -82,6 +87,7 @@ class Flow(StepwiseEstimator):
         sample_reference_posterior: bool = False,
         use_best_models: bool = True,
         num_proposals: int = 256,
+        proposal_mixture_beta: float = 0.5,
         reference_samples: int = 128,
         hypercube_bound: float = 2.0,
         out_of_bounds_penalty: float = 100.0,
@@ -111,6 +117,7 @@ class Flow(StepwiseEstimator):
         self.sample_reference_posterior = sample_reference_posterior
         self.use_best_models = use_best_models
         self.num_proposals = num_proposals
+        self.proposal_mixture_beta = proposal_mixture_beta
         self.reference_samples = reference_samples
         self.hypercube_bound = hypercube_bound
         self.out_of_bounds_penalty = out_of_bounds_penalty
@@ -342,24 +349,67 @@ class Flow(StepwiseEstimator):
         s = s.expand(num_samples, *s.shape[1:])
 
         conditional_net.eval()
-        samples_proposals = conditional_net.sample(self.num_proposals, s).detach()
+        marginal_net.eval()
+
+        # Multiple importance sampling: draw the proposals from a mixture of the
+        # conditional and marginal flows -- beta of them from the conditional and
+        # (1 - beta) from the marginal -- keeping the total proposal count fixed.
+        # The marginal flow is the broad/defensive component that covers the tails
+        # the (tempered) conditional under-covers; the conditional gives efficiency
+        # near the mode. The mixture-density weighting below is the balance
+        # heuristic, which is also a defensive mixture in Hesterberg's sense.
+        # Refs:
+        #   Hesterberg (1995), "Weighted Average Importance Sampling and
+        #     Defensive Mixture Distributions", Technometrics 37(2):185-194.
+        #     DOI: 10.1080/00401706.1995.10484303
+        #   Veach & Guibas (1995), "Optimally Combining Sampling Techniques
+        #     for Monte Carlo Rendering", SIGGRAPH '95, pp. 419-428
+        #     DOI: 10.1145/218380.218498
+        #     Introduces multiple importance sampling; includes the balance heuristic.
+        n_cond = int(round(self.proposal_mixture_beta * self.num_proposals))
+        n_cond = max(0, min(self.num_proposals, n_cond))
+        n_marg = self.num_proposals - n_cond
+
+        parts = []
+        if n_cond > 0:
+            parts.append(conditional_net.sample(n_cond, s).detach())
+        if n_marg > 0:
+            parts.append(marginal_net.sample(n_marg, s * 0).detach())
+        samples_proposals = torch.cat(parts, dim=0)
 
         log({
             "importance_sample:proposal_mean": samples_proposals.mean().item(),
             "importance_sample:proposal_std": samples_proposals.std().item(),
         })
 
+        # Both densities must be evaluated on the full pooled set, regardless of
+        # which flow drew each sample (this is what the balance heuristic needs).
         log_prob_cond = conditional_net.log_prob(samples_proposals, s)
-        marginal_net.eval()
         log_prob_marg = marginal_net.log_prob(samples_proposals, s * 0)
 
         mask = (samples_proposals < -self.hypercube_bound) | (samples_proposals > self.hypercube_bound)
         mask = mask.any(dim=-1).float() * self.out_of_bounds_penalty
 
+        # Balance-heuristic mixture density: sum_k (n_k / N) * g_k(theta).
+        total = n_cond + n_marg
+        mix_terms = []
+        if n_cond > 0:
+            mix_terms.append(np.log(n_cond / total) + log_prob_cond)
+        if n_marg > 0:
+            mix_terms.append(np.log(n_marg / total) + log_prob_marg)
+        log_g_mix = (
+            torch.logaddexp(mix_terms[0], mix_terms[1])
+            if len(mix_terms) == 2 else mix_terms[0]
+        )
+
+        # Unnormalised target: tempered posterior c^{gamma/(1+gamma)} for the
+        # proposal distribution; importance-corrected posterior c/m otherwise.
         if mode == "proposal":
-            log_weights = -1.0 / (1.0 + self.gamma) * log_prob_cond - mask
+            log_target = self.gamma / (1.0 + self.gamma) * log_prob_cond
         else:
-            log_weights = -log_prob_marg - mask
+            log_target = log_prob_cond - log_prob_marg
+
+        log_weights = log_target - log_g_mix - mask
 
         log_weights = torch.nan_to_num(log_weights, nan=self.nan_replacement, neginf=self.nan_replacement)
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
