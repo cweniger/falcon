@@ -186,6 +186,34 @@ class _WhitenedFlow(nn.Module):
             outs.append(lp.to(self.whitener._mean.dtype) + logdet)
         return torch.cat(outs, 0).reshape(N, B)
 
+    # ---- held-out NLL in theta_lat space (selection metric) ----
+    @torch.no_grad()
+    def val_nll(self, theta_lat: torch.Tensor, s: torch.Tensor,
+                steps: int, n_probe: int) -> Dict[str, float]:
+        """Per-pair NLL of theta_lat under the model, conditional (s) and marginal (null).
+
+        ``log p(theta_lat | c) = cnf_logprob(whiten(theta_lat), c) + whitener.logdet()`` --
+        a true density that *includes the whitening log-volume term* (``-1/2 sum log lambda``),
+        so it falls as the buffer compresses, unlike the scale-invariant whitened FM loss.
+
+        For *selection* the density only needs to rank checkpoints, so it uses cheap
+        Hutchinson divergence (``n_probe``, noise averages over the val set) and a small
+        ``steps`` (a consistent Euler bias cancels epoch-to-epoch) -- far cheaper than the
+        exact/high-step density used for importance sampling.
+        """
+        M = theta_lat.shape[0]
+        w = self.whitener.whiten(theta_lat).float()                         # (M, P)
+        logdet = self.whitener.logdet()
+        out_dtype = self.whitener._mean.dtype
+
+        def nll(cond: torch.Tensor) -> float:
+            lp = cnf_logprob(self.velocity_ema, w, cond.float(), steps, "hutch", n_probe)
+            lp = lp.to(out_dtype) + logdet
+            lp = torch.nan_to_num(lp, nan=-1e6, neginf=-1e6)
+            return -lp.mean().item()
+
+        return {"nll_cond": nll(s), "nll_marg": nll(self.null_cond(M))}
+
 
 class GaussianizedFlowMatching(StepwiseEstimator):
     """Global-whitener + single-flow (cond/null) posterior estimator.
@@ -237,6 +265,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         divergence: str = "hutch",
         n_probe: int = 4,
         eval_chunk: int = 50000,
+        # cheap CNF density for the val-NLL selection metric (ranking only)
+        val_density_steps: int = 16,
+        val_n_probe: int = 1,
         # optimizer
         betas: tuple = (0.9, 0.9),
         lr_decay_factor: float = 1.0,
@@ -278,6 +309,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.divergence = divergence
         self.n_probe = n_probe
         self.eval_chunk = eval_chunk
+        self.val_density_steps = val_density_steps
+        self.val_n_probe = val_n_probe
         self.betas = betas
         self.lr_decay_factor = lr_decay_factor
         self.lr_patience = lr_patience
@@ -394,18 +427,27 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         if self.discard_samples:
             batch.discard(self._compute_discard_mask(theta_lat, theta_logprob, s.detach()))
 
-        return {"loss": losses["fm_cond"].item(), "loss_aux": losses["fm_marg"].item()}
+        # Train loss = the optimized FM objective (scale-invariant in the whitened space).
+        return {"loss": losses["total"].item(),
+                "fm_cond": losses["fm_cond"].item(), "fm_marg": losses["fm_marg"].item()}
 
     def val_step(self, batch) -> Dict[str, float]:
         _, _, conditions, theta_lat = self._unpack(batch, "val")
         s = self._embed(conditions, train=False)
         self._flow.eval()
         with torch.no_grad():
-            losses = self._flow.training_loss(theta_lat, s)
-        return {"loss": losses["fm_cond"].item(), "loss_aux": losses["fm_marg"].item()}
+            fm = self._flow.training_loss(theta_lat, s)         # diagnostic only
+            nll = self._flow.val_nll(theta_lat, s,              # selection metric (cheap CNF)
+                                     self.val_density_steps, self.val_n_probe)
+        # "loss" = total held-out NLL in theta_lat space (incl. whitening log-volume term);
+        # this drives early-stopping (base loop) AND best-model selection (on_epoch_end),
+        # so models are accepted as the density genuinely sharpens, not when FM wobbles.
+        return {"loss": nll["nll_cond"] + nll["nll_marg"],
+                "nll_cond": nll["nll_cond"], "nll_marg": nll["nll_marg"],
+                "fm_cond": fm["fm_cond"].item(), "fm_marg": fm["fm_marg"].item()}
 
     def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
-        val_loss = val_metrics.get("loss", float("inf")) + val_metrics.get("loss_aux", 0.0)
+        val_loss = val_metrics.get("loss", float("inf"))        # total latent NLL
         if val_loss < self._best_loss:
             self._best_loss = val_loss
             self._best_flow.load_state_dict(self._flow.state_dict())
@@ -413,9 +455,13 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             log({"checkpoint": epoch})
 
         if self._scheduler is not None:
-            self._scheduler.step(val_metrics.get("loss", float("inf")))
+            self._scheduler.step(val_loss)
         lr = self._optimizer.param_groups[0]["lr"]
-        log({"lr": lr, "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item()})
+        log({"lr": lr,
+             "val_nll_cond": val_metrics.get("nll_cond", float("nan")),
+             "val_nll_marg": val_metrics.get("nll_marg", float("nan")),
+             "whiten_logdet": self._flow.whitener.logdet().item(),       # compression term
+             "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item()})
         return {"lr": lr}
 
     def _compute_discard_mask(self, theta_lat, theta_logprob, s):
