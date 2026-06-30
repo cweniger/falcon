@@ -2,9 +2,9 @@
 
 logging:
   wandb:
-    enabled: false
-    project: falcon_examples
-    group: 06_gfm
+    enabled: true
+    project: falcon_flow_example
+      #group: 06_gfm
     dir: ${run_dir}
   local:
     enabled: true
@@ -16,13 +16,13 @@ paths:
   samples: ${run_dir}/samples
 
 buffer:
-  min_samples: 2000
-  max_samples: 2000
+  min_samples: 2048
+  max_samples: 2048
   validation_samples: 256
   simulate_count: 256
   simulate_when_full: true
-  simulate_interval: 1
-  snapshot_every: 10
+  simulate_interval: 2
+  snapshot_every: 5
 
 graph:
   z:
@@ -37,9 +37,9 @@ graph:
         - ['normal', 0.0, 1.0]
     estimator:
       _target_: falcon.estimators.GaussianizedFlowMatching
-      max_epochs: 500
-      lr: 0.01
-      gamma: 1.0
+      max_epochs: 2000
+      lr: 0.001
+      gamma: 0.3
       embedding:
         _target_: model.E
         _input_: [x]
@@ -50,13 +50,15 @@ graph:
       eig_update_freq: 1
       flow_hidden: 256
       flow_layers: 4
-      time_dim: 64
+      time_dim: 4
       ema_decay: 0.9
       sample_steps: 128
       density_steps: 64
       divergence: exact
       lr_decay_factor: 1.0
       lr_patience: 25
+      grad_clip: 1.
+      layernorm: false
       discard_samples: false
       num_proposals: 256
       proposal_mixture_beta: 0.5

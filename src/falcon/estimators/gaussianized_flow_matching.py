@@ -126,7 +126,7 @@ class _WhitenedFlow(nn.Module):
                  momentum: float, min_var: float, eig_update_freq: int,
                  flow_hidden: int, flow_layers: int, time_dim: int, ema_decay: float,
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
-                 eval_chunk: int):
+                 eval_chunk: int, layernorm: bool = True):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -137,7 +137,7 @@ class _WhitenedFlow(nn.Module):
         self.eval_chunk = eval_chunk
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
-        self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim)
+        self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm)
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
@@ -250,13 +250,12 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         density_steps: Euler steps for the backward CNF density.
         divergence: "hutch" (Hutchinson, dimension-independent) or "exact" (d VJPs).
         n_probe: Hutchinson probe count (tunable; trades density noise vs cost).
-        betas, lr_decay_factor, lr_patience: optimizer / scheduler.
+        betas, lr_decay_factor, lr_patience, grad_clip: optimizer / scheduler (grad_clip<=0 disables clipping).
         discard_samples, log_ratio_threshold: training-sample pruning.
         use_best_models: use best-checkpoint networks (flow + whitener) for sampling.
         num_proposals, proposal_mixture_beta: importance sampling.
         prior_sigma_bound, out_of_bounds_penalty: prior-width truncation backstop.
         nan_replacement: fallback for NaN/-inf log-weights.
-        hidden_dim, num_layers, flow_enabled: legacy, unused (kept for config compat).
     """
 
     def __init__(
@@ -282,6 +281,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         flow_hidden: int = 256,
         flow_layers: int = 4,
         time_dim: int = 64,
+        layernorm: bool = True,
         ema_decay: float = 0.9,
         sample_steps: int = 128,
         density_steps: int = 64,
@@ -295,6 +295,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         betas: tuple = (0.9, 0.9),
         lr_decay_factor: float = 1.0,
         lr_patience: int = 8,
+        grad_clip: float = 1.0,
         # inference
         discard_samples: bool = False,
         log_ratio_threshold: float = -20.0,
@@ -304,10 +305,6 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         prior_sigma_bound: float = 6.0,
         out_of_bounds_penalty: float = 100.0,
         nan_replacement: float = -100.0,
-        # legacy / unused (kept so older configs still instantiate)
-        hidden_dim: int = 128,
-        num_layers: int = 3,
-        flow_enabled: bool = True,
     ):
         self.max_epochs = max_epochs
         self.lr = lr
@@ -326,6 +323,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.flow_hidden = flow_hidden
         self.flow_layers = flow_layers
         self.time_dim = time_dim
+        self.layernorm = layernorm
         self.ema_decay = ema_decay
         self.sample_steps = sample_steps
         self.density_steps = density_steps
@@ -337,6 +335,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.betas = betas
         self.lr_decay_factor = lr_decay_factor
         self.lr_patience = lr_patience
+        self.grad_clip = grad_clip
         self.discard_samples = discard_samples
         self.log_ratio_threshold = log_ratio_threshold
         self.use_best_models = use_best_models
@@ -381,7 +380,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             flow_hidden=self.flow_hidden, flow_layers=self.flow_layers, time_dim=self.time_dim,
             ema_decay=self.ema_decay, sample_steps=self.sample_steps,
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
-            eval_chunk=self.eval_chunk,
+            eval_chunk=self.eval_chunk, layernorm=self.layernorm,
         ).to(self.device)
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
@@ -444,6 +443,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self._optimizer.zero_grad()
         losses = self._flow.training_loss(theta_lat, s)
         losses["total"].backward()
+        if self.grad_clip > 0:
+            torch.nn.utils.clip_grad_norm_(
+                (p for m in (self._embedding, self._flow) for p in m.parameters()),
+                self.grad_clip)
         self._optimizer.step()
         self._flow.ema_update()
 

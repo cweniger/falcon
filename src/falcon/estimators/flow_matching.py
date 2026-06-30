@@ -25,7 +25,7 @@ import torch.nn as nn
 class GaussianFourierTime(nn.Module):
     """Random Fourier features for the scalar time input."""
 
-    def __init__(self, dim: int, scale: float = 30.0):
+    def __init__(self, dim: int, scale: float = 3.0):
         super().__init__()
         assert dim % 2 == 0, "time_dim must be even"
         self.register_buffer("freqs", torch.randn(dim // 2) * scale)
@@ -39,7 +39,7 @@ class VelocityField(nn.Module):
     """MLP velocity field v(w, t, s) for conditional flow matching."""
 
     def __init__(self, param_dim: int, cond_dim: int, hidden: int = 256,
-                 layers: int = 4, time_dim: int = 64):
+                 layers: int = 4, time_dim: int = 64, layernorm: bool = True):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -47,7 +47,10 @@ class VelocityField(nn.Module):
         dims = [param_dim + time_dim + cond_dim] + [hidden] * layers
         net = []
         for d_in, d_out in zip(dims[:-1], dims[1:]):
-            net += [nn.Linear(d_in, d_out), nn.SiLU()]
+            net += [nn.Linear(d_in, d_out)]
+            if layernorm:                       # hidden layers only (never the input cat or output)
+                net += [nn.LayerNorm(d_out)]
+            net += [nn.SiLU()]
         net += [nn.Linear(hidden, param_dim)]
         self.net = nn.Sequential(*net)
 
@@ -103,36 +106,31 @@ def euler_sample(net: VelocityField, s: torch.Tensor, param_dim: int, steps: int
     for i in range(steps):
         tb = torch.full((m, 1), i * dt, device=s.device, dtype=w.dtype)
         w = w + dt * net(w, tb, s)
+    if w.abs().max().item() > 3:
+        info("Large Euler sample values: "+str(w))
     return w
 
 
 # --------------------------------------------------------------------------- #
-# Divergence estimators for the CNF density
+# Velocity + divergence tr(∂v/∂w) for the CNF density
 # --------------------------------------------------------------------------- #
-def _vel_div_exact(net, w, t, s):
-    """Velocity and exact divergence tr(∂v/∂w) via param_dim backward passes."""
+def _vel_and_div(net, w, t, s, divergence, n_probe):
+    """Velocity v(w,t,s) and tr(∂v/∂w): exact (param_dim VJPs) or Hutchinson (n_probe probes)."""
     with torch.enable_grad():
         w = w.detach().requires_grad_(True)
         v = net(w, t, s)
-        d = w.shape[1]
         div = torch.zeros(w.shape[0], device=w.device, dtype=w.dtype)
-        for i in range(d):
-            gi = torch.autograd.grad(v[:, i].sum(), w, retain_graph=(i < d - 1))[0]
-            div = div + gi[:, i]
+        if divergence == "exact":
+            for i in range(w.shape[1]):
+                gi = torch.autograd.grad(v[:, i].sum(), w, retain_graph=(i < w.shape[1] - 1))[0]
+                div = div + gi[:, i]
+        else:
+            for _ in range(n_probe):
+                eps = torch.randint(0, 2, w.shape, device=w.device, dtype=w.dtype) * 2 - 1
+                g = torch.autograd.grad(v, w, grad_outputs=eps, retain_graph=True)[0]
+                div = div + (g * eps).sum(1)
+            div = div / n_probe
     return v.detach(), div.detach()
-
-
-def _vel_div_hutch(net, w, t, s, n_probe):
-    """Velocity and Hutchinson estimate of tr(∂v/∂w) via n_probe Rademacher probes."""
-    with torch.enable_grad():
-        w = w.detach().requires_grad_(True)
-        v = net(w, t, s)
-        div = torch.zeros(w.shape[0], device=w.device, dtype=w.dtype)
-        for _ in range(n_probe):
-            eps = torch.randint(0, 2, w.shape, device=w.device, dtype=w.dtype) * 2 - 1
-            g = torch.autograd.grad(v, w, grad_outputs=eps, retain_graph=True)[0]
-            div = div + (g * eps).sum(1)
-    return v.detach(), div.detach() / n_probe
 
 
 # --------------------------------------------------------------------------- #
@@ -149,10 +147,7 @@ def cnf_logprob(net: VelocityField, w: torch.Tensor, s: torch.Tensor, steps: int
     dt = -1.0 / steps
     for i in range(steps):
         tb = torch.full((z.shape[0], 1), 1.0 + i * dt, device=z.device, dtype=z.dtype)
-        if divergence == "exact":
-            v, d = _vel_div_exact(net, z, tb, s)
-        else:
-            v, d = _vel_div_hutch(net, z, tb, s, n_probe)
+        v, d = _vel_and_div(net, z, tb, s, divergence, n_probe)
         z = z + dt * v
         logdet = logdet + dt * d
     base = -0.5 * (z.pow(2).sum(1) + z.shape[1] * math.log(2 * math.pi))
