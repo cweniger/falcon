@@ -85,10 +85,21 @@ class EMA:
 # --------------------------------------------------------------------------- #
 # Training loss
 # --------------------------------------------------------------------------- #
-def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
-    """Flow-matching loss ‖v(w_t, t, s) − (w1 − w0)‖² with w0~N(0,I), t~U(0,1)."""
+def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor,
+            antithetic: bool = True) -> torch.Tensor:
+    """Flow-matching loss ‖v(w_t, t, s) − (w1 − w0)‖² with w0~N(0,I), t~U(0,1).
+
+    antithetic=True pairs each draw with its mirrors w0→−w0 and t→1−t (4 variants
+    per target) -- a variance-reduced estimator of the *same* expectation (both
+    N(0,I) and U(0,1) are symmetric), at 4x the net evaluations.
+    """
     w0 = torch.randn_like(w1)
     t = torch.rand(w1.shape[0], 1, device=w1.device, dtype=w1.dtype)
+    if antithetic:
+        w0 = torch.cat([w0, -w0, w0, -w0], dim=0)
+        t = torch.cat([t, t, 1 - t, 1 - t], dim=0)
+        w1 = w1.repeat(4, 1)
+        s = s.repeat(4, 1)
     wt = (1 - t) * w0 + t * w1
     target = w1 - w0
     return (net(wt, t, s) - target).pow(2).mean()
@@ -106,8 +117,6 @@ def euler_sample(net: VelocityField, s: torch.Tensor, param_dim: int, steps: int
     for i in range(steps):
         tb = torch.full((m, 1), i * dt, device=s.device, dtype=w.dtype)
         w = w + dt * net(w, tb, s)
-    if w.abs().max().item() > 3:
-        info("Large Euler sample values: "+str(w))
     return w
 
 

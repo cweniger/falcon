@@ -126,7 +126,7 @@ class _WhitenedFlow(nn.Module):
                  momentum: float, min_var: float, eig_update_freq: int,
                  flow_hidden: int, flow_layers: int, time_dim: int, ema_decay: float,
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
-                 eval_chunk: int, layernorm: bool = True):
+                 eval_chunk: int, layernorm: bool = True, antithetic: bool = True):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -135,6 +135,7 @@ class _WhitenedFlow(nn.Module):
         self.divergence = divergence
         self.n_probe = n_probe
         self.eval_chunk = eval_chunk
+        self.antithetic = antithetic
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm)
@@ -178,8 +179,8 @@ class _WhitenedFlow(nn.Module):
         w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
         s_n = self.cond(s.float())
         null = self.null_token[None].expand(w.shape[0], self.cond_dim)
-        fm_cond = fm_loss(self.velocity, w, s_n)
-        fm_marg = fm_loss(self.velocity, w, null)
+        fm_cond = fm_loss(self.velocity, w, s_n, self.antithetic)
+        fm_marg = fm_loss(self.velocity, w, null, self.antithetic)
         return {"fm_cond": fm_cond, "fm_marg": fm_marg, "total": fm_cond + fm_marg}
 
     # ---- sampling: (n, B, param) ----  chunked over n*B to bound memory
@@ -282,6 +283,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         flow_layers: int = 4,
         time_dim: int = 64,
         layernorm: bool = True,
+        antithetic: bool = True,
         ema_decay: float = 0.9,
         sample_steps: int = 128,
         density_steps: int = 64,
@@ -324,6 +326,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.flow_layers = flow_layers
         self.time_dim = time_dim
         self.layernorm = layernorm
+        self.antithetic = antithetic
         self.ema_decay = ema_decay
         self.sample_steps = sample_steps
         self.density_steps = density_steps
@@ -380,7 +383,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             flow_hidden=self.flow_hidden, flow_layers=self.flow_layers, time_dim=self.time_dim,
             ema_decay=self.ema_decay, sample_steps=self.sample_steps,
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
-            eval_chunk=self.eval_chunk, layernorm=self.layernorm,
+            eval_chunk=self.eval_chunk, layernorm=self.layernorm, antithetic=self.antithetic,
         ).to(self.device)
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:

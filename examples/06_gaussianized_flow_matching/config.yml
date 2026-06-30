@@ -38,7 +38,7 @@ graph:
     estimator:
       _target_: falcon.estimators.GaussianizedFlowMatching
       max_epochs: 2000
-      lr: 0.001
+      lr: 0.0005
       gamma: 0.3
       embedding:
         _target_: model.E
@@ -57,7 +57,7 @@ graph:
       divergence: exact
       lr_decay_factor: 1.0
       lr_patience: 25
-      grad_clip: 1.
+      grad_clip: 0.
       layernorm: false
       discard_samples: false
       num_proposals: 256
