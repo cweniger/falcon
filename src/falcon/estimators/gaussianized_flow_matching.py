@@ -142,6 +142,13 @@ class _WhitenedFlow(nn.Module):
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
 
+        # EMA mean/std of the summary, mirroring GaussianFullCov's _input_mean/_input_std:
+        # keep the conditioning at ~unit scale so it neither swamps w nor buries the fine
+        # x-dependence that pins the zoomed posterior. (null stays learnable in this space.)
+        self.cond_momentum = momentum
+        self.register_buffer("_cond_mean", torch.zeros(cond_dim))
+        self.register_buffer("_cond_std", torch.ones(cond_dim))
+
     # ---- EMA ----
     def ema_update(self) -> None:
         self._ema.update(self.velocity_ema, self.velocity)
@@ -149,13 +156,29 @@ class _WhitenedFlow(nn.Module):
     def null_cond(self, batch: int) -> torch.Tensor:
         return self.null_token[None].expand(batch, self.cond_dim)
 
+    # ---- summary normalization (EMA diagonal whitening of the conditioning) ----
+    @torch.no_grad()
+    def _update_cond_stats(self, s: torch.Tensor) -> None:
+        m = self.cond_momentum
+        s = s.detach().to(self._cond_mean.dtype)
+        self._cond_mean = (1 - m) * self._cond_mean + m * s.mean(dim=0)
+        n = s.shape[0]
+        var = ((s - self._cond_mean) ** 2).sum(dim=0) / max(n - 1, 1)
+        self._cond_std = (1 - m) * self._cond_std + m * var.clamp(min=1e-12).sqrt()
+
+    def cond(self, s: torch.Tensor) -> torch.Tensor:
+        """Normalize the conditional summary to ~unit scale (frozen stats outside training)."""
+        return (s.to(self._cond_mean.dtype) - self._cond_mean) / self._cond_std
+
     # ---- training ----
     def training_loss(self, theta_lat: torch.Tensor, s: torch.Tensor) -> Dict[str, torch.Tensor]:
         if self.training:
             self.whitener.update(theta_lat)
+            self._update_cond_stats(s)
         w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
+        s_n = self.cond(s.float())
         null = self.null_token[None].expand(w.shape[0], self.cond_dim)
-        fm_cond = fm_loss(self.velocity, w, s.float())
+        fm_cond = fm_loss(self.velocity, w, s_n)
         fm_marg = fm_loss(self.velocity, w, null)
         return {"fm_cond": fm_cond, "fm_marg": fm_marg, "total": fm_cond + fm_marg}
 
@@ -212,7 +235,7 @@ class _WhitenedFlow(nn.Module):
             lp = torch.nan_to_num(lp, nan=-1e6, neginf=-1e6)
             return -lp.mean().item()
 
-        return {"nll_cond": nll(s), "nll_marg": nll(self.null_cond(M))}
+        return {"nll_cond": nll(self.cond(s)), "nll_marg": nll(self.null_cond(M))}
 
 
 class GaussianizedFlowMatching(StepwiseEstimator):
@@ -467,7 +490,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
     def _compute_discard_mask(self, theta_lat, theta_logprob, s):
         self._flow.eval()
         with torch.no_grad():
-            log_prob = self._flow.log_prob(theta_lat.unsqueeze(0), s).squeeze(0).cpu()
+            log_prob = self._flow.log_prob(
+                theta_lat.unsqueeze(0), self._flow.cond(s)).squeeze(0).cpu()
         return (log_prob - theta_logprob.cpu()) < self.log_ratio_threshold
 
     # ==================== Sampling ====================
@@ -501,6 +525,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         flow = self._best_flow if use_best else self._flow
         s = self._embed(conditions, train=False, use_best_fit=use_best).detach()
         s = s.expand(num_samples, *s.shape[1:])                    # (num_samples, C)
+        s = flow.cond(s)                                          # normalize summary (frozen stats)
         null = flow.null_cond(num_samples)                        # (num_samples, C)
 
         flow.eval()
