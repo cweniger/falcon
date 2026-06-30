@@ -16,10 +16,10 @@ paths:
   samples: ${run_dir}/samples
 
 buffer:
-  min_samples: 4096
-  max_samples: 16384
-  validation_samples: 512
-  simulate_count: 1024
+  min_samples: 40000
+  max_samples: 40000
+  validation_samples: 256
+  simulate_count: 0
   simulate_when_full: false
   simulate_interval: 10
 
@@ -29,34 +29,32 @@ graph:
     simulator:
       _target_: falcon.priors.Product
       priors:
-        - ['uniform', -3.0, 3.0]
-        - ['uniform', -3.0, 3.0]
-        - ['uniform', -3.0, 3.0]
-        - ['uniform', -3.0, 3.0]
-        - ['uniform', -3.0, 3.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
     estimator:
       _target_: falcon.estimators.GaussianizedFlowMatching
-      max_epochs: 250
-      lr: 0.005
-      gamma: 0.5
+      max_epochs: 500
+      lr: 0.01
+      gamma: 0.1
       embedding:
         _target_: model.E
         _input_: [x]
       batch_size: 256
-      early_stop_patience: 80
+      early_stop_patience: 800
       prior_epochs: 0
-      hidden_dim: 128
-      num_layers: 3
-      momentum: 0.01
+      momentum: 0.01           # global whitener EMA
       eig_update_freq: 1
       flow_hidden: 256
       flow_layers: 4
       time_dim: 64
-      ema_decay: 0.999
-      sample_steps: 64
-      density_steps: 32
+      ema_decay: 0.9
+      sample_steps: 128
+      density_steps: 64
       divergence: exact
-      lr_decay_factor: 0.5
+      lr_decay_factor: 1.0
       lr_patience: 25
       discard_samples: false
       num_proposals: 256

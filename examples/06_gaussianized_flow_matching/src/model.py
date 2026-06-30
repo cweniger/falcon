@@ -11,7 +11,7 @@ import falcon
 
 DIM = 5
 SIGMA = 0.1
-SHIFT = 0.5
+SHIFT = 0.5   # unimodal: posterior z|x ~ N(x, ~SIGMA^2)
 
 
 class Signal:
@@ -38,7 +38,7 @@ class E(torch.nn.Module):
     def __init__(self, log_prefix=None):
         super().__init__()
         from falcon.embeddings import LazyOnlineNorm
-        self.norm = LazyOnlineNorm(momentum=5e-3)
+        self.norm = LazyOnlineNorm(momentum=1e-2)
         self.linear = torch.nn.Linear(DIM, DIM * 2)
 
     def forward(self, x, *args):

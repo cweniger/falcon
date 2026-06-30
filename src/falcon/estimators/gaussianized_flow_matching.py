@@ -1,26 +1,29 @@
 """Gaussianized flow-matching posterior estimator.
 
-Combines a learned Gaussian preconditioner with flow-matching residual models:
+A deliberately simple, dynamic-SBI-friendly design:
 
-  * A conditional Gaussian ``N(mu(x), Sigma)`` and an unconditional Gaussian
-    ``N(mu0, Sigma0)`` (both in the prior's standard-normal latent space, with the
-    GaussianFullCov machinery: MLP mean, EMA full covariance, eigendecomposition,
-    and prior-width clamping of the covariance).
-  * For each, a conditional flow-matching velocity field that learns the *residual*
-    non-Gaussian structure in the whitened space ``w = Sigma^{-1/2}(theta_lat - mu)``,
-    which is approximately N(0, I) -- so the flow only has to model what the Gaussian
-    misses (multimodality, skew).
+  * A **single global** mean ``mu`` and covariance ``Sigma`` of the current training
+    distribution (the prior's standard-normal latent ``theta_lat``), tracked by a plain
+    EMA -- no conditional MLP, so there is nothing to over-fit per-observation. The
+    whitening ``w = Sigma^{-1/2}(theta_lat - mu)`` standardises the buffer to ~N(0,I);
+    its eigenvalues are clamped at the prior variance (= 1) so the posterior support can
+    never inflate beyond the prior. In sequential / dynamic SBI the buffer concentrates
+    each round, so this global whitening *zooms* automatically.
+
+  * A **single** flow-matching velocity field that learns the residual structure in the
+    whitened space, used both **conditionally** (on the embedding ``s = E(x)``) and
+    **unconditionally** (on a learnable NULL token) -- classifier-free style. The
+    conditional density is the posterior proposal, the null density is the marginal.
 
 Sampling / density feed the same importance-sampling machinery as ``Flow``, adapted to
-the standard-normal latent space: the latent prior is N(0, I) (not uniform), so the
-analytic log N(0,I) is added to the importance weights, and a prior-width truncation
-backstops runaway-wide proposals.
+the standard-normal latent space: the latent prior is N(0, I), so log N(0,I) is added to
+the importance weights, and a prior-width truncation backstops runaway-wide proposals.
 """
 
 import copy
 import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -31,128 +34,166 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 from falcon.core.logger import log, debug
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.stepwise_base import StepwiseEstimator
-from falcon.estimators.gaussian_fullcov import _GaussianPosterior
 from falcon.estimators.flow_matching import (
     VelocityField, EMA, fm_loss, euler_sample, cnf_logprob,
 )
 from falcon.embeddings import instantiate_embedding
 
 
-class _ClampedGaussian(_GaussianPosterior):
-    """Gaussian preconditioner whose covariance is clamped at the prior width.
+class _GlobalWhitener(nn.Module):
+    """Single global mean/covariance of ``theta_lat``, EMA-tracked.
 
-    In the standard-normal latent space the prior variance is 1, so a posterior is
-    never *wider* than the prior. Clamping the residual-covariance eigenvalues at 1
-    (the ``_output_std.clamp(max=1.0)`` in the base handles the std layer) stabilises
-    parameters that are hard to constrain in a unimodal way -- they gracefully revert
-    to the prior instead of inflating.
+    Whitening uses the **symmetric (ZCA) square root** ``w = (theta_lat - mu) @ Sigma^{-1/2}``
+    with ``Sigma^{-1/2} = V diag(lambda^{-1/2}) V^T``. This stays in the original coordinate
+    frame and is a function of ``Sigma`` alone, so eigenvector jitter / sign flips in
+    (near-)degenerate subspaces cancel -- unlike the PCA whitening ``(.) @ V / sqrt(lambda)``
+    (rotates into a jittering eigenframe -> the flow's target spins and smears to a blob)
+    or Cholesky (stable per step, but its triangular factor ties the whitening directions
+    to an arbitrary axis order, so they swing as correlations drift).
+
+    The eigenvalues are clamped to ``[min_var, 1]`` -- the upper clamp at the prior variance
+    keeps the posterior support inside the prior, the lower clamp bounds the zoom. There is
+    no conditioning and no MLP, so the whitener cannot memorise samples -- it only tracks
+    the buffer scale.
     """
 
-    def _update_eigendecomp(self) -> None:
-        eigvals, eigvecs = torch.linalg.eigh(self._residual_cov)
-        self._residual_eigvals = eigvals.clamp(min=self.min_var, max=1.0)
-        self._residual_eigvecs = eigvecs
+    def __init__(self, param_dim: int, momentum: float, min_var: float, eig_update_freq: int):
+        super().__init__()
+        self.param_dim = param_dim
+        self.momentum = momentum
+        self.min_var = min_var
+        self.eig_update_freq = eig_update_freq
+        self._step = 0
+        self.register_buffer("_mean", torch.zeros(param_dim, dtype=torch.float64))
+        self.register_buffer("_cov", torch.eye(param_dim, dtype=torch.float64))
+        self.register_buffer("_eigvals", torch.ones(param_dim, dtype=torch.float64))
+        self.register_buffer("_inv_sqrt", torch.eye(param_dim, dtype=torch.float64))   # Sigma^{-1/2}
+        self.register_buffer("_sqrt", torch.eye(param_dim, dtype=torch.float64))       # Sigma^{1/2}
+
+    def to(self, *args, **kwargs):
+        """Move module, preserving the float64 statistics buffers."""
+        result = super().to(*args, **kwargs)
+        for name in ("_mean", "_cov", "_eigvals", "_inv_sqrt", "_sqrt"):
+            setattr(result, name, getattr(result, name).to(torch.float64))
+        return result
+
+    @torch.no_grad()
+    def update(self, theta_lat: torch.Tensor) -> None:
+        m = self.momentum
+        x = theta_lat.to(self._mean.dtype)
+        self._mean = (1 - m) * self._mean + m * x.mean(dim=0)
+        centered = x - self._mean
+        n = x.shape[0]
+        eye = torch.eye(self.param_dim, device=x.device, dtype=x.dtype)
+        batch_cov = (centered.T @ centered) / max(n - 1, 1) + self.min_var * eye
+        self._cov = (1 - m) * self._cov + m * batch_cov
+        self._step += 1
+        if self._step % self.eig_update_freq == 0:
+            self._refresh()
+
+    def _refresh(self) -> None:
+        eigvals, eigvecs = torch.linalg.eigh(self._cov)
+        eigvals = eigvals.clamp(min=self.min_var, max=1.0)
+        self._eigvals = eigvals
+        self._inv_sqrt = (eigvecs / eigvals.sqrt()) @ eigvecs.T   # V diag(1/sqrt) V^T
+        self._sqrt = (eigvecs * eigvals.sqrt()) @ eigvecs.T       # V diag(sqrt)   V^T
+
+    def whiten(self, theta_lat: torch.Tensor) -> torch.Tensor:
+        return (theta_lat.to(self._inv_sqrt.dtype) - self._mean) @ self._inv_sqrt
+
+    def unwhiten(self, w: torch.Tensor) -> torch.Tensor:
+        return self._mean + w.to(self._sqrt.dtype) @ self._sqrt
+
+    def logdet(self) -> torch.Tensor:
+        """log|d w / d theta_lat| folded into log_prob: -1/2 sum log lambda."""
+        return -0.5 * torch.log(self._eigvals).sum()
 
 
-class _GaussianizedFlow(nn.Module):
-    """One Gaussian-preconditioner + flow-matching pair.
+class _WhitenedFlow(nn.Module):
+    """Global whitener + one flow-matching field (conditional via ``s``, marginal via NULL).
 
-    Exposes the same surface as ``FlowDensity`` so the importance sampler is reusable:
-        training_loss(theta_lat, s) -> dict of scalar losses
+    FlowDensity-compatible surface for the importance sampler:
+        training_loss(theta_lat, s) -> {"fm_cond", "fm_marg", "total"}
         sample(n, s)                -> (n, B, param) latent samples
         log_prob(theta_lat, s)      -> (N, B) latent log-density
 
-    All densities/samples are over ``theta_lat`` (the standard-normal latent space);
-    the constant whitening Jacobian ``-1/2 sum log lambda`` is folded into log_prob.
+    Pass the real embedding ``s`` for the conditional branch and ``null_cond(B)`` for the
+    marginal branch. All densities/samples are over ``theta_lat``; the constant whitening
+    Jacobian is folded into log_prob.
     """
 
-    def __init__(self, param_dim: int, cond_dim: int, *, hidden_dim: int, num_layers: int,
+    def __init__(self, param_dim: int, cond_dim: int, *,
                  momentum: float, min_var: float, eig_update_freq: int,
                  flow_hidden: int, flow_layers: int, time_dim: int, ema_decay: float,
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
                  eval_chunk: int):
         super().__init__()
         self.param_dim = param_dim
+        self.cond_dim = cond_dim
         self.sample_steps = sample_steps
         self.density_steps = density_steps
         self.divergence = divergence
         self.n_probe = n_probe
         self.eval_chunk = eval_chunk
 
-        self.gaussian = _ClampedGaussian(
-            param_dim, cond_dim, hidden_dim=hidden_dim, num_layers=num_layers,
-            momentum=momentum, min_var=min_var, eig_update_freq=eig_update_freq,
-        )
+        self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim)
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
+        self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
 
     # ---- EMA ----
     def ema_update(self) -> None:
         self._ema.update(self.velocity_ema, self.velocity)
 
-    # ---- whitening (float64, using the Gaussian's mu/Sigma) ----
-    def _whiten(self, theta_lat: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-        V = self.gaussian._residual_eigvecs
-        lam = self.gaussian._residual_eigvals
-        diff = theta_lat.to(V.dtype) - mu
-        return (diff @ V) / lam.sqrt()
-
-    def _unwhiten(self, w: torch.Tensor, mu: torch.Tensor) -> torch.Tensor:
-        V = self.gaussian._residual_eigvecs
-        lam = self.gaussian._residual_eigvals
-        return mu + (lam.sqrt() * w.to(V.dtype)) @ V.T
-
-    def _logdet_whiten(self) -> torch.Tensor:
-        return -0.5 * torch.log(self.gaussian._residual_eigvals).sum()
+    def null_cond(self, batch: int) -> torch.Tensor:
+        return self.null_token[None].expand(batch, self.cond_dim)
 
     # ---- training ----
     def training_loss(self, theta_lat: torch.Tensor, s: torch.Tensor) -> Dict[str, torch.Tensor]:
-        nll = self.gaussian.loss(theta_lat, s)                # trains mu, updates EMA Sigma
-        mu = self.gaussian._forward_mean(s).detach()
-        w = self._whiten(theta_lat, mu).detach().float()      # flow sees a fixed whitened target
-        fm = fm_loss(self.velocity, w, s.float())
-        return {"nll": nll, "fm": fm, "total": nll + fm}
+        if self.training:
+            self.whitener.update(theta_lat)
+        w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
+        null = self.null_token[None].expand(w.shape[0], self.cond_dim)
+        fm_cond = fm_loss(self.velocity, w, s.float())
+        fm_marg = fm_loss(self.velocity, w, null)
+        return {"fm_cond": fm_cond, "fm_marg": fm_marg, "total": fm_cond + fm_marg}
 
     # ---- sampling: (n, B, param) ----  chunked over n*B to bound memory
     @torch.no_grad()
     def sample(self, n: int, s: torch.Tensor) -> torch.Tensor:
         B, C, P = s.shape[0], s.shape[1], self.param_dim
-        mu = self.gaussian._forward_mean(s)                          # (B, P) f64
         s_flat = s[None].expand(n, B, C).reshape(n * B, C).float()
-        mu_flat = mu[None].expand(n, B, P).reshape(n * B, P)
         outs = []
         for i in range(0, n * B, self.eval_chunk):
             sc = s_flat[i:i + self.eval_chunk]
             w = euler_sample(self.velocity_ema, sc, P, self.sample_steps)
-            outs.append(self._unwhiten(w, mu_flat[i:i + self.eval_chunk]))
+            outs.append(self.whitener.unwhiten(w))
         return torch.cat(outs, 0).reshape(n, B, P)                   # (n, B, P) f64
 
     # ---- density: (N, B, param) -> (N, B) ----  chunked over N*B
     def log_prob(self, theta_lat: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         N, B, P = theta_lat.shape
         C = s.shape[1]
-        mu = self.gaussian._forward_mean(s).detach()                # (B, P)
-        mu_flat = mu[None].expand(N, B, P).reshape(N * B, P)
-        w_all = self._whiten(theta_lat.reshape(N * B, P), mu_flat).float()
+        w_all = self.whitener.whiten(theta_lat.reshape(N * B, P)).float()
         s_flat = s[None].expand(N, B, C).reshape(N * B, C).float()
-        logdet = self._logdet_whiten()
+        logdet = self.whitener.logdet()
         outs = []
         for i in range(0, N * B, self.eval_chunk):
             lp = cnf_logprob(self.velocity_ema, w_all[i:i + self.eval_chunk],
                              s_flat[i:i + self.eval_chunk],
                              self.density_steps, self.divergence, self.n_probe)
-            outs.append(lp.to(mu.dtype) + logdet)
+            outs.append(lp.to(self.whitener._mean.dtype) + logdet)
         return torch.cat(outs, 0).reshape(N, B)
 
 
 class GaussianizedFlowMatching(StepwiseEstimator):
-    """Gaussian-preconditioned flow-matching posterior estimator.
+    """Global-whitener + single-flow (cond/null) posterior estimator.
 
     Args:
         max_epochs, lr, gamma, embedding, device: as in other estimators.
         batch_size, early_stop_patience, prior_epochs, cache_*: training loop.
-        hidden_dim, num_layers, momentum, min_var, eig_update_freq: Gaussian preconditioner.
+        momentum, min_var, eig_update_freq: global whitener EMA / eigendecomp.
         flow_hidden, flow_layers, time_dim, ema_decay: flow-matching velocity net.
         sample_steps: Euler steps for sampling.
         density_steps: Euler steps for the backward CNF density.
@@ -160,10 +201,11 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         n_probe: Hutchinson probe count (tunable; trades density noise vs cost).
         betas, lr_decay_factor, lr_patience: optimizer / scheduler.
         discard_samples, log_ratio_threshold: training-sample pruning.
-        use_best_models: use best-checkpoint networks for sampling.
+        use_best_models: use best-checkpoint networks (flow + whitener) for sampling.
         num_proposals, proposal_mixture_beta: importance sampling.
         prior_sigma_bound, out_of_bounds_penalty: prior-width truncation backstop.
         nan_replacement: fallback for NaN/-inf log-weights.
+        hidden_dim, num_layers, flow_enabled: legacy, unused (kept for config compat).
     """
 
     def __init__(
@@ -181,9 +223,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         cache_on_device: bool = False,
         cache_sync_every: int = 0,
         max_cache_samples: int = 0,
-        # Gaussian preconditioner
-        hidden_dim: int = 128,
-        num_layers: int = 3,
+        # global whitener
         momentum: float = 0.01,
         min_var: float = 1e-20,
         eig_update_freq: int = 1,
@@ -191,15 +231,15 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         flow_hidden: int = 256,
         flow_layers: int = 4,
         time_dim: int = 64,
-        ema_decay: float = 0.999,
-        sample_steps: int = 64,
+        ema_decay: float = 0.9,
+        sample_steps: int = 128,
         density_steps: int = 64,
         divergence: str = "hutch",
         n_probe: int = 4,
         eval_chunk: int = 50000,
         # optimizer
         betas: tuple = (0.9, 0.9),
-        lr_decay_factor: float = 0.5,
+        lr_decay_factor: float = 1.0,
         lr_patience: int = 8,
         # inference
         discard_samples: bool = False,
@@ -210,6 +250,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         prior_sigma_bound: float = 6.0,
         out_of_bounds_penalty: float = 100.0,
         nan_replacement: float = -100.0,
+        # legacy / unused (kept so older configs still instantiate)
+        hidden_dim: int = 128,
+        num_layers: int = 3,
+        flow_enabled: bool = True,
     ):
         self.max_epochs = max_epochs
         self.lr = lr
@@ -222,8 +266,6 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.cache_on_device = cache_on_device
         self.cache_sync_every = cache_sync_every
         self.max_cache_samples = max_cache_samples
-        self.hidden_dim = hidden_dim
-        self.num_layers = num_layers
         self.momentum = momentum
         self.min_var = min_var
         self.eig_update_freq = eig_update_freq
@@ -266,10 +308,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
         self._embedding = instantiate_embedding(self.embedding).to(self.device)
 
-        self._cond = None
-        self._marg = None
-        self._best_cond = None
-        self._best_marg = None
+        self._flow = None
+        self._best_flow = None
         self._best_embedding = None
         self._init_parameters = None
         self._best_loss = float("inf")
@@ -278,10 +318,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
     # ==================== Initialization ====================
 
-    def _build_module(self, param_dim: int, cond_dim: int) -> _GaussianizedFlow:
-        return _GaussianizedFlow(
+    def _build_module(self, param_dim: int, cond_dim: int) -> _WhitenedFlow:
+        return _WhitenedFlow(
             param_dim, cond_dim,
-            hidden_dim=self.hidden_dim, num_layers=self.num_layers,
             momentum=self.momentum, min_var=self.min_var, eig_update_freq=self.eig_update_freq,
             flow_hidden=self.flow_hidden, flow_layers=self.flow_layers, time_dim=self.time_dim,
             ema_decay=self.ema_decay, sample_steps=self.sample_steps,
@@ -298,19 +337,21 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         theta_lat = self.simulator_instance.inverse(theta.to(self.device), mode="standard_normal")
 
         param_dim, cond_dim = theta_lat.shape[1], s.shape[1]
-        self._cond = self._build_module(param_dim, cond_dim)
-        self._marg = self._build_module(param_dim, cond_dim)
-        self._best_cond = copy.deepcopy(self._cond)
-        self._best_marg = copy.deepcopy(self._marg)
+        self._flow = self._build_module(param_dim, cond_dim)
+        self._best_flow = copy.deepcopy(self._flow)
         self._best_embedding = copy.deepcopy(self._embedding)
 
         params = [
-            p for m in (self._embedding, self._cond, self._marg)
+            p for m in (self._embedding, self._flow)
             for p in m.parameters() if p.requires_grad
         ]
         self._optimizer = AdamW(params, lr=self.lr, betas=self.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer, mode="min", factor=self.lr_decay_factor, patience=self.lr_patience,
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer, mode="min",
+                factor=self.lr_decay_factor, patience=self.lr_patience,
+            )
+            if self.lr_decay_factor < 1.0 else None  # 1.0 = LR decay off
         )
         self.networks_initialized = True
         debug(f"Networks initialized: param_dim={param_dim}, cond_dim={cond_dim}")
@@ -337,57 +378,50 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         theta_lat = self.simulator_instance.inverse(theta, mode="standard_normal")
         return theta, theta_logprob, conditions, theta_lat
 
-    def _modules_loss(self, theta_lat, s, train: bool):
-        mode = (self._cond.train, self._marg.train) if train else (self._cond.eval, self._marg.eval)
-        mode[0](); mode[1]()
-        cond = self._cond.training_loss(theta_lat, s)
-        marg = self._marg.training_loss(theta_lat, s * 0)
-        return cond, marg
-
     def train_step(self, batch) -> Dict[str, float]:
         theta, theta_logprob, conditions, theta_lat = self._unpack(batch, "train")
         if not self.networks_initialized:
             self._initialize_networks(theta, conditions)
 
         s = self._embed(conditions, train=True)
+        self._flow.train()
         self._optimizer.zero_grad()
-        cond, marg = self._modules_loss(theta_lat, s, train=True)
-        (cond["total"] + marg["total"]).backward()
+        losses = self._flow.training_loss(theta_lat, s)
+        losses["total"].backward()
         self._optimizer.step()
-        self._cond.ema_update()
-        self._marg.ema_update()
+        self._flow.ema_update()
 
         if self.discard_samples:
             batch.discard(self._compute_discard_mask(theta_lat, theta_logprob, s.detach()))
 
-        return {"loss": cond["fm"].item(), "loss_aux": marg["fm"].item(),
-                "nll": cond["nll"].item()}
+        return {"loss": losses["fm_cond"].item(), "loss_aux": losses["fm_marg"].item()}
 
     def val_step(self, batch) -> Dict[str, float]:
         _, _, conditions, theta_lat = self._unpack(batch, "val")
         s = self._embed(conditions, train=False)
+        self._flow.eval()
         with torch.no_grad():
-            cond, marg = self._modules_loss(theta_lat, s, train=False)
-        return {"loss": cond["fm"].item(), "loss_aux": marg["fm"].item()}
+            losses = self._flow.training_loss(theta_lat, s)
+        return {"loss": losses["fm_cond"].item(), "loss_aux": losses["fm_marg"].item()}
 
     def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
         val_loss = val_metrics.get("loss", float("inf")) + val_metrics.get("loss_aux", 0.0)
         if val_loss < self._best_loss:
             self._best_loss = val_loss
-            self._best_cond.load_state_dict(self._cond.state_dict())
-            self._best_marg.load_state_dict(self._marg.state_dict())
+            self._best_flow.load_state_dict(self._flow.state_dict())
             self._best_embedding.load_state_dict(self._embedding.state_dict())
             log({"checkpoint": epoch})
 
-        self._scheduler.step(val_metrics.get("loss", float("inf")))
+        if self._scheduler is not None:
+            self._scheduler.step(val_metrics.get("loss", float("inf")))
         lr = self._optimizer.param_groups[0]["lr"]
-        log({"lr": lr})
+        log({"lr": lr, "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item()})
         return {"lr": lr}
 
     def _compute_discard_mask(self, theta_lat, theta_logprob, s):
-        self._cond.eval()
+        self._flow.eval()
         with torch.no_grad():
-            log_prob = self._cond.log_prob(theta_lat.unsqueeze(0), s).squeeze(0).cpu()
+            log_prob = self._flow.log_prob(theta_lat.unsqueeze(0), s).squeeze(0).cpu()
         return (log_prob - theta_logprob.cpu()) < self.log_ratio_threshold
 
     # ==================== Sampling ====================
@@ -417,26 +451,26 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         assert conditions, "Conditions must be provided."
         conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
 
-        use_best = self.use_best_models and self._best_cond is not None
-        cond_net = self._best_cond if use_best else self._cond
-        marg_net = self._best_marg if use_best else self._marg
+        use_best = self.use_best_models and self._best_flow is not None
+        flow = self._best_flow if use_best else self._flow
         s = self._embed(conditions, train=False, use_best_fit=use_best).detach()
-        s = s.expand(num_samples, *s.shape[1:])
+        s = s.expand(num_samples, *s.shape[1:])                    # (num_samples, C)
+        null = flow.null_cond(num_samples)                        # (num_samples, C)
 
-        cond_net.eval(); marg_net.eval()
+        flow.eval()
 
         # Multiple-importance-sampling proposal mixture (balance heuristic), as in Flow.
         n_cond = max(0, min(self.num_proposals, int(round(self.proposal_mixture_beta * self.num_proposals))))
         n_marg = self.num_proposals - n_cond
         parts = []
         if n_cond > 0:
-            parts.append(cond_net.sample(n_cond, s))
+            parts.append(flow.sample(n_cond, s))
         if n_marg > 0:
-            parts.append(marg_net.sample(n_marg, s * 0))
+            parts.append(flow.sample(n_marg, null))
         proposals = torch.cat(parts, dim=0)                       # (num_proposals, num_samples, P)
 
-        log_prob_cond = cond_net.log_prob(proposals, s)
-        log_prob_marg = marg_net.log_prob(proposals, s * 0)
+        log_prob_cond = flow.log_prob(proposals, s)
+        log_prob_marg = flow.log_prob(proposals, null)
 
         # Latent prior is N(0, I) (NOT uniform): it enters the weights analytically.
         log_prior = -0.5 * (proposals.pow(2).sum(-1) + self.param_dim * np.log(2 * np.pi))
@@ -480,8 +514,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         node_dir = Path(node_dir)
         if not self.networks_initialized:
             raise RuntimeError("Networks not initialized.")
-        torch.save(self._best_cond.state_dict(), node_dir / "conditional.pth")
-        torch.save(self._best_marg.state_dict(), node_dir / "marginal.pth")
+        torch.save(self._best_flow.state_dict(), node_dir / "flow.pth")
         torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
         torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
@@ -499,10 +532,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         init = torch.load(node_dir / "init_parameters.pth")
         self._initialize_networks(init[0], init[1])
 
-        self._best_cond.load_state_dict(torch.load(node_dir / "conditional.pth"))
-        self._best_marg.load_state_dict(torch.load(node_dir / "marginal.pth"))
-        self._cond.load_state_dict(self._best_cond.state_dict())
-        self._marg.load_state_dict(self._best_marg.state_dict())
+        self._best_flow.load_state_dict(torch.load(node_dir / "flow.pth"))
+        self._flow.load_state_dict(self._best_flow.state_dict())
         if (node_dir / "embedding.pth").exists():
             self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
             self._embedding.load_state_dict(self._best_embedding.state_dict())
