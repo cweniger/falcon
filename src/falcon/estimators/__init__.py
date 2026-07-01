@@ -15,6 +15,7 @@ from falcon.estimators.gaussian_fullcov import GaussianFullCov
 __all__ = [
     "Flow",
     "GaussianFullCov",
+    "GaussianizedFlowMatching",
     "StepwiseEstimator",
     "TrainingLoopConfig",
 ]
@@ -22,6 +23,7 @@ __all__ = [
 # Lazy imports for sbi-dependent classes
 _LAZY_IMPORTS = {
     "Flow": "falcon.estimators.flow",
+    "GaussianizedFlowMatching": "falcon.estimators.gaussianized_flow_matching",
 }
 
 
