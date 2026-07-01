@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logger import log, debug
+from falcon.core.logger import log, debug, info
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.stepwise_base import StepwiseEstimator
 from falcon.estimators.flow_matching import (
@@ -256,7 +256,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         divergence: "hutch" (Hutchinson, dimension-independent) or "exact" (d VJPs).
         n_probe: Hutchinson probe count (tunable; trades density noise vs cost).
         betas, lr_decay_factor, lr_patience, grad_clip: optimizer / scheduler (grad_clip<=0 disables clipping).
-        discard_samples, log_ratio_threshold: training-sample pruning.
+        discard_samples: deprecate buffer samples that fall below the proposal-truncation floor.
         use_best_models: use best-checkpoint networks (flow + whitener) for sampling.
         num_proposals, proposal_mixture_beta: importance sampling.
         prior_sigma_bound, out_of_bounds_penalty: prior-width truncation backstop.
@@ -304,7 +304,6 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         grad_clip: float = 1.0,
         # inference
         discard_samples: bool = False,
-        log_ratio_threshold: float = -20.0,
         use_best_models: bool = True,
         num_proposals: int = 256,
         proposal_mixture_beta: float = 0.5,
@@ -352,7 +351,6 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.lr_patience = lr_patience
         self.grad_clip = grad_clip
         self.discard_samples = discard_samples
-        self.log_ratio_threshold = log_ratio_threshold
         self.use_best_models = use_best_models
         self.num_proposals = num_proposals
         self.proposal_mixture_beta = proposal_mixture_beta
@@ -392,6 +390,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self._optimizer = None
         self._scheduler = None
         self._logp_cond_floor = None   # EMA log_prob_cond alpha-quantile floor (proposal truncation)
+        self._target_summary = None    # raw embedding of the TARGET obs (for buffer discard)
 
     # ==================== Initialization ====================
 
@@ -456,7 +455,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         return theta, theta_logprob, conditions, theta_lat
 
     def train_step(self, batch) -> Dict[str, float]:
-        theta, theta_logprob, conditions, theta_lat = self._unpack(batch, "train")
+        theta, _, conditions, theta_lat = self._unpack(batch, "train")
         if not self.networks_initialized:
             self._initialize_networks(theta, conditions)
 
@@ -473,7 +472,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self._flow.ema_update()
 
         if self.discard_samples:
-            batch.discard(self._compute_discard_mask(theta_lat, theta_logprob, s.detach()))
+            batch.discard(self._compute_discard_mask(theta_lat, s.detach()))
 
         # Train loss = the optimized FM objective (scale-invariant in the whitened space).
         return {"loss": losses["total"].item(),
@@ -536,12 +535,16 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         for p, pf in zip(self._flow.velocity.parameters(), fresh.parameters()):
             p.mul_(lam).add_(pf.to(p.dtype), alpha=1 - lam)
 
-    def _compute_discard_mask(self, theta_lat, theta_logprob, s):
-        self._flow.eval()
+    def _compute_discard_mask(self, theta_lat, s, p = 0.1):
+        # Deprecate buffer samples in the proposal-truncated tail (log_prob_cond < floor).
+        if self._logp_cond_floor is None or self._target_summary is None or np.random.rand(1) > p:
+            return torch.zeros(len(theta_lat), dtype=torch.bool)
+        self._best_flow.eval()
         with torch.no_grad():
-            log_prob = self._flow.log_prob(
-                theta_lat.unsqueeze(0), self._flow.cond(s)).squeeze(0).cpu()
-        return (log_prob - theta_logprob.cpu()) < self.log_ratio_threshold
+            # condition on the TARGET obs (matches the floor), not the batch's own x_i
+            log_prob = self._best_flow.log_prob(
+                theta_lat.unsqueeze(0), self._best_flow.cond(self._target_summary)).squeeze(0).cpu()
+        return log_prob < self._logp_cond_floor
 
     # ==================== Sampling ====================
 
@@ -573,6 +576,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         use_best = self.use_best_models and self._best_flow is not None
         flow = self._best_flow if use_best else self._flow
         s = self._embed(conditions, train=False, use_best_fit=use_best).detach()
+        self._target_summary = s                                  # stash target obs (for buffer discard)
         obs_batch = s.shape[0]                                     # observations before expand
         s = s.expand(num_samples, *s.shape[1:])                    # (num_samples, C)
         s = flow.cond(s)                                          # normalize summary (frozen stats)

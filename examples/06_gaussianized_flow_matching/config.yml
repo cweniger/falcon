@@ -16,13 +16,13 @@ paths:
   samples: ${run_dir}/samples
 
 buffer:
-  min_samples: 2048
-  max_samples: 2048
+  min_samples: 1024
+  max_samples: 8192
   validation_samples: 256
   simulate_count: 256
-  simulate_when_full: true
-  simulate_interval: 2
-  snapshot_every: 5
+  simulate_when_full: false
+  simulate_interval: 1
+  snapshot_every: 10
 
 graph:
   z:
@@ -47,7 +47,7 @@ graph:
       batch_size: 256
       early_stop_patience: 800
       prior_epochs: 0
-      momentum: 0.0000001           # global whitener EMA
+      momentum: 0.01 # global whitener EMA
       eig_update_freq: 1
       flow_hidden: 256
       flow_layers: 4
@@ -63,13 +63,13 @@ graph:
         #plasticity_period: 150
         #plasticity_shrink: 0.8
       betas: [0.5, 0.5]
-      discard_samples: false
+      discard_samples: true   # deprecate buffer samples below the truncation floor
       num_proposals: 256
       proposal_mixture_beta: 0.9
       prior_sigma_bound: 6.0
       use_best_models: true
       tight_proposal_mode: true
-      truncation_momentum: 0.05     # EMA rate for the floor
+      truncation_momentum: 0.9     # EMA rate for the floor
     ray:
       num_gpus: 1
 
@@ -83,7 +83,7 @@ graph:
   x:
     parents: [m, n]
     simulator: model.Add
-    observed: "./data/x_obs.npy"
+    observed: "./data/x_obs2.npy"
 
 sample:
   prior:
