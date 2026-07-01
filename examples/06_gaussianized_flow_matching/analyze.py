@@ -1,7 +1,8 @@
 """Corner plot of the GaussianizedFlowMatching posterior vs the known bimodal modes.
 
 Run from this directory after `falcon launch -c config.yml -o output/run` and
-`falcon sample posterior -o output/run`. Writes output/run/posterior_corner.png.
+`falcon sample posterior -o output/run`. Writes output/run/posterior_corner.png
+and output/run/buffer_trace.png (first latent dim of the training buffer over time).
 """
 import glob
 import sys
@@ -9,6 +10,8 @@ import numpy as np
 import matplotlib
 matplotlib.use("Agg")
 import matplotlib.pyplot as plt
+
+import falcon
 
 RUN = sys.argv[1] if len(sys.argv) > 1 else "output/run"
 SHIFT, WIDTH, D = 0.5, 0.1, 5
@@ -50,3 +53,19 @@ fig.suptitle("GaussianizedFlowMatching: 5D bimodal posterior\n"
 fig.tight_layout()
 fig.savefig(f"{RUN}/posterior_corner.png", dpi=110)
 print(f"\nsaved {RUN}/posterior_corner.png")
+
+# --- buffer trace: first latent dim of z.value over snapshot index (cf. buffer.ipynb) ---
+run = falcon.load_run(RUN)
+if len(run.buffer) == 0:
+    print(f"no buffer snapshots in {RUN}/buffer/snapshots "
+          "(set buffer.snapshot_every > 0 to enable); skipping buffer trace plot")
+else:
+    zb = run.buffer.stacked["z.value"]
+    fig2, ax = plt.subplots(figsize=(8, 4))
+    ax.plot(zb[:, 0], ".", ms=3, alpha=0.5, color="C0")
+    ax.set_xlabel("buffer snapshot index")
+    ax.set_ylabel("z0")
+    ax.set_title("GaussianizedFlowMatching: buffer z0 over training")
+    fig2.tight_layout()
+    fig2.savefig(f"{RUN}/buffer_trace.png", dpi=110)
+    print(f"saved {RUN}/buffer_trace.png")

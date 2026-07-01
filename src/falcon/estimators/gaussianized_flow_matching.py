@@ -306,7 +306,11 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         proposal_mixture_beta: float = 0.5,
         prior_sigma_bound: float = 6.0,
         out_of_bounds_penalty: float = 100.0,
+        tight_proposal_mode: bool = True,
         nan_replacement: float = -100.0,
+        # plasticity: periodic shrink-and-perturb of the live velocity head (EMA untouched)
+        plasticity_period: int = 0,      # 0 = off; else apply every N epochs
+        plasticity_shrink: float = 0.9,  # lambda in  w <- lam*w + (1-lam)*fresh_init
     ):
         self.max_epochs = max_epochs
         self.lr = lr
@@ -347,6 +351,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.prior_sigma_bound = prior_sigma_bound
         self.out_of_bounds_penalty = out_of_bounds_penalty
         self.nan_replacement = nan_replacement
+        self.plasticity_period = plasticity_period
+        self.plasticity_shrink = plasticity_shrink
+        self.tight_proposal_mode = tight_proposal_mode
 
     # ==================== Setup ====================
 
@@ -485,6 +492,13 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
         if self._scheduler is not None:
             self._scheduler.step(val_loss)
+
+        # Plasticity: periodically soft-reset the live velocity head. The EMA/deployed
+        # model is left intact, so the proposal stays stable while the live net re-engages.
+        if self.plasticity_period > 0 and epoch > 0 and epoch % self.plasticity_period == 0:
+            self._shrink_and_perturb()
+            log({"plasticity:shrink_perturb": epoch})
+
         lr = self._optimizer.param_groups[0]["lr"]
         log({"lr": lr,
              "val_nll_cond": val_metrics.get("nll_cond", float("nan")),
@@ -492,6 +506,21 @@ class GaussianizedFlowMatching(StepwiseEstimator):
              "whiten_logdet": self._flow.whitener.logdet().item(),       # compression term
              "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item()})
         return {"lr": lr}
+
+    @torch.no_grad()
+    def _shrink_and_perturb(self) -> None:
+        """w <- lam*w + (1-lam)*fresh_init on the live velocity MLP only.
+
+        Restores plasticity without forgetting: only ``_flow.velocity`` is touched -- not
+        the EMA (deployed model), the whitener, the embedding, or the null token -- so the
+        proposal keeps sampling from the stable EMA while the live net regains plasticity
+        and the EMA tracks it back over the next ``plasticity_period`` epochs.
+        """
+        lam = self.plasticity_shrink
+        fresh = VelocityField(self._flow.param_dim, self._flow.cond_dim,
+                              self.flow_hidden, self.flow_layers, self.time_dim, self.layernorm).to(self.device)
+        for p, pf in zip(self._flow.velocity.parameters(), fresh.parameters()):
+            p.mul_(lam).add_(pf.to(p.dtype), alpha=1 - lam)
 
     def _compute_discard_mask(self, theta_lat, theta_logprob, s):
         self._flow.eval()
@@ -566,7 +595,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         log_g_mix = torch.logaddexp(mix[0], mix[1]) if len(mix) == 2 else mix[0]
 
         if mode == "proposal":
-            log_target = self.gamma / (1.0 + self.gamma) * log_prob_cond + log_prior
+            if self.tight_proposal_mode:
+                log_target = self.gamma * (log_prob_cond - log_prob_marg) + log_prior
+            else:
+                log_target = self.gamma / (1.0 + self.gamma) * log_prob_cond + log_prior
         else:  # posterior: c/m * prior
             log_target = log_prob_cond - log_prob_marg + log_prior
 

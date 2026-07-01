@@ -10,8 +10,8 @@ import numpy as np
 import falcon
 
 DIM = 5
-SIGMA = 0.02
-SHIFT = 0.1   # unimodal: posterior z|x ~ N(x, ~SIGMA^2)
+SIGMA = 0.001
+SHIFT = 0.005   # unimodal: posterior z|x ~ N(x, ~SIGMA^2)
 
 
 class Signal:
