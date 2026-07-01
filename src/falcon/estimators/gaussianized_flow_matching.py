@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logger import log, debug, info
+from falcon.core.logger import log, debug
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.stepwise_base import StepwiseEstimator
 from falcon.estimators.flow_matching import (
@@ -619,6 +619,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         trunc = 0.0
         if self.truncation_alpha > 0.0:
             assert obs_batch == 1, "proposal truncation assumes a single shared observation"
+            # TODO: figure out what works best -- full posterior weights vs cond-only below
             #logw_post = (log_prob_cond - log_prob_marg + log_prior) - log_g_mix - mask
             logw_post = log_prob_cond - log_g_mix - mask
             logw_post = torch.nan_to_num(logw_post, nan=self.nan_replacement, neginf=self.nan_replacement)
