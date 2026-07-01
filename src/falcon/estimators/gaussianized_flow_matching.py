@@ -18,6 +18,10 @@ A deliberately simple, dynamic-SBI-friendly design:
 Sampling / density feed the same importance-sampling machinery as ``Flow``, adapted to
 the standard-normal latent space: the latent prior is N(0, I), so log N(0,I) is added to
 the importance weights, and a prior-width truncation backstops runaway-wide proposals.
+A second, log-density truncation guards the *proposal* against the flow's poorly-modelled
+tails: an EMA-estimated floor ``_logp_cond_floor`` (the ``truncation_alpha``-quantile of
+``log_prob_cond`` under the posterior) penalises proposal candidates below it, so the
+proposal never emits from the extreme low-density tail. Posterior sampling is untouched.
 """
 
 import copy
@@ -308,6 +312,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         out_of_bounds_penalty: float = 100.0,
         tight_proposal_mode: bool = True,
         nan_replacement: float = -100.0,
+        # proposal truncation via EMA-estimated log-density floor (alpha=0 disables)
+        truncation_alpha: float = 1e-6,      # ~5 sigma tail: fraction of posterior mass below the floor
+        truncation_momentum: float = 0.05,   # EMA rate for the floor
+        truncation_warmup_epochs: int = 0,   # engage truncation only once total epochs >= this
         # plasticity: periodic shrink-and-perturb of the live velocity head (EMA untouched)
         plasticity_period: int = 0,      # 0 = off; else apply every N epochs
         plasticity_shrink: float = 0.9,  # lambda in  w <- lam*w + (1-lam)*fresh_init
@@ -354,6 +362,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.plasticity_period = plasticity_period
         self.plasticity_shrink = plasticity_shrink
         self.tight_proposal_mode = tight_proposal_mode
+        self.truncation_alpha = truncation_alpha
+        self.truncation_momentum = truncation_momentum
+        self.truncation_warmup_epochs = truncation_warmup_epochs
 
     # ==================== Setup ====================
 
@@ -380,6 +391,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self._best_loss = float("inf")
         self._optimizer = None
         self._scheduler = None
+        self._logp_cond_floor = None   # EMA log_prob_cond alpha-quantile floor (proposal truncation)
 
     # ==================== Initialization ====================
 
@@ -504,7 +516,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
              "val_nll_cond": val_metrics.get("nll_cond", float("nan")),
              "val_nll_marg": val_metrics.get("nll_marg", float("nan")),
              "whiten_logdet": self._flow.whitener.logdet().item(),       # compression term
-             "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item()})
+             "whiten_eigvals_mean": self._flow.whitener._eigvals.mean().item(),
+             "logp_cond_floor": (self._logp_cond_floor
+                                 if self._logp_cond_floor is not None else float("nan"))})
         return {"lr": lr}
 
     @torch.no_grad()
@@ -559,6 +573,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         use_best = self.use_best_models and self._best_flow is not None
         flow = self._best_flow if use_best else self._flow
         s = self._embed(conditions, train=False, use_best_fit=use_best).detach()
+        obs_batch = s.shape[0]                                     # observations before expand
         s = s.expand(num_samples, *s.shape[1:])                    # (num_samples, C)
         s = flow.cond(s)                                          # normalize summary (frozen stats)
         null = flow.null_cond(num_samples)                        # (num_samples, C)
@@ -594,6 +609,38 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             mix.append(np.log(n_marg / total) + log_prob_marg)
         log_g_mix = torch.logaddexp(mix[0], mix[1]) if len(mix) == 2 else mix[0]
 
+        # Proposal truncation: EMA-estimate a log-density floor from the UNtruncated posterior
+        # weights, then penalise proposal candidates below it. tau estimation must never see the
+        # penalty (else it runs away), so `trunc` is applied only to the emitted-proposal weights.
+        trunc = 0.0
+        if self.truncation_alpha > 0.0:
+            assert obs_batch == 1, "proposal truncation assumes a single shared observation"
+            #logw_post = (log_prob_cond - log_prob_marg + log_prior) - log_g_mix - mask
+            logw_post = log_prob_cond - log_g_mix - mask
+            logw_post = torch.nan_to_num(logw_post, nan=self.nan_replacement, neginf=self.nan_replacement)
+            logw_post = logw_post - torch.logsumexp(logw_post, dim=0, keepdim=True)
+            w_post = torch.exp(logw_post)                          # (num_proposals, num_samples)
+
+            if mode == "proposal":
+                # EMA of the pooled weighted alpha-quantile of log_prob_cond (columns share one obs)
+                pooled_w = (w_post / num_samples).reshape(-1)      # sums to ~1
+                vals = torch.nan_to_num(log_prob_cond, nan=self.nan_replacement,
+                                        neginf=self.nan_replacement).reshape(-1)
+                sorted_vals, order = torch.sort(vals)
+                cw = torch.cumsum(pooled_w[order], dim=0)
+                ge = (cw >= self.truncation_alpha).nonzero()
+                qi = int(ge[0]) if ge.numel() > 0 else sorted_vals.numel() - 1
+                q_batch = sorted_vals[qi].item()
+                if np.isfinite(q_batch):
+                    m = self.truncation_momentum
+                    self._logp_cond_floor = (q_batch if self._logp_cond_floor is None
+                                             else (1 - m) * self._logp_cond_floor + m * q_batch)
+
+                if (self._logp_cond_floor is not None
+                        and self._total_epochs_trained >= self.truncation_warmup_epochs):
+                    trunc = (log_prob_cond <= self._logp_cond_floor).to(log_prior.dtype) \
+                            * self.out_of_bounds_penalty
+
         if mode == "proposal":
             if self.tight_proposal_mode:
                 log_target = self.gamma * (log_prob_cond - log_prob_marg) + log_prior
@@ -602,7 +649,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         else:  # posterior: c/m * prior
             log_target = log_prob_cond - log_prob_marg + log_prior
 
-        log_weights = log_target - log_g_mix - mask
+        log_weights = log_target - log_g_mix - mask - trunc
         log_weights = torch.nan_to_num(log_weights, nan=self.nan_replacement, neginf=self.nan_replacement)
         log_weights = log_weights - torch.logsumexp(log_weights, dim=0, keepdim=True)
         weights = torch.exp(log_weights)
@@ -627,6 +674,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
         torch.save(self._init_parameters, node_dir / "init_parameters.pth")
         torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
+        torch.save(self._logp_cond_floor, node_dir / "logp_cond_floor.pth")
 
         torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
         torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
@@ -649,3 +697,6 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
         tep = node_dir / "total_epochs_trained.pth"
         self._total_epochs_trained = torch.load(tep) if tep.exists() else 0
+
+        fp = node_dir / "logp_cond_floor.pth"
+        self._logp_cond_floor = torch.load(fp) if fp.exists() else None

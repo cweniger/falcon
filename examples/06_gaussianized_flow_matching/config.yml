@@ -37,9 +37,10 @@ graph:
         - ['normal', 0.0, 1.0]
     estimator:
       _target_: falcon.estimators.GaussianizedFlowMatching
-      max_epochs: 1000
-      lr: 0.0005
-      gamma: 1.0
+      max_epochs: 3000
+      lr: 0.001
+      gamma: 0.2
+      truncation_alpha: 1e-3
       embedding:
         _target_: model.E
         _input_: [x]
@@ -68,6 +69,7 @@ graph:
       prior_sigma_bound: 6.0
       use_best_models: true
       tight_proposal_mode: true
+      truncation_momentum: 0.05     # EMA rate for the floor
     ray:
       num_gpus: 1
 
