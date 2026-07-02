@@ -47,12 +47,37 @@ class VelocityField(nn.Module):
     bottleneck that limits how much capacity the field can spend on (mostly
     uninformative) summary channels. Applied to the null token too, so
     conditional and marginal branches stay consistent.
+
+    per_param_nets=True replaces the single MLP trunk with one independent MLP
+    per parameter ("legs"), each seeing the full (w, t, s) input and predicting
+    one velocity component — decouples the per-component FM-loss gradients so
+    hard components cannot crowd out easy ones in shared features. Input
+    projections (w_proj/cond_proj/time_embed) stay shared. Each leg uses the
+    full hidden/layers, so parameter count scales ~param_dim x; tune hidden
+    down if needed.
+
+    focus_dims (debugging): restrict the flow to a subset of (whitened)
+    coordinates. Non-focus coordinates are zeroed in the input AND in the
+    output velocity, and fm_loss averages only over focus components. The
+    masked-loss minimizer is the exact *marginal* velocity field for the focus
+    coords (others marginalized over the buffer), while masked coordinates keep
+    v=0 -> they stay at their N(0,1) base draw, i.e. follow the whitener's
+    Gaussian buffer approximation, so sampling/density/importance weights stay
+    consistent. Indices refer to free parameters in prior order (whitening is
+    ZCA, so this is only approximate under strong correlations).
     """
 
     def __init__(self, param_dim: int, cond_dim: int, hidden: int = 256,
                  layers: int = 4, time_dim: int = 64, layernorm: bool = True,
-                 w_embed_dim: int = 0, cond_embed_dim: int = 0):
+                 w_embed_dim: int = 0, cond_embed_dim: int = 0,
+                 per_param_nets: bool = False, focus_dims=None):
         super().__init__()
+        if focus_dims:
+            mask = torch.zeros(param_dim)
+            mask[list(focus_dims)] = 1.0
+        else:
+            mask = None
+        self.register_buffer("focus_mask", mask)
         self.param_dim = param_dim
         self.cond_dim = cond_dim
         self.time_embed = GaussianFourierTime(time_dim)
@@ -64,22 +89,39 @@ class VelocityField(nn.Module):
         ) if cond_embed_dim > 0 else None
         w_dim = w_embed_dim if w_embed_dim > 0 else param_dim
         c_dim = cond_embed_dim if cond_embed_dim > 0 else cond_dim
-        dims = [w_dim + time_dim + c_dim] + [hidden] * layers
-        net = []
-        for d_in, d_out in zip(dims[:-1], dims[1:]):
-            net += [nn.Linear(d_in, d_out)]
-            if layernorm:                       # hidden layers only (never the input cat or output)
-                net += [nn.LayerNorm(d_out)]
-            net += [nn.SiLU()]
-        net += [nn.Linear(hidden, param_dim)]
-        self.net = nn.Sequential(*net)
+        in_dim = w_dim + time_dim + c_dim
+
+        def _make_mlp(out_dim: int) -> nn.Sequential:
+            dims = [in_dim] + [hidden] * layers
+            net = []
+            for d_in, d_out in zip(dims[:-1], dims[1:]):
+                net += [nn.Linear(d_in, d_out)]
+                if layernorm:                   # hidden layers only (never the input cat or output)
+                    net += [nn.LayerNorm(d_out)]
+                net += [nn.SiLU()]
+            net += [nn.Linear(hidden, out_dim)]
+            return nn.Sequential(*net)
+
+        if per_param_nets:
+            self.net = None
+            self.nets = nn.ModuleList([_make_mlp(1) for _ in range(param_dim)])
+        else:
+            self.net = _make_mlp(param_dim)
+            self.nets = None
 
     def forward(self, w: torch.Tensor, t: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         if t.ndim == 1:
             t = t[:, None]
+        if self.focus_mask is not None:      # hide non-focus coords -> marginal field
+            w = w * self.focus_mask
         wi = self.w_proj(w) if self.w_proj is not None else w
         si = self.cond_proj(s) if self.cond_proj is not None else s
-        return self.net(torch.cat([wi, self.time_embed(t), si], dim=-1))
+        inp = torch.cat([wi, self.time_embed(t), si], dim=-1)
+        out = (torch.cat([net(inp) for net in self.nets], dim=-1)
+               if self.nets is not None else self.net(inp))
+        if self.focus_mask is not None:      # frozen N(0,1) coords: v = 0
+            out = out * self.focus_mask
+        return out
 
 
 class EMA:
@@ -124,7 +166,11 @@ def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor,
         s = s.repeat(4, 1)
     wt = (1 - t) * w0 + t * w1
     target = w1 - w0
-    return (net(wt, t, s) - target).pow(2).mean()
+    err = (net(wt, t, s) - target).pow(2)
+    mask = getattr(net, "focus_mask", None)
+    if mask is not None:                     # average over focus components only
+        return (err * mask).sum(-1).mean() / mask.sum()
+    return err.mean()
 
 
 # --------------------------------------------------------------------------- #
