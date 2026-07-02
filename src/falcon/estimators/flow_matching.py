@@ -36,15 +36,35 @@ class GaussianFourierTime(nn.Module):
 
 
 class VelocityField(nn.Module):
-    """MLP velocity field v(w, t, s) for conditional flow matching."""
+    """MLP velocity field v(w, t, s) for conditional flow matching.
+
+    w_embed_dim > 0 linearly up-projects w before the input concat, so a
+    low-dim parameter is not variance-shadowed by a high-dim conditioning
+    summary (e.g. param_dim=1 vs cond_dim=128).
+
+    cond_embed_dim > 0 compresses the conditioning summary through a small MLP
+    (Linear-SiLU-Linear) before the input concat — a nonlinear information
+    bottleneck that limits how much capacity the field can spend on (mostly
+    uninformative) summary channels. Applied to the null token too, so
+    conditional and marginal branches stay consistent.
+    """
 
     def __init__(self, param_dim: int, cond_dim: int, hidden: int = 256,
-                 layers: int = 4, time_dim: int = 64, layernorm: bool = True):
+                 layers: int = 4, time_dim: int = 64, layernorm: bool = True,
+                 w_embed_dim: int = 0, cond_embed_dim: int = 0):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
         self.time_embed = GaussianFourierTime(time_dim)
-        dims = [param_dim + time_dim + cond_dim] + [hidden] * layers
+        self.w_proj = nn.Linear(param_dim, w_embed_dim) if w_embed_dim > 0 else None
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, max(2 * cond_embed_dim, 64)),
+            nn.SiLU(),
+            nn.Linear(max(2 * cond_embed_dim, 64), cond_embed_dim),
+        ) if cond_embed_dim > 0 else None
+        w_dim = w_embed_dim if w_embed_dim > 0 else param_dim
+        c_dim = cond_embed_dim if cond_embed_dim > 0 else cond_dim
+        dims = [w_dim + time_dim + c_dim] + [hidden] * layers
         net = []
         for d_in, d_out in zip(dims[:-1], dims[1:]):
             net += [nn.Linear(d_in, d_out)]
@@ -57,7 +77,9 @@ class VelocityField(nn.Module):
     def forward(self, w: torch.Tensor, t: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         if t.ndim == 1:
             t = t[:, None]
-        return self.net(torch.cat([w, self.time_embed(t), s], dim=-1))
+        wi = self.w_proj(w) if self.w_proj is not None else w
+        si = self.cond_proj(s) if self.cond_proj is not None else s
+        return self.net(torch.cat([wi, self.time_embed(t), si], dim=-1))
 
 
 class EMA:

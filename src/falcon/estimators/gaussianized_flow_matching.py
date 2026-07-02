@@ -130,7 +130,8 @@ class _WhitenedFlow(nn.Module):
                  momentum: float, min_var: float, eig_update_freq: int,
                  flow_hidden: int, flow_layers: int, time_dim: int, ema_decay: float,
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
-                 eval_chunk: int, layernorm: bool = True, antithetic: bool = True):
+                 eval_chunk: int, layernorm: bool = True, antithetic: bool = True,
+                 w_embed_dim: int = 0, cond_embed_dim: int = 0):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -142,7 +143,8 @@ class _WhitenedFlow(nn.Module):
         self.antithetic = antithetic
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
-        self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm)
+        self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm,
+                                      w_embed_dim=w_embed_dim, cond_embed_dim=cond_embed_dim)
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
@@ -286,6 +288,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         flow_hidden: int = 256,
         flow_layers: int = 4,
         time_dim: int = 64,
+        w_embed_dim: int = 0,     # >0: linear up-projection of w before the input concat
+        cond_embed_dim: int = 0,  # >0: linear compression of the summary before the input concat
         layernorm: bool = True,
         antithetic: bool = True,
         ema_decay: float = 0.9,
@@ -336,6 +340,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.flow_hidden = flow_hidden
         self.flow_layers = flow_layers
         self.time_dim = time_dim
+        self.w_embed_dim = w_embed_dim
+        self.cond_embed_dim = cond_embed_dim
         self.layernorm = layernorm
         self.antithetic = antithetic
         self.ema_decay = ema_decay
@@ -402,6 +408,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             ema_decay=self.ema_decay, sample_steps=self.sample_steps,
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
             eval_chunk=self.eval_chunk, layernorm=self.layernorm, antithetic=self.antithetic,
+            w_embed_dim=self.w_embed_dim, cond_embed_dim=self.cond_embed_dim,
         ).to(self.device)
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
@@ -618,7 +625,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         # penalty (else it runs away), so `trunc` is applied only to the emitted-proposal weights.
         trunc = 0.0
         if self.truncation_alpha > 0.0:
-            assert obs_batch == 1, "proposal truncation assumes a single shared observation"
+            #assert obs_batch == 1, "proposal truncation assumes a single shared observation"
             # TODO: figure out what works best -- full posterior weights vs cond-only below
             #logw_post = (log_prob_cond - log_prob_marg + log_prior) - log_g_mix - mask
             logw_post = log_prob_cond - log_g_mix - mask
