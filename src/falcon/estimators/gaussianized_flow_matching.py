@@ -132,7 +132,8 @@ class _WhitenedFlow(nn.Module):
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
                  eval_chunk: int, layernorm: bool = True, antithetic: bool = True,
                  w_embed_dim: int = 0, cond_embed_dim: int = 0,
-                 per_param_nets: bool = False, focus_dims=None):
+                 per_param_nets: bool = False, cond_per_param: bool = False,
+                 focus_dims=None):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -146,7 +147,8 @@ class _WhitenedFlow(nn.Module):
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm,
                                       w_embed_dim=w_embed_dim, cond_embed_dim=cond_embed_dim,
-                                      per_param_nets=per_param_nets, focus_dims=focus_dims)
+                                      per_param_nets=per_param_nets, cond_per_param=cond_per_param,
+                                      focus_dims=focus_dims)
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
@@ -293,6 +295,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         w_embed_dim: int = 0,     # >0: linear up-projection of w before the input concat
         cond_embed_dim: int = 0,  # >0: linear compression of the summary before the input concat
         per_param_nets: bool = False,  # one independent MLP per parameter instead of a shared trunk
+        cond_per_param: bool = False,  # leg i sees only summary slice i (pair with n_queries=param_dim)
         focus_dims=None,          # DEBUG: flow models only these free-param indices; rest = whitened Gaussian
         layernorm: bool = True,
         antithetic: bool = True,
@@ -347,6 +350,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.w_embed_dim = w_embed_dim
         self.cond_embed_dim = cond_embed_dim
         self.per_param_nets = per_param_nets
+        self.cond_per_param = cond_per_param
         self.focus_dims = focus_dims
         self.layernorm = layernorm
         self.antithetic = antithetic
@@ -415,7 +419,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
             eval_chunk=self.eval_chunk, layernorm=self.layernorm, antithetic=self.antithetic,
             w_embed_dim=self.w_embed_dim, cond_embed_dim=self.cond_embed_dim,
-            per_param_nets=self.per_param_nets, focus_dims=self.focus_dims,
+            per_param_nets=self.per_param_nets, cond_per_param=self.cond_per_param,
+            focus_dims=self.focus_dims,
         ).to(self.device)
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
@@ -555,9 +560,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             return torch.zeros(len(theta_lat), dtype=torch.bool)
         self._best_flow.eval()
         with torch.no_grad():
-            # condition on the TARGET obs (matches the floor), not the batch's own x_i
+            # condition on the TARGET obs (matches the floor), not the batch's own x_i;
+            # [:1] guards against a multi-row stash of duplicated shared observations
             log_prob = self._best_flow.log_prob(
-                theta_lat.unsqueeze(0), self._best_flow.cond(self._target_summary)).squeeze(0).cpu()
+                theta_lat.unsqueeze(0), self._best_flow.cond(self._target_summary[:1])).squeeze(0).cpu()
         return log_prob < self._logp_cond_floor
 
     # ==================== Sampling ====================
@@ -586,6 +592,15 @@ class GaussianizedFlowMatching(StepwiseEstimator):
     def _importance_sample(self, num_samples: int, mode: str, conditions: Dict):
         assert conditions, "Conditions must be provided."
         conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
+        # Evidence nodes re-simulated per-sample from a broadcast observation
+        # (e.g. tokens derived from the shared observed x) arrive as num_samples
+        # identical rows. Collapse them to batch 1 so the shared-observation
+        # truncation logic applies and _target_summary is stored single-row
+        # (the buffer-discard path expands it against arbitrary batch sizes).
+        conditions = {
+            k: v[:1] if v.shape[0] > 1 and torch.equal(v, v[:1].expand_as(v)) else v
+            for k, v in conditions.items()
+        }
 
         use_best = self.use_best_models and self._best_flow is not None
         flow = self._best_flow if use_best else self._flow

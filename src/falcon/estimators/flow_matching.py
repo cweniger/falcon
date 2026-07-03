@@ -56,6 +56,14 @@ class VelocityField(nn.Module):
     full hidden/layers, so parameter count scales ~param_dim x; tune hidden
     down if needed.
 
+    cond_per_param=True (requires per_param_nets=True) routes the conditioning
+    per leg: the summary is split into param_dim equal slices and leg i sees
+    only slice i (plus the full w and t). Pair with an embedding that emits one
+    summary block per parameter (e.g. TransformerEmbedding query pooling with
+    n_queries=param_dim), so each parameter has a private readout->leg pipeline
+    after the shared embedding body. Incompatible with cond_embed_dim (the
+    bottleneck would re-mix the slices).
+
     focus_dims (debugging): restrict the flow to a subset of (whitened)
     coordinates. Non-focus coordinates are zeroed in the input AND in the
     output velocity, and fm_loss averages only over focus components. The
@@ -70,8 +78,18 @@ class VelocityField(nn.Module):
     def __init__(self, param_dim: int, cond_dim: int, hidden: int = 256,
                  layers: int = 4, time_dim: int = 64, layernorm: bool = True,
                  w_embed_dim: int = 0, cond_embed_dim: int = 0,
-                 per_param_nets: bool = False, focus_dims=None):
+                 per_param_nets: bool = False, cond_per_param: bool = False,
+                 focus_dims=None):
         super().__init__()
+        if cond_per_param:
+            if not per_param_nets:
+                raise ValueError("cond_per_param requires per_param_nets=True")
+            if cond_embed_dim > 0:
+                raise ValueError("cond_per_param is incompatible with cond_embed_dim "
+                                 "(the bottleneck would re-mix the per-parameter slices)")
+            if cond_dim % param_dim != 0:
+                raise ValueError(f"cond_per_param needs cond_dim divisible by param_dim, "
+                                 f"got cond_dim={cond_dim}, param_dim={param_dim}")
         if focus_dims:
             mask = torch.zeros(param_dim)
             mask[list(focus_dims)] = 1.0
@@ -89,7 +107,8 @@ class VelocityField(nn.Module):
         ) if cond_embed_dim > 0 else None
         w_dim = w_embed_dim if w_embed_dim > 0 else param_dim
         c_dim = cond_embed_dim if cond_embed_dim > 0 else cond_dim
-        in_dim = w_dim + time_dim + c_dim
+        self.cond_slice = c_dim // param_dim if cond_per_param else 0
+        in_dim = w_dim + time_dim + (self.cond_slice if cond_per_param else c_dim)
 
         def _make_mlp(out_dim: int) -> nn.Sequential:
             dims = [in_dim] + [hidden] * layers
@@ -116,9 +135,16 @@ class VelocityField(nn.Module):
             w = w * self.focus_mask
         wi = self.w_proj(w) if self.w_proj is not None else w
         si = self.cond_proj(s) if self.cond_proj is not None else s
-        inp = torch.cat([wi, self.time_embed(t), si], dim=-1)
-        out = (torch.cat([net(inp) for net in self.nets], dim=-1)
-               if self.nets is not None else self.net(inp))
+        te = self.time_embed(t)
+        if self.cond_slice:                  # leg i sees only summary slice i
+            sc = si.reshape(si.shape[0], len(self.nets), self.cond_slice)
+            base = torch.cat([wi, te], dim=-1)
+            out = torch.cat([net(torch.cat([base, sc[:, i]], dim=-1))
+                             for i, net in enumerate(self.nets)], dim=-1)
+        else:
+            inp = torch.cat([wi, te, si], dim=-1)
+            out = (torch.cat([net(inp) for net in self.nets], dim=-1)
+                   if self.nets is not None else self.net(inp))
         if self.focus_mask is not None:      # frozen N(0,1) coords: v = 0
             out = out * self.focus_mask
         return out
