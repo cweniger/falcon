@@ -35,7 +35,7 @@ import torch.nn as nn
 from torch.optim import AdamW
 from torch.optim.lr_scheduler import ReduceLROnPlateau
 
-from falcon.core.logger import log, debug
+from falcon.core.logger import log, debug, info
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.stepwise_base import StepwiseEstimator
 from falcon.estimators.flow_matching import (
@@ -591,6 +591,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
     def _importance_sample(self, num_samples: int, mode: str, conditions: Dict):
         assert conditions, "Conditions must be provided."
+        t_start = time.time()
         conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
         # Evidence nodes re-simulated per-sample from a broadcast observation
         # (e.g. tokens derived from the shared observed x) arrive as num_samples
@@ -607,9 +608,14 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         s = self._embed(conditions, train=False, use_best_fit=use_best).detach()
         self._target_summary = s                                  # stash target obs (for buffer discard)
         obs_batch = s.shape[0]                                     # observations before expand
-        s = s.expand(num_samples, *s.shape[1:])                    # (num_samples, C)
+        # Pooled SIR: with a single shared observation, all columns would be
+        # statistically identical replicas — generate ONE candidate pool and
+        # resample num_samples draws from it at the end, instead of num_samples
+        # independent pools. Cuts ODE/CNF work by ~num_samples x per call.
+        B = 1 if obs_batch == 1 else num_samples                   # internal column count
+        s = s.expand(B, *s.shape[1:])                              # (B, C)
         s = flow.cond(s)                                          # normalize summary (frozen stats)
-        null = flow.null_cond(num_samples)                        # (num_samples, C)
+        null = flow.null_cond(B)                                  # (B, C)
 
         flow.eval()
 
@@ -621,7 +627,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             parts.append(flow.sample(n_cond, s))
         if n_marg > 0:
             parts.append(flow.sample(n_marg, null))
-        proposals = torch.cat(parts, dim=0)                       # (num_proposals, num_samples, P)
+        proposals = torch.cat(parts, dim=0)                       # (num_proposals, B, P)
 
         log_prob_cond = flow.log_prob(proposals, s)
         log_prob_marg = flow.log_prob(proposals, null)
@@ -653,11 +659,11 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             logw_post = log_prob_cond - log_g_mix - mask
             logw_post = torch.nan_to_num(logw_post, nan=self.nan_replacement, neginf=self.nan_replacement)
             logw_post = logw_post - torch.logsumexp(logw_post, dim=0, keepdim=True)
-            w_post = torch.exp(logw_post)                          # (num_proposals, num_samples)
+            w_post = torch.exp(logw_post)                          # (num_proposals, B)
 
             if mode == "proposal":
                 # EMA of the pooled weighted alpha-quantile of log_prob_cond (columns share one obs)
-                pooled_w = (w_post / num_samples).reshape(-1)      # sums to ~1
+                pooled_w = (w_post / B).reshape(-1)                # sums to ~1
                 vals = torch.nan_to_num(log_prob_cond, nan=self.nan_replacement,
                                         neginf=self.nan_replacement).reshape(-1)
                 sorted_vals, order = torch.sort(vals)
@@ -692,10 +698,26 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         log({"importance_sample:n_eff_min": float(n_eff.min()),
              "importance_sample:n_eff_max": float(n_eff.max())})
 
-        idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
-        samples_lat = proposals[idx, torch.arange(num_samples), :]
+        if B == num_samples:
+            # one column per output sample: 1 draw per column
+            idx = torch.multinomial(weights.T, 1, replacement=True).squeeze(-1)
+            samples_lat = proposals[idx, torch.arange(num_samples), :]
+            logprob = log_prob_cond[idx, torch.arange(num_samples)].cpu()
+        else:
+            # Pooled SIR: num_samples draws from the single pool. Proposal draws
+            # feed the simulator, so sample WITHOUT replacement there — duplicate
+            # z's would be wasted simulation budget; posterior draws stay with
+            # replacement (iid SIR). Fall back to replacement if the pool is
+            # smaller than the request.
+            replacement = bool(mode != "proposal" or num_samples > weights.shape[0])
+            idx = torch.multinomial(weights[:, 0], num_samples, replacement=replacement)
+            samples_lat = proposals[idx, 0, :]
+            logprob = log_prob_cond[idx, 0].cpu()
         samples = self.simulator_instance.forward(samples_lat, mode="standard_normal").cpu()
-        logprob = log_prob_cond[idx, torch.arange(num_samples)].cpu()
+        dt = time.time() - t_start
+        info(f"Time for sampling: {dt:.2f}s ({mode}, {num_samples} samples, "
+             f"pool={self.num_proposals}x{B})")
+        log({"importance_sample:time": dt})
         return samples, logprob.detach()
 
     # ==================== Save / Load ====================
