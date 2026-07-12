@@ -598,10 +598,25 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         # identical rows. Collapse them to batch 1 so the shared-observation
         # truncation logic applies and _target_summary is stored single-row
         # (the buffer-discard path expands it against arbitrary batch sizes).
-        conditions = {
-            k: v[:1] if v.shape[0] > 1 and torch.equal(v, v[:1].expand_as(v)) else v
-            for k, v in conditions.items()
-        }
+        # Collapse jointly: derived evidence (e.g. tokens re-simulated from the
+        # shared observed x by a stochastic/adaptive tokenizer) has non-identical
+        # rows even though it represents the same observation. If ANY key
+        # collapses, the batch is a shared-observation broadcast — take row 0 of
+        # every key so multi-stream embeddings see a consistent batch size.
+        # A batch-1 key is by construction a broadcast (single repeated ref),
+        # so it witnesses a shared observation even when derived evidence rows
+        # are not bitwise identical.
+        # FIXME: taking row 0 of non-identical derived evidence assumes those
+        # nodes are (effectively) deterministic functions of the observation.
+        # For genuinely stochastic derived evidence this silently conditions on
+        # one arbitrary realization; the proper fix is executor-level (compute
+        # derived evidence once per observation and broadcast the ref).
+        shared = any(
+            v.shape[0] == 1 or torch.equal(v, v[:1].expand_as(v))
+            for v in conditions.values()
+        )
+        if shared:
+            conditions = {k: v[:1] for k, v in conditions.items()}
 
         use_best = self.use_best_models and self._best_flow is not None
         flow = self._best_flow if use_best else self._flow
@@ -709,7 +724,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             # z's would be wasted simulation budget; posterior draws stay with
             # replacement (iid SIR). Fall back to replacement if the pool is
             # smaller than the request.
-            replacement = bool(mode != "proposal" or num_samples > weights.shape[0])
+            replacement = mode != "proposal" or num_samples > weights.shape[0]
             idx = torch.multinomial(weights[:, 0], num_samples, replacement=replacement)
             samples_lat = proposals[idx, 0, :]
             logprob = log_prob_cond[idx, 0].cpu()
