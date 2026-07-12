@@ -57,6 +57,11 @@ class MultiplexNodeWrapper:
 
         futures = []
         for i, (start, end) in enumerate(index_range_list):
+            if end - start <= 0:
+                # n_samples < num_actors leaves some actors with an empty
+                # slice; a zero-sample dispatch is rejected by _resolve_refs
+                # (explicit ValueError). Skip idle actors instead.
+                continue
             chunk_refs = {k: v[start:end] for k, v in condition_refs.items()} if condition_refs else None
             method = getattr(self.wrapped_node_list[i], method_name)
             futures.append(method.remote(end - start, condition_refs=chunk_refs))
@@ -254,6 +259,10 @@ class NodeWrapper:
         all_refs = []
         slices = {}
         for name, refs in condition_refs.items():
+            if len(refs) == 0:
+                raise ValueError(
+                    f"_resolve_refs: empty ref list for '{name}' "
+                    f"(zero-sample dispatch? n_samples < num_actors?)")
             if len(set(refs)) == 1:  # all same ref → broadcast
                 slices[name] = ('broadcast', len(all_refs))
                 all_refs.append(refs[0])

@@ -191,7 +191,7 @@ class DatasetManagerActor:
         if self.simulate_when_full:
             return self.simulate_count
         else:
-            num_train_samples = sum(self.status == SampleStatus.TRAINING)
+            num_train_samples = int((self.status == SampleStatus.TRAINING).sum())
             return min(
                 self.simulate_count, self.max_samples - num_train_samples
             )
