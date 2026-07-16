@@ -79,7 +79,8 @@ class VelocityField(nn.Module):
                  layers: int = 4, time_dim: int = 64, layernorm: bool = True,
                  w_embed_dim: int = 0, cond_embed_dim: int = 0,
                  per_param_nets: bool = False, cond_per_param: bool = False,
-                 focus_dims=None):
+                 focus_dims=None, glu_cond: bool = False,
+                 residual: bool = False):
         super().__init__()
         if cond_per_param:
             if not per_param_nets:
@@ -128,6 +129,24 @@ class VelocityField(nn.Module):
             self.net = _make_mlp(param_dim)
             self.nets = None
 
+        # --- literature-informed options (FMPE, arXiv:2305.17161) -------
+        # glu_cond: gate every hidden activation with a sigmoid projection of
+        # the low-dimensional (w, t) pair, so it cannot be variance-shadowed
+        # by a wide conditioning summary in the input concat (FMPE Sec 3.2).
+        # residual: wrap consecutive hidden blocks as h + block(h) (universal
+        # in the GW-FM literature; plain deep MLPs underperform).
+        # Both default OFF -> module structure identical to before.
+        self.glu_cond = bool(glu_cond)
+        self.residual = bool(residual)
+        if (self.glu_cond or self.residual) and per_param_nets:
+            raise ValueError("glu_cond/residual not supported with per_param_nets")
+        if self.glu_cond:
+            gd = w_dim + time_dim
+            self.glu_gates = nn.ModuleList(
+                [nn.Linear(gd, hidden) for _ in range(layers)])
+        else:
+            self.glu_gates = None
+
     def forward(self, w: torch.Tensor, t: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
         if t.ndim == 1:
             t = t[:, None]
@@ -143,11 +162,43 @@ class VelocityField(nn.Module):
                              for i, net in enumerate(self.nets)], dim=-1)
         else:
             inp = torch.cat([wi, te, si], dim=-1)
-            out = (torch.cat([net(inp) for net in self.nets], dim=-1)
-                   if self.nets is not None else self.net(inp))
+            if self.glu_cond or self.residual:
+                out = self._structured_forward(inp, torch.cat([wi, te], dim=-1))
+            else:
+                out = (torch.cat([net(inp) for net in self.nets], dim=-1)
+                       if self.nets is not None else self.net(inp))
         if self.focus_mask is not None:      # frozen N(0,1) coords: v = 0
             out = out * self.focus_mask
         return out
+
+    def _structured_forward(self, inp: torch.Tensor,
+                            wt: torch.Tensor) -> torch.Tensor:
+        """Forward through self.net with optional per-layer (w,t) GLU gates
+        and residual skips. Walks the existing Sequential's modules so the
+        parametrization is shared with the flags-off path."""
+        mods = list(self.net)
+        h = inp
+        li = 0                                  # hidden-layer counter
+        i = 0
+        while i < len(mods):
+            m = mods[i]
+            if isinstance(m, nn.Linear) and i < len(mods) - 1:
+                # hidden block: Linear [+ LayerNorm] + SiLU
+                blk = m(h)
+                j = i + 1
+                while j < len(mods) - 1 and not isinstance(mods[j], nn.Linear):
+                    blk = mods[j](blk)
+                    j += 1
+                if self.glu_gates is not None and li < len(self.glu_gates):
+                    blk = blk * torch.sigmoid(self.glu_gates[li](wt))
+                h = (h + blk if (self.residual and blk.shape == h.shape)
+                     else blk)
+                li += 1
+                i = j
+            else:
+                h = m(h)
+                i += 1
+        return h
 
 
 class EMA:
@@ -176,7 +227,7 @@ class EMA:
 # Training loss
 # --------------------------------------------------------------------------- #
 def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor,
-            antithetic: bool = True) -> torch.Tensor:
+            antithetic: bool = True, time_alpha: float = 0.0) -> torch.Tensor:
     """Flow-matching loss ‖v(w_t, t, s) − (w1 − w0)‖² with w0~N(0,I), t~U(0,1).
 
     antithetic=True pairs each draw with its mirrors w0→−w0 and t→1−t (4 variants
@@ -185,6 +236,11 @@ def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor,
     """
     w0 = torch.randn_like(w1)
     t = torch.rand(w1.shape[0], 1, device=w1.device, dtype=w1.dtype)
+    if time_alpha != 0.0:
+        # power-law time prior p(t) ~ t^{1/(1+alpha)} (FMPE Sec 3.3):
+        # alpha > 0 concentrates training capacity at t -> 1, where sharp /
+        # multimodal targets are hardest. alpha = 0 recovers uniform.
+        t = t.pow((1.0 + time_alpha) / (2.0 + time_alpha))
     if antithetic:
         w0 = torch.cat([w0, -w0, w0, -w0], dim=0)
         t = torch.cat([t, t, 1 - t, 1 - t], dim=0)

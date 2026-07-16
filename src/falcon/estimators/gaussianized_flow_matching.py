@@ -133,7 +133,8 @@ class _WhitenedFlow(nn.Module):
                  eval_chunk: int, layernorm: bool = True, antithetic: bool = True,
                  w_embed_dim: int = 0, cond_embed_dim: int = 0,
                  per_param_nets: bool = False, cond_per_param: bool = False,
-                 focus_dims=None):
+                 focus_dims=None, glu_cond: bool = False,
+                 residual: bool = False, time_alpha: float = 0.0):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -143,12 +144,14 @@ class _WhitenedFlow(nn.Module):
         self.n_probe = n_probe
         self.eval_chunk = eval_chunk
         self.antithetic = antithetic
+        self.time_alpha = time_alpha
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm,
                                       w_embed_dim=w_embed_dim, cond_embed_dim=cond_embed_dim,
                                       per_param_nets=per_param_nets, cond_per_param=cond_per_param,
-                                      focus_dims=focus_dims)
+                                      focus_dims=focus_dims, glu_cond=glu_cond,
+                                      residual=residual)
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
@@ -189,8 +192,10 @@ class _WhitenedFlow(nn.Module):
         w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
         s_n = self.cond(s.float())
         null = self.null_token[None].expand(w.shape[0], self.cond_dim)
-        fm_cond = fm_loss(self.velocity, w, s_n, self.antithetic)
-        fm_marg = fm_loss(self.velocity, w, null, self.antithetic)
+        fm_cond = fm_loss(self.velocity, w, s_n, self.antithetic,
+                          time_alpha=self.time_alpha)
+        fm_marg = fm_loss(self.velocity, w, null, self.antithetic,
+                          time_alpha=self.time_alpha)
         return {"fm_cond": fm_cond, "fm_marg": fm_marg, "total": fm_cond + fm_marg}
 
     # ---- sampling: (n, B, param) ----  chunked over n*B to bound memory
@@ -295,6 +300,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         w_embed_dim: int = 0,     # >0: linear up-projection of w before the input concat
         cond_embed_dim: int = 0,  # >0: linear compression of the summary before the input concat
         per_param_nets: bool = False,  # one independent MLP per parameter instead of a shared trunk
+        glu_cond: bool = False,    # FMPE-style (w,t) GLU gates on every hidden layer
+        residual: bool = False,    # residual hidden blocks in the velocity trunk
+        time_alpha: float = 0.0,   # power-law time prior (FMPE Sec 3.3); 0 = uniform
         cond_per_param: bool = False,  # leg i sees only summary slice i (pair with n_queries=param_dim)
         focus_dims=None,          # DEBUG: flow models only these free-param indices; rest = whitened Gaussian
         layernorm: bool = True,
@@ -350,6 +358,9 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.w_embed_dim = w_embed_dim
         self.cond_embed_dim = cond_embed_dim
         self.per_param_nets = per_param_nets
+        self.glu_cond = glu_cond
+        self.residual = residual
+        self.time_alpha = time_alpha
         self.cond_per_param = cond_per_param
         self.focus_dims = focus_dims
         self.layernorm = layernorm
@@ -419,6 +430,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
             eval_chunk=self.eval_chunk, layernorm=self.layernorm, antithetic=self.antithetic,
             w_embed_dim=self.w_embed_dim, cond_embed_dim=self.cond_embed_dim,
+            glu_cond=self.glu_cond, residual=self.residual,
+            time_alpha=self.time_alpha,
             per_param_nets=self.per_param_nets, cond_per_param=self.cond_per_param,
             focus_dims=self.focus_dims,
         ).to(self.device)
