@@ -153,7 +153,7 @@ class _WhitenedFlow(nn.Module):
                  per_param_nets: bool = False, cond_per_param: bool = False,
                  focus_dims=None, glu_cond: bool = False,
                  residual: bool = False, time_alpha: float = 0.0,
-                 whiten_fold: bool = False):
+                 whiten_fold: bool = False, fold_threshold: float = 0.02):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -165,6 +165,7 @@ class _WhitenedFlow(nn.Module):
         self.antithetic = antithetic
         self.time_alpha = time_alpha
         self.whiten_fold = whiten_fold
+        self.fold_threshold = fold_threshold
         if whiten_fold:
             # The fold rewrites the first/last Linear of a shared trunk where w
             # occupies the leading param_dim input columns and the output layer
@@ -178,6 +179,17 @@ class _WhitenedFlow(nn.Module):
                 raise ValueError("whiten_fold is incompatible with glu_cond (gates also consume w)")
             if focus_dims:
                 raise ValueError("whiten_fold is incompatible with focus_dims")
+            # Rung accumulator: frame deltas compose affinely and are accumulated
+            # here; the fold fires only when the ACCUMULATED delta crosses
+            # fold_threshold. EMA estimation noise is mean-reverting, so on a
+            # stationary buffer the accumulator hovers at identity and no fold
+            # ever fires (exact baseline behavior); systematic drift (zoom,
+            # branch-mass motion) adds up and is absorbed in function-preserving
+            # rungs. Per-step folding (threshold=0) injects the stats noise
+            # straight into the weights - measured to cost ~2 nats val on a
+            # stationary 32k buffer - so keep the threshold finite.
+            self.register_buffer("_fold_Macc", torch.eye(param_dim, dtype=torch.float64))
+            self.register_buffer("_fold_cacc", torch.zeros(param_dim, dtype=torch.float64))
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm,
@@ -257,7 +269,17 @@ class _WhitenedFlow(nn.Module):
         if self.training:
             delta = self.whitener.update(theta_lat)
             if self.whiten_fold and delta is not None:
-                self._fold_frame_delta(*delta)
+                M, c = delta
+                # compose onto the accumulator: w2 = (w0 @ Ma + ca) @ M + c
+                self._fold_cacc = self._fold_cacc @ M + c
+                self._fold_Macc = self._fold_Macc @ M
+                eye = torch.eye(self.param_dim, dtype=torch.float64,
+                                device=self._fold_Macc.device)
+                if max((self._fold_Macc - eye).abs().max().item(),
+                       self._fold_cacc.abs().max().item()) > self.fold_threshold:
+                    self._fold_frame_delta(self._fold_Macc, self._fold_cacc)
+                    self._fold_Macc = eye
+                    self._fold_cacc = torch.zeros_like(self._fold_cacc)
             self._update_cond_stats(s)
         w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
         s_n = self.cond(s.float())
@@ -364,6 +386,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         min_var: float = 1e-20,
         eig_update_freq: int = 1,
         whiten_fold: bool = False,  # fold whitener frame deltas into the velocity nets (docs/PLAN_frame_folding.md)
+        fold_threshold: float = 0.02,  # rung size: fold only when the accumulated delta exceeds this
         # flow-matching net
         flow_hidden: int = 256,
         flow_layers: int = 4,
@@ -424,6 +447,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.min_var = min_var
         self.eig_update_freq = eig_update_freq
         self.whiten_fold = whiten_fold
+        self.fold_threshold = fold_threshold
         self.flow_hidden = flow_hidden
         self.flow_layers = flow_layers
         self.time_dim = time_dim
@@ -504,6 +528,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             w_embed_dim=self.w_embed_dim, cond_embed_dim=self.cond_embed_dim,
             glu_cond=self.glu_cond, residual=self.residual,
             time_alpha=self.time_alpha, whiten_fold=self.whiten_fold,
+            fold_threshold=self.fold_threshold,
             per_param_nets=self.per_param_nets, cond_per_param=self.cond_per_param,
             focus_dims=self.focus_dims,
         ).to(self.device)
