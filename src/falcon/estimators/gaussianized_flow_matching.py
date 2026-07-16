@@ -82,7 +82,19 @@ class _GlobalWhitener(nn.Module):
         return result
 
     @torch.no_grad()
-    def update(self, theta_lat: torch.Tensor) -> None:
+    def update(self, theta_lat: torch.Tensor):
+        """EMA-update the frame; return the affine frame delta ``(M, c)`` or ``None``.
+
+        The delta maps OLD whitened coordinates to NEW ones: ``w_new = w_old @ M + c``
+        with ``M = S_old @ W_new`` and ``c = (mu_old - mu_new) @ W_new`` (row-vector
+        convention, ``S = Sigma^{1/2}``, ``W = Sigma^{-1/2}``). Between eigen refreshes
+        only the mean moves, so ``M = I`` and the delta is a pure shift. Returns
+        ``None`` when the frame did not measurably change. Callers that fold the
+        frame into a network (``whiten_fold``) consume this; everyone else may
+        ignore the return value.
+        """
+        mu0 = self._mean.clone()
+        S0 = self._sqrt.clone()
         m = self.momentum
         x = theta_lat.to(self._mean.dtype)
         self._mean = (1 - m) * self._mean + m * x.mean(dim=0)
@@ -94,6 +106,12 @@ class _GlobalWhitener(nn.Module):
         self._step += 1
         if self._step % self.eig_update_freq == 0:
             self._refresh()
+        M = S0 @ self._inv_sqrt
+        c = (mu0 - self._mean) @ self._inv_sqrt
+        eye64 = torch.eye(self.param_dim, device=M.device, dtype=M.dtype)
+        if (M - eye64).abs().max() < 1e-12 and c.abs().max() < 1e-12:
+            return None
+        return M, c
 
     def _refresh(self) -> None:
         eigvals, eigvecs = torch.linalg.eigh(self._cov)
@@ -134,7 +152,8 @@ class _WhitenedFlow(nn.Module):
                  w_embed_dim: int = 0, cond_embed_dim: int = 0,
                  per_param_nets: bool = False, cond_per_param: bool = False,
                  focus_dims=None, glu_cond: bool = False,
-                 residual: bool = False, time_alpha: float = 0.0):
+                 residual: bool = False, time_alpha: float = 0.0,
+                 whiten_fold: bool = False):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -145,6 +164,20 @@ class _WhitenedFlow(nn.Module):
         self.eval_chunk = eval_chunk
         self.antithetic = antithetic
         self.time_alpha = time_alpha
+        self.whiten_fold = whiten_fold
+        if whiten_fold:
+            # The fold rewrites the first/last Linear of a shared trunk where w
+            # occupies the leading param_dim input columns and the output layer
+            # emits the velocity directly. Reject architectures that break either
+            # assumption (w entering elsewhere, or per-parameter heads).
+            if per_param_nets:
+                raise ValueError("whiten_fold requires a shared trunk (per_param_nets=False)")
+            if w_embed_dim > 0:
+                raise ValueError("whiten_fold requires w_embed_dim=0 (w must enter net[0] directly)")
+            if glu_cond:
+                raise ValueError("whiten_fold is incompatible with glu_cond (gates also consume w)")
+            if focus_dims:
+                raise ValueError("whiten_fold is incompatible with focus_dims")
 
         self.whitener = _GlobalWhitener(param_dim, momentum, min_var, eig_update_freq)
         self.velocity = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim, layernorm,
@@ -185,9 +218,46 @@ class _WhitenedFlow(nn.Module):
         return (s.to(self._cond_mean.dtype) - self._cond_mean) / self._cond_std
 
     # ---- training ----
+    @torch.no_grad()
+    def _fold_frame_delta(self, M: torch.Tensor, c: torch.Tensor) -> None:
+        """Fold an affine whitener-frame delta into the velocity nets.
+
+        The whitener frame moved: old coordinates map to new ones as
+        ``w_new = w_old @ M + c``. The function-preserving warm start is the
+        target-side conjugation ``v_new(w) = v_old((w - c) @ M^{-1}) @ M``,
+        absorbed into weights (PyTorch Linear: ``out = x @ weight.T + bias``):
+
+          input side  (w = first ``P`` columns of ``net[0]``):
+            cols  <- cols @ inv(M).T
+            bias  <- bias - (c @ inv(M)) @ cols_old.T
+          output side (``net[-1]``):
+            weight <- M.T @ weight
+            bias   <- bias @ M
+
+        Applied identically to the live and EMA nets (both transforms are
+        affine in the parameters, so EMA-of-fold == fold-of-EMA and the pair
+        stays consistent). Optimizer moments are deliberately untouched: the
+        per-step delta is O(momentum), the moment mismatch second order.
+        The base-distribution mismatch of the conjugation is likewise
+        O(||M - I||) per step (see docs/PLAN_frame_folding.md).
+        """
+        P = self.param_dim
+        Minv = torch.linalg.inv(M)               # float64
+        shift = c @ Minv                         # (P,)
+        for field in (self.velocity, self.velocity_ema):
+            first, last = field.net[0], field.net[-1]
+            dt = first.weight.dtype
+            cols_old = first.weight[:, :P].to(M.dtype)
+            first.bias.data.sub_((shift @ cols_old.T).to(dt))
+            first.weight.data[:, :P].copy_((cols_old @ Minv.T).to(dt))
+            last.weight.data.copy_((M.T @ last.weight.to(M.dtype)).to(dt))
+            last.bias.data.copy_((last.bias.to(M.dtype) @ M).to(dt))
+
     def training_loss(self, theta_lat: torch.Tensor, s: torch.Tensor) -> Dict[str, torch.Tensor]:
         if self.training:
-            self.whitener.update(theta_lat)
+            delta = self.whitener.update(theta_lat)
+            if self.whiten_fold and delta is not None:
+                self._fold_frame_delta(*delta)
             self._update_cond_stats(s)
         w = self.whitener.whiten(theta_lat).detach().float()        # flow sees a fixed whitened target
         s_n = self.cond(s.float())
@@ -293,6 +363,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         momentum: float = 0.01,
         min_var: float = 1e-20,
         eig_update_freq: int = 1,
+        whiten_fold: bool = False,  # fold whitener frame deltas into the velocity nets (docs/PLAN_frame_folding.md)
         # flow-matching net
         flow_hidden: int = 256,
         flow_layers: int = 4,
@@ -352,6 +423,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.momentum = momentum
         self.min_var = min_var
         self.eig_update_freq = eig_update_freq
+        self.whiten_fold = whiten_fold
         self.flow_hidden = flow_hidden
         self.flow_layers = flow_layers
         self.time_dim = time_dim
@@ -431,7 +503,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             eval_chunk=self.eval_chunk, layernorm=self.layernorm, antithetic=self.antithetic,
             w_embed_dim=self.w_embed_dim, cond_embed_dim=self.cond_embed_dim,
             glu_cond=self.glu_cond, residual=self.residual,
-            time_alpha=self.time_alpha,
+            time_alpha=self.time_alpha, whiten_fold=self.whiten_fold,
             per_param_nets=self.per_param_nets, cond_per_param=self.cond_per_param,
             focus_dims=self.focus_dims,
         ).to(self.device)
