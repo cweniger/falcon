@@ -61,6 +61,10 @@ class DynamicSVD(torch.nn.Module):
                     whitener is attached, noise = x - signal is used to update
                     the whitener before whitening x.
         """
+        if x.dim() > 2:
+            x = x.flatten(start_dim=1)
+        if signal is not None and signal.dim() > 2:
+            signal = signal.flatten(start_dim=1)
         if self.whitener is not None and signal is not None:
             self.whitener.update((x - signal).detach())
 
@@ -134,6 +138,8 @@ class DynamicSVD(torch.nn.Module):
         if self.training:
             with torch.no_grad():
                 self.update(x.detach(), signal)
+        if x.dim() > 2:
+            x = x.flatten(start_dim=1)
 
         if self.components is None:
             return torch.randn(x.shape[0], self.n_components, dtype=x.dtype, device=x.device)
