@@ -87,18 +87,30 @@ class Product(TransformedPrior):
         theta = prior.forward(u, mode="hypercube")
     """
 
-    def __init__(self, priors=[], hypercube_range=[-2, 2]):
+    def __init__(self, priors=[], hypercube_range=[-2, 2], marginalize=None):
         """
         Initialize Product.
 
         Args:
             priors: List of tuples (dist_type, param1, param2, ...).
             hypercube_range: Range for hypercube mode (default: [-2, 2]).
+            marginalize: Optional list of parameter indices to marginalize over.
+                A marginalized param keeps its declared distribution and is
+                sampled normally into the full/simulator vector (so it still
+                affects the data), but is excluded from the latent/inference
+                space -- the estimator learns the posterior marginalized over
+                it. Like "fixed" in that it is absent from the latent space,
+                but drawn from its own prior (a fresh random draw in forward())
+                rather than held at a constant value. Composes with everything
+                downstream because the latent space is simply smaller.
         """
         self.priors = priors
         self.hypercube_range = hypercube_range
 
-        # Separate fixed and free parameters
+        # Separate fixed, marginalized, and free parameters. Fixed and
+        # marginalized params are both excluded from the latent space: fixed
+        # take a constant value, marginalized are drawn from their own prior.
+        self._marginalize_set = set(marginalize or [])
         self._free_indices = []
         self._fixed_indices = []
         self._fixed_values = {}
@@ -107,8 +119,16 @@ class Product(TransformedPrior):
             if dist_type == "fixed":
                 self._fixed_indices.append(i)
                 self._fixed_values[i] = prior[1]
+            elif i in self._marginalize_set:
+                continue  # sampled but not in latent; handled in forward/simulate
             else:
                 self._free_indices.append(i)
+
+        for i in self._marginalize_set:
+            if not 0 <= i < len(priors):
+                raise ValueError(f"marginalize index {i} out of range [0,{len(priors)})")
+            if priors[i][0] == "fixed":
+                raise ValueError(f"marginalize index {i} is a 'fixed' param; use one or the other")
 
         self._param_dim = len(self._free_indices)  # Latent space dimension
         self._full_param_dim = len(priors)  # Full output dimension
@@ -142,6 +162,8 @@ class Product(TransformedPrior):
             result = torch.zeros(*batch_shape, self._full_param_dim, dtype=z.dtype, device=z.device)
             for idx, val in self._fixed_values.items():
                 result[..., idx] = val
+            for idx in self._marginalize_set:
+                result[..., idx] = self._sample_marginal(idx, batch_shape, z.dtype, z.device)
             return result
 
         if mode == "standard_normal":
@@ -153,6 +175,8 @@ class Product(TransformedPrior):
                 dist_type, *params = prior
                 if dist_type == "fixed":
                     transformed[i] = torch.full(z.shape[:-1], params[0], dtype=z.dtype, device=z.device)
+                elif i in self._marginalize_set:
+                    transformed[i] = self._sample_marginal(i, z.shape[:-1], z.dtype, z.device)
                 else:
                     x_i = self._from_standard_normal(z[..., z_idx], dist_type, *params)
                     if x_i is None:
@@ -179,6 +203,8 @@ class Product(TransformedPrior):
             dist_type, *params = prior
             if dist_type == "fixed":
                 x_i = torch.full(u.shape[:-1], params[0], dtype=u.dtype, device=u.device)
+            elif i in self._marginalize_set:
+                x_i = self._sample_marginal(i, u.shape[:-1], u.dtype, u.device)
             else:
                 x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
                 u_idx += 1
@@ -208,8 +234,8 @@ class Product(TransformedPrior):
             use_direct = True
             for i, prior in enumerate(self.priors):
                 dist_type, *params = prior
-                if dist_type == "fixed":
-                    continue  # Skip fixed parameters
+                if dist_type == "fixed" or i in self._marginalize_set:
+                    continue  # excluded from the latent space
                 z_i = self._to_standard_normal(x[..., i], dist_type, *params)
                 if z_i is None:
                     use_direct = False
@@ -223,8 +249,8 @@ class Product(TransformedPrior):
         uniform = []
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
-            if dist_type == "fixed":
-                continue  # Skip fixed parameters
+            if dist_type == "fixed" or i in self._marginalize_set:
+                continue  # excluded from the latent space
             u_i = self._inverse_transform(x[..., i], dist_type, *params)
             uniform.append(u_i)
 
@@ -252,21 +278,33 @@ class Product(TransformedPrior):
         Returns:
             numpy array of shape (batch_size, full_param_dim) in target distribution space.
         """
-        # Sample uniform for free parameters only
-        u = torch.rand(batch_size, self._param_dim, dtype=torch.float64)
-
+        # Free and marginalized params are both drawn from their own prior; only
+        # fixed params take a constant. (Marginalized params are absent from the
+        # latent space but still fed to the simulator, so they must be sampled.)
         transformed = []
-        u_idx = 0
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
             if dist_type == "fixed":
                 x_i = torch.full((batch_size,), params[0], dtype=torch.float64)
             else:
-                x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
-                u_idx += 1
+                u_i = torch.rand(batch_size, dtype=torch.float64)
+                x_i = self._forward_transform(u_i, dist_type, *params)
             transformed.append(x_i)
 
         return torch.stack(transformed, dim=-1).numpy()
+
+    # ==================== Marginalized Parameters ====================
+
+    def _sample_marginal(self, idx, batch_shape, dtype, device):
+        """Fresh random draw from the declared prior of a marginalized param.
+
+        Marginalized params are excluded from the latent space, so forward()
+        cannot recover their value from z; it injects an independent prior
+        sample instead. The marginalization is realized by this randomness at
+        simulation time plus the param's exclusion from the learned density."""
+        dist_type, *params = self.priors[idx]
+        u = torch.rand(batch_shape, dtype=dtype, device=device)
+        return self._forward_transform(u, dist_type, *params)
 
     # ==================== Latent Space Conversions ====================
 
