@@ -35,8 +35,10 @@ class DynamicSVD(torch.nn.Module):
         momentum: float = 0.1,
         shrinkage: bool = True,
         whitener=None,
+        fit_on_signal: bool = False,
     ) -> None:
         super().__init__()
+        self.fit_on_signal = fit_on_signal
         self.n_components = n_components
         self.buffer_size = buffer_size if buffer_size is not None else 4 * n_components
         self.momentum = momentum
@@ -62,7 +64,15 @@ class DynamicSVD(torch.nn.Module):
         if self.whitener is not None and signal is not None:
             self.whitener.update((x - signal).detach())
 
-        x_white = self.whitener(x) if self.whitener is not None else x
+        # fit_on_signal: the eigenbasis is fitted from the noise-free ``signal``
+        # stream (a training-only scaffold); projections in forward() remain on
+        # ``x``. Removes noise-contaminated components (empirical eigenvalues up
+        # to the Marchenko-Pastur edge (1+sqrt(D/N))^2 sigma^2 masquerade as
+        # structure when fitting on noisy x). With shrinkage=True the trailing
+        # near-zero clean eigenvalues are damped, so the 1/sqrt(lambda)
+        # normalization cannot amplify observation noise.
+        fit_x = signal if (self.fit_on_signal and signal is not None) else x
+        x_white = self.whitener(fit_x) if self.whitener is not None else fit_x
 
         self.buffer.append(x_white)
         self.buffer_counter += x_white.shape[0]
