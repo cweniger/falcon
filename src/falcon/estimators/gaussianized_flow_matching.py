@@ -146,6 +146,7 @@ class _WhitenedFlow(nn.Module):
 
     def __init__(self, param_dim: int, cond_dim: int, *,
                  momentum: float, min_var: float, eig_update_freq: int,
+                 cond_momentum: Optional[float] = None,
                  flow_hidden: int, flow_layers: int, time_dim: int, ema_decay: float,
                  sample_steps: int, density_steps: int, divergence: str, n_probe: int,
                  eval_chunk: int, layernorm: bool = True, antithetic: bool = True,
@@ -179,13 +180,13 @@ class _WhitenedFlow(nn.Module):
                 raise ValueError("whiten_fold is incompatible with glu_cond (gates also consume w)")
             if focus_dims:
                 raise ValueError("whiten_fold is incompatible with focus_dims")
-            # Rung accumulator: frame deltas compose affinely and are accumulated
+            # Deadband accumulator: frame deltas compose affinely and are accumulated
             # here; the fold fires only when the ACCUMULATED delta crosses
             # fold_threshold. EMA estimation noise is mean-reverting, so on a
             # stationary buffer the accumulator hovers at identity and no fold
             # ever fires (exact baseline behavior); systematic drift (zoom,
             # branch-mass motion) adds up and is absorbed in function-preserving
-            # rungs. Per-step folding (threshold=0) injects the stats noise
+            # folds. Per-step folding (threshold=0) injects the stats noise
             # straight into the weights - measured to cost ~2 nats val on a
             # stationary 32k buffer - so keep the threshold finite.
             self.register_buffer("_fold_Macc", torch.eye(param_dim, dtype=torch.float64))
@@ -204,9 +205,24 @@ class _WhitenedFlow(nn.Module):
         # EMA mean/std of the summary, mirroring GaussianFullCov's _input_mean/_input_std:
         # keep the conditioning at ~unit scale so it neither swamps w nor buries the fine
         # x-dependence that pins the zoomed posterior. (null stays learnable in this space.)
-        self.cond_momentum = momentum
+        # Summary-normalisation EMA rate.  Decoupled from the whitener's momentum:
+        # cond() re-gauges the network's AMPLITUDE sensitivity, and x_obs passes
+        # through the same transform, so a fast rate makes the target's own
+        # representation chase the buffer -- a feedback loop that lands on D_L,
+        # the only pure-amplitude parameter.  At momentum 0.01 the horizon is ~100
+        # steps (<2 epochs), i.e. it fully re-adapts within a rung.
+        self.cond_momentum = momentum if cond_momentum is None else cond_momentum
         self.register_buffer("_cond_mean", torch.zeros(cond_dim))
         self.register_buffer("_cond_std", torch.ones(cond_dim))
+        # When True, the summary normalisation stops tracking the buffer.  D_L is
+        # the only PURE-AMPLITUDE parameter (h ~ 1/D_L); every other parameter is
+        # carried by shape/phase.  A normalisation that re-gauges amplitude every
+        # step therefore lands almost entirely on D_L -- and x_obs passes through
+        # the same moving transform, so the target's representation drifts while
+        # the data is fixed.  Measured: _cond_std contracts 5-10x over a run, and
+        # the contraction rank-orders with the D_L bias (earwig 4.6x/+3.2sig,
+        # husky 6.8x/+11.3sig, sponge 9.3x/+13.7sig).
+        self.cond_stats_frozen = False
 
     # ---- EMA ----
     def ema_update(self) -> None:
@@ -218,6 +234,8 @@ class _WhitenedFlow(nn.Module):
     # ---- summary normalization (EMA diagonal whitening of the conditioning) ----
     @torch.no_grad()
     def _update_cond_stats(self, s: torch.Tensor) -> None:
+        if self.cond_stats_frozen:
+            return
         m = self.cond_momentum
         s = s.detach().to(self._cond_mean.dtype)
         self._cond_mean = (1 - m) * self._cond_mean + m * s.mean(dim=0)
@@ -381,12 +399,21 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         cache_on_device: bool = False,
         cache_sync_every: int = 0,
         max_cache_samples: int = 0,
+        # rung training (see TrainingLoopConfig); 0 = off, legacy behaviour
+        rung_epochs: int = 0,
+        rung_min_epochs: int = 8,
+        rung_max_epochs: int = 200,
+        rung_patience: int = 12,
+        rung_floor_refits: int = 5,  # proposal pools used to re-fit the floor per rung
+        rung_best_settle_only: bool = True,  # no checkpointing in a rung's first rung_min_epochs
+        cond_freeze_rung: int = 0,  # >0: freeze summary normalisation from this rung on (0 = never)
         # global whitener
         momentum: float = 0.01,
+        cond_momentum: Optional[float] = None,  # None = share `momentum` (legacy)
         min_var: float = 1e-20,
         eig_update_freq: int = 1,
         whiten_fold: bool = False,  # fold whitener frame deltas into the velocity nets (docs/PLAN_frame_folding.md)
-        fold_threshold: float = 0.02,  # rung size: fold only when the accumulated delta exceeds this
+        fold_threshold: float = 0.02,  # deadband width: fold only when the accumulated delta exceeds this
         # flow-matching net
         flow_hidden: int = 256,
         flow_layers: int = 4,
@@ -443,7 +470,15 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.cache_on_device = cache_on_device
         self.cache_sync_every = cache_sync_every
         self.max_cache_samples = max_cache_samples
+        self.rung_epochs = rung_epochs
+        self.rung_min_epochs = rung_min_epochs
+        self.rung_max_epochs = rung_max_epochs
+        self.rung_patience = rung_patience
+        self.rung_floor_refits = rung_floor_refits
+        self.rung_best_settle_only = rung_best_settle_only
+        self.cond_freeze_rung = cond_freeze_rung
         self.momentum = momentum
+        self.cond_momentum = cond_momentum
         self.min_var = min_var
         self.eig_update_freq = eig_update_freq
         self.whiten_fold = whiten_fold
@@ -514,6 +549,10 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self._scheduler = None
         self._logp_cond_floor = None   # EMA log_prob_cond alpha-quantile floor (proposal truncation)
         self._target_summary = None    # raw embedding of the TARGET obs (for buffer discard)
+        # Rung mode: the floor is re-fitted only from a settled network, over a
+        # bounded number of proposal pools at each rung boundary, then frozen.
+        # None = unbounded (legacy: the EMA tracks every proposal call forever).
+        self._floor_update_budget = None
 
     # ==================== Initialization ====================
 
@@ -521,6 +560,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         return _WhitenedFlow(
             param_dim, cond_dim,
             momentum=self.momentum, min_var=self.min_var, eig_update_freq=self.eig_update_freq,
+            cond_momentum=self.cond_momentum,
             flow_hidden=self.flow_hidden, flow_layers=self.flow_layers, time_dim=self.time_dim,
             ema_decay=self.ema_decay, sample_steps=self.sample_steps,
             density_steps=self.density_steps, divergence=self.divergence, n_probe=self.n_probe,
@@ -624,7 +664,20 @@ class GaussianizedFlowMatching(StepwiseEstimator):
 
     def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
         val_loss = val_metrics.get("loss", float("inf"))        # total latent NLL
-        if val_loss < self._best_loss:
+
+        # Rung mode: suppress checkpointing while the net is still settling into
+        # this rung's data.  _best_loss was reset to inf at the boundary, so the
+        # first epoch would otherwise always win and _best_flow -- which is the
+        # DEPLOYED net, generating proposals and scoring discards -- would become
+        # the least-settled net of the rung.  While settling, _best_flow stays the
+        # previous rung's converged net: a frozen reference, and a self-consistent
+        # one, since this rung's data was generated by exactly that net.
+        settling = (
+            self.rung_epochs > 0
+            and self.rung_best_settle_only
+            and self._epoch_in_rung < self.rung_min_epochs
+        )
+        if val_loss < self._best_loss and not settling:
             self._best_loss = val_loss
             self._best_flow.load_state_dict(self._flow.state_dict())
             self._best_embedding.load_state_dict(self._embedding.state_dict())
@@ -648,6 +701,34 @@ class GaussianizedFlowMatching(StepwiseEstimator):
              "logp_cond_floor": (self._logp_cond_floor
                                  if self._logp_cond_floor is not None else float("nan"))})
         return {"lr": lr}
+
+    # ==================== Rung hooks ====================
+
+    def on_rung_start(self, rung: int) -> None:
+        """Reset the checkpoint high-water mark for the new rung.
+
+        ``_best_loss`` is otherwise an all-time minimum, but the val NLL is not
+        comparable across rungs: each rung validates against different frozen
+        data, and the latent NLL carries the whitener's log-volume term, which
+        shrinks as the dataset concentrates.  Left global, the checkpoint would
+        latch onto whichever rung happened to have the most concentrated data
+        and never update again.
+        """
+        self._best_loss = float("inf")
+        if (self.cond_freeze_rung > 0 and rung >= self.cond_freeze_rung
+                and self._flow is not None and not self._flow.cond_stats_frozen):
+            self._flow.cond_stats_frozen = True
+            log({"cond_stats_frozen_at_rung": rung})
+            info(f"Summary normalisation FROZEN at rung {rung} "
+                 f"(cond_std median {self._flow._cond_std.median().item():.4f})")
+
+    def on_rung_end(self, rung: int, val_metrics: Dict[str, float]) -> None:
+        """Re-open the density floor for re-fitting from the settled network."""
+        self._floor_update_budget = self.rung_floor_refits
+        log({"rung_end": rung,
+             "rung_end_val_loss": val_metrics.get("loss", float("nan")),
+             "logp_cond_floor": (self._logp_cond_floor
+                                 if self._logp_cond_floor is not None else float("nan"))})
 
     @torch.no_grad()
     def _shrink_and_perturb(self) -> None:
@@ -787,19 +868,27 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             w_post = torch.exp(logw_post)                          # (num_proposals, B)
 
             if mode == "proposal":
-                # EMA of the pooled weighted alpha-quantile of log_prob_cond (columns share one obs)
-                pooled_w = (w_post / B).reshape(-1)                # sums to ~1
-                vals = torch.nan_to_num(log_prob_cond, nan=self.nan_replacement,
-                                        neginf=self.nan_replacement).reshape(-1)
-                sorted_vals, order = torch.sort(vals)
-                cw = torch.cumsum(pooled_w[order], dim=0)
-                ge = (cw >= self.truncation_alpha).nonzero()
-                qi = int(ge[0]) if ge.numel() > 0 else sorted_vals.numel() - 1
-                q_batch = sorted_vals[qi].item()
-                if np.isfinite(q_batch):
-                    m = self.truncation_momentum
-                    self._logp_cond_floor = (q_batch if self._logp_cond_floor is None
-                                             else (1 - m) * self._logp_cond_floor + m * q_batch)
+                # EMA of the pooled weighted alpha-quantile of log_prob_cond (columns share one obs).
+                # In rung mode the budget is refilled at each rung boundary and spent
+                # over the next few pools, so the floor is a property of the settled
+                # network for that rung and is frozen in between; a ~alpha-tail
+                # quantile read off a network still chasing its data is not a
+                # quantity worth acting on.  budget=None keeps the legacy behaviour.
+                if self._floor_update_budget is None or self._floor_update_budget > 0:
+                    pooled_w = (w_post / B).reshape(-1)                # sums to ~1
+                    vals = torch.nan_to_num(log_prob_cond, nan=self.nan_replacement,
+                                            neginf=self.nan_replacement).reshape(-1)
+                    sorted_vals, order = torch.sort(vals)
+                    cw = torch.cumsum(pooled_w[order], dim=0)
+                    ge = (cw >= self.truncation_alpha).nonzero()
+                    qi = int(ge[0]) if ge.numel() > 0 else sorted_vals.numel() - 1
+                    q_batch = sorted_vals[qi].item()
+                    if np.isfinite(q_batch):
+                        m = self.truncation_momentum
+                        self._logp_cond_floor = (q_batch if self._logp_cond_floor is None
+                                                 else (1 - m) * self._logp_cond_floor + m * q_batch)
+                    if self._floor_update_budget is not None:
+                        self._floor_update_budget -= 1
 
                 if (self._logp_cond_floor is not None
                         and self._total_epochs_trained >= self.truncation_warmup_epochs):
