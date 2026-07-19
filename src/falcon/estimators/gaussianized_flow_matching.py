@@ -154,7 +154,8 @@ class _WhitenedFlow(nn.Module):
                  per_param_nets: bool = False, cond_per_param: bool = False,
                  focus_dims=None, glu_cond: bool = False,
                  residual: bool = False, time_alpha: float = 0.0,
-                 whiten_fold: bool = False, fold_threshold: float = 0.02):
+                 whiten_fold: bool = False, fold_threshold: float = 0.02,
+                 split_marginal: bool = False):
         super().__init__()
         self.param_dim = param_dim
         self.cond_dim = cond_dim
@@ -201,6 +202,26 @@ class _WhitenedFlow(nn.Module):
         self.velocity_ema = EMA.clone(self.velocity)
         self._ema = EMA(ema_decay)
         self.null_token = nn.Parameter(torch.zeros(cond_dim))   # learnable "no conditioning"
+        # split_marginal: independent weights for the marginal branch. With a shared
+        # trunk the one velocity field must represent both the sharp conditional and
+        # the broad marginal; smoothness in the conditioning input pulls the branches
+        # toward each other, and the proposal drive gamma*(log q_cond - log q_marg)
+        # inherits any such contamination as a systematic tilt. The NF predecessor of
+        # this estimator trained two separate flows and was unbiased on the same
+        # problem; the FM version showed a shared ~+0.2 dex D_L offset across six
+        # alpha=0 runs (2026-07-19). The marginal net keeps the same signature and is
+        # fed the (learnable) null token as a constant input, so all interfaces and
+        # whiten-fold assumptions are unchanged.
+        self.split_marginal = split_marginal
+        if split_marginal:
+            self.velocity_marg = VelocityField(param_dim, cond_dim, flow_hidden, flow_layers, time_dim,
+                                               layernorm, w_embed_dim=w_embed_dim,
+                                               cond_embed_dim=cond_embed_dim,
+                                               per_param_nets=per_param_nets,
+                                               cond_per_param=cond_per_param,
+                                               focus_dims=focus_dims, glu_cond=glu_cond,
+                                               residual=residual)
+            self.velocity_marg_ema = EMA.clone(self.velocity_marg)
 
         # EMA mean/std of the summary, mirroring GaussianFullCov's _input_mean/_input_std:
         # keep the conditioning at ~unit scale so it neither swamps w nor buries the fine
@@ -227,9 +248,17 @@ class _WhitenedFlow(nn.Module):
     # ---- EMA ----
     def ema_update(self) -> None:
         self._ema.update(self.velocity_ema, self.velocity)
+        if self.split_marginal:
+            self._ema.update(self.velocity_marg_ema, self.velocity_marg)
 
     def null_cond(self, batch: int) -> torch.Tensor:
         return self.null_token[None].expand(batch, self.cond_dim)
+
+    def _field(self, marg: bool, ema: bool = True) -> VelocityField:
+        """Velocity field for a branch: the dedicated marginal net when split, else the shared one."""
+        if marg and self.split_marginal:
+            return self.velocity_marg_ema if ema else self.velocity_marg
+        return self.velocity_ema if ema else self.velocity
 
     # ---- summary normalization (EMA diagonal whitening of the conditioning) ----
     @torch.no_grad()
@@ -274,7 +303,10 @@ class _WhitenedFlow(nn.Module):
         P = self.param_dim
         Minv = torch.linalg.inv(M)               # float64
         shift = c @ Minv                         # (P,)
-        for field in (self.velocity, self.velocity_ema):
+        fields = [self.velocity, self.velocity_ema]
+        if self.split_marginal:
+            fields += [self.velocity_marg, self.velocity_marg_ema]
+        for field in fields:
             first, last = field.net[0], field.net[-1]
             dt = first.weight.dtype
             cols_old = first.weight[:, :P].to(M.dtype)
@@ -304,32 +336,37 @@ class _WhitenedFlow(nn.Module):
         null = self.null_token[None].expand(w.shape[0], self.cond_dim)
         fm_cond = fm_loss(self.velocity, w, s_n, self.antithetic,
                           time_alpha=self.time_alpha)
-        fm_marg = fm_loss(self.velocity, w, null, self.antithetic,
+        fm_marg = fm_loss(self._field(marg=True, ema=False), w, null, self.antithetic,
                           time_alpha=self.time_alpha)
         return {"fm_cond": fm_cond, "fm_marg": fm_marg, "total": fm_cond + fm_marg}
 
     # ---- sampling: (n, B, param) ----  chunked over n*B to bound memory
+    # NOTE: returns theta_lat (already unwhitened), NOT whitened w -- while log_prob
+    # takes theta_lat and whitens internally. Easy to trip on (see 2026-07-19 notes).
     @torch.no_grad()
-    def sample(self, n: int, s: torch.Tensor) -> torch.Tensor:
+    def sample(self, n: int, s: torch.Tensor, marg: bool = False) -> torch.Tensor:
         B, C, P = s.shape[0], s.shape[1], self.param_dim
+        field = self._field(marg)
         s_flat = s[None].expand(n, B, C).reshape(n * B, C).float()
         outs = []
         for i in range(0, n * B, self.eval_chunk):
             sc = s_flat[i:i + self.eval_chunk]
-            w = euler_sample(self.velocity_ema, sc, P, self.sample_steps)
+            w = euler_sample(field, sc, P, self.sample_steps)
             outs.append(self.whitener.unwhiten(w))
         return torch.cat(outs, 0).reshape(n, B, P)                   # (n, B, P) f64
 
     # ---- density: (N, B, param) -> (N, B) ----  chunked over N*B
-    def log_prob(self, theta_lat: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+    def log_prob(self, theta_lat: torch.Tensor, s: torch.Tensor,
+                 marg: bool = False) -> torch.Tensor:
         N, B, P = theta_lat.shape
         C = s.shape[1]
+        field = self._field(marg)
         w_all = self.whitener.whiten(theta_lat.reshape(N * B, P)).float()
         s_flat = s[None].expand(N, B, C).reshape(N * B, C).float()
         logdet = self.whitener.logdet()
         outs = []
         for i in range(0, N * B, self.eval_chunk):
-            lp = cnf_logprob(self.velocity_ema, w_all[i:i + self.eval_chunk],
+            lp = cnf_logprob(field, w_all[i:i + self.eval_chunk],
                              s_flat[i:i + self.eval_chunk],
                              self.density_steps, self.divergence, self.n_probe)
             outs.append(lp.to(self.whitener._mean.dtype) + logdet)
@@ -355,13 +392,14 @@ class _WhitenedFlow(nn.Module):
         logdet = self.whitener.logdet()
         out_dtype = self.whitener._mean.dtype
 
-        def nll(cond: torch.Tensor) -> float:
-            lp = cnf_logprob(self.velocity_ema, w, cond.float(), steps, "hutch", n_probe)
+        def nll(cond: torch.Tensor, marg: bool = False) -> float:
+            lp = cnf_logprob(self._field(marg), w, cond.float(), steps, "hutch", n_probe)
             lp = lp.to(out_dtype) + logdet
             lp = torch.nan_to_num(lp, nan=-1e6, neginf=-1e6)
             return -lp.mean().item()
 
-        return {"nll_cond": nll(self.cond(s)), "nll_marg": nll(self.null_cond(M))}
+        return {"nll_cond": nll(self.cond(s)),
+                "nll_marg": nll(self.null_cond(M), marg=True)}
 
 
 class GaussianizedFlowMatching(StepwiseEstimator):
@@ -431,6 +469,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         glu_cond: bool = False,    # FMPE-style (w,t) GLU gates on every hidden layer
         residual: bool = False,    # residual hidden blocks in the velocity trunk
         time_alpha: float = 0.0,   # power-law time prior (FMPE Sec 3.3); 0 = uniform
+        split_marginal: bool = False,  # independent velocity net for the marginal branch (NF-style two-flow setup)
         cond_per_param: bool = False,  # leg i sees only summary slice i (pair with n_queries=param_dim)
         focus_dims=None,          # DEBUG: flow models only these free-param indices; rest = whitened Gaussian
         layernorm: bool = True,
@@ -501,6 +540,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.glu_cond = glu_cond
         self.residual = residual
         self.time_alpha = time_alpha
+        self.split_marginal = split_marginal
         self.cond_per_param = cond_per_param
         self.focus_dims = focus_dims
         self.layernorm = layernorm
@@ -579,7 +619,7 @@ class GaussianizedFlowMatching(StepwiseEstimator):
             time_alpha=self.time_alpha, whiten_fold=self.whiten_fold,
             fold_threshold=self.fold_threshold,
             per_param_nets=self.per_param_nets, cond_per_param=self.cond_per_param,
-            focus_dims=self.focus_dims,
+            focus_dims=self.focus_dims, split_marginal=self.split_marginal,
         ).to(self.device)
 
     def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
@@ -854,11 +894,11 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         if n_cond > 0:
             parts.append(flow.sample(n_cond, s))
         if n_marg > 0:
-            parts.append(flow.sample(n_marg, null))
+            parts.append(flow.sample(n_marg, null, marg=True))
         proposals = torch.cat(parts, dim=0)                       # (num_proposals, B, P)
 
         log_prob_cond = flow.log_prob(proposals, s)
-        log_prob_marg = flow.log_prob(proposals, null)
+        log_prob_marg = flow.log_prob(proposals, null, marg=True)
 
         # Latent prior is N(0, I) (NOT uniform): it enters the weights analytically.
         log_prior = -0.5 * (proposals.pow(2).sum(-1) + self.param_dim * np.log(2 * np.pi))
