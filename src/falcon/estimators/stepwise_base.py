@@ -25,6 +25,16 @@ class TrainingLoopConfig:
     cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
     prior_epochs: int = 0
 
+    # Rung training.  The adaptive dataset keeps being transformed continuously
+    # and simulation never pauses -- only the *trainer's view* of it is held
+    # stationary for a rung, so that decisions read off the network (notably
+    # deep-tail density quantiles) come from a settled model rather than one
+    # chasing data that moved under it.  Round-free but rung-structured.
+    rung_epochs: int = 0        # 0 = off (legacy: sync every cache_sync_every epochs)
+    rung_min_epochs: int = 8    # floor, so val noise cannot end a rung immediately
+    rung_max_epochs: int = 200  # ceiling, so a slowly-creeping val cannot stall forever
+    rung_patience: int = 12     # epochs without val improvement that end a rung
+
 
 class StepwiseEstimator(BaseEstimator):
     """
@@ -38,7 +48,26 @@ class StepwiseEstimator(BaseEstimator):
     - train_step() / val_step() / on_epoch_end()
     - sample_prior/posterior/proposal
     - save/load
+
+    Optionally, subclasses may override on_rung_start/on_rung_end to take
+    decisions from a settled network at rung boundaries (see TrainingLoopConfig).
     """
+
+    # Class-level defaults so estimators that do not expose these as __init__
+    # kwargs (Flow, GaussianFullCov) inherit legacy behaviour unchanged.
+    rung_epochs: int = 0
+    rung_min_epochs: int = 8
+    rung_max_epochs: int = 200
+    rung_patience: int = 12
+
+    # ==================== Rung hooks ====================
+
+    def on_rung_start(self, rung: int) -> None:
+        """A new rung begins; the training view has just been refreshed."""
+
+    def on_rung_end(self, rung: int, val_metrics: Dict[str, float]) -> None:
+        """A rung has converged.  Decisions that depend on a settled network
+        (density floors, buffer pruning) belong here, not mid-rung."""
 
     def setup(
         self,
@@ -53,6 +82,7 @@ class StepwiseEstimator(BaseEstimator):
         self.condition_keys = condition_keys or []
         self._terminated = False
         self._total_epochs_trained: int = 0
+        self._epoch_in_rung: int = 0
         self.networks_initialized = False
         self.history = {
             "train_ids": [],
@@ -150,13 +180,24 @@ class StepwiseEstimator(BaseEstimator):
         best_val_loss = float("inf")
         epochs_no_improve = 0
         total_steps = 0
+        rung = 0
+        # Instance attribute, not a local: on_epoch_end() needs to know how far
+        # into the rung it is (e.g. to hold off checkpointing while settling).
+        self._epoch_in_rung = 0
+        rung_mode = self.rung_epochs > 0
         t0 = time.perf_counter()
+
+        if rung_mode:
+            log({"rung": rung})
+            self.on_rung_start(rung)
 
         for epoch in range(self.max_epochs):
             log({"epoch": self._total_epochs_trained + 1})
 
-            # Periodic incremental sync
-            if epoch > 0 and epoch % sync_every == 0:
+            # Periodic incremental sync.  In rung mode the training view is
+            # deliberately frozen for the whole rung and refreshed only at the
+            # boundary below, so this must not fire.
+            if not rung_mode and epoch > 0 and epoch % sync_every == 0:
                 train_cache.sync()
                 val_cache.sync()
 
@@ -245,7 +286,36 @@ class StepwiseEstimator(BaseEstimator):
             )
             self._total_epochs_trained += 1
 
-            if epochs_no_improve >= self.early_stop_patience:
+            if rung_mode:
+                self._epoch_in_rung += 1
+                settled = (
+                    epochs_no_improve >= self.rung_patience
+                    and self._epoch_in_rung >= self.rung_min_epochs
+                )
+                if settled or self._epoch_in_rung >= self.rung_max_epochs:
+                    reason = "settled" if settled else "max_epochs"
+                    info(
+                        f"Rung {rung} complete after {self._epoch_in_rung} epochs"
+                        f" ({reason}) | best_val_loss={best_val_loss:.3e}"
+                    )
+                    # Decisions first, while the network is still the settled
+                    # one that was validated against this rung's frozen data.
+                    self.on_rung_end(rung, val_metrics_avg)
+                    # Then advance the training view.  Two blocking syncs: the
+                    # first applies the in-flight fetch and launches a fresh
+                    # one, the second applies that.  A single call would leave
+                    # us a fetch behind, i.e. training on pre-decision data.
+                    train_cache.sync(wait=True)
+                    val_cache.sync(wait=True)
+                    train_cache.sync(wait=True)
+                    val_cache.sync(wait=True)
+                    rung += 1
+                    self._epoch_in_rung = 0
+                    epochs_no_improve = 0
+                    best_val_loss = float("inf")
+                    log({"rung": rung})
+                    self.on_rung_start(rung)
+            elif epochs_no_improve >= self.early_stop_patience:
                 info("Early stopping triggered.")
                 break
 
