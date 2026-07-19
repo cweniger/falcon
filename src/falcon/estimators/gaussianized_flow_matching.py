@@ -407,6 +407,13 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         rung_floor_refits: int = 5,  # proposal pools used to re-fit the floor per rung
         rung_best_settle_only: bool = True,  # no checkpointing in a rung's first rung_min_epochs
         cond_freeze_rung: int = 0,  # >0: freeze summary normalisation from this rung on (0 = never)
+        # Periodic on-disk saves. DeployedGraph calls save() ONLY at shutdown
+        # (deployed_graph.py:910), so any hard kill (quota, OOM, preemption) loses the whole
+        # run's networks -- observed 2026-07-19: an inode-quota kill destroyed four 2h runs
+        # minutes before their graceful stop. save() overwrites fixed filenames, so periodic
+        # saves are inode-neutral.
+        checkpoint_dir: Optional[str] = None,  # usually ${run_dir}/graph/<node>
+        checkpoint_every_rungs: int = 0,       # save every N rung boundaries (0 = off, legacy)
         # global whitener
         momentum: float = 0.01,
         cond_momentum: Optional[float] = None,  # None = share `momentum` (legacy)
@@ -477,6 +484,8 @@ class GaussianizedFlowMatching(StepwiseEstimator):
         self.rung_floor_refits = rung_floor_refits
         self.rung_best_settle_only = rung_best_settle_only
         self.cond_freeze_rung = cond_freeze_rung
+        self.checkpoint_dir = checkpoint_dir
+        self.checkpoint_every_rungs = checkpoint_every_rungs
         self.momentum = momentum
         self.cond_momentum = cond_momentum
         self.min_var = min_var
@@ -729,6 +738,19 @@ class GaussianizedFlowMatching(StepwiseEstimator):
              "rung_end_val_loss": val_metrics.get("loss", float("nan")),
              "logp_cond_floor": (self._logp_cond_floor
                                  if self._logp_cond_floor is not None else float("nan"))})
+        # Periodic crash-safe save of the settled nets (see checkpoint_every_rungs
+        # in __init__). Failure is logged, never fatal: a full disk must not kill
+        # training that could still finish in RAM and save later.
+        if (self.checkpoint_every_rungs > 0 and self.checkpoint_dir is not None
+                and (rung + 1) % self.checkpoint_every_rungs == 0
+                and self.networks_initialized):
+            try:
+                d = Path(self.checkpoint_dir)
+                d.mkdir(parents=True, exist_ok=True)
+                self.save(d)
+                info(f"Rung {rung}: checkpoint saved to {d}")
+            except OSError as e:
+                info(f"Rung {rung}: checkpoint save FAILED ({e}); continuing")
 
     @torch.no_grad()
     def _shrink_and_perturb(self) -> None:
