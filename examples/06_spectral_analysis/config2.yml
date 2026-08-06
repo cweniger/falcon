@@ -1,0 +1,110 @@
+# =============================================================================
+# Falcon Example Configuration: 06_spectral_analysis (SVD variant)
+# -----------------------------------------------------------------------------
+# Uses scaffolded streaming SVD embedding on raw signals.
+# Clean signal (y) and noise (n) are scaffolds — available during training
+# for whitening/PCA learning, but not at inference time.
+#
+# Graph: theta -> y (clean signal)
+#                  \
+#                   -> x (observed = y + n)
+#                  /
+#        n (noise)
+#
+# Prior ranges are 3x CRB at N=100k (narrow, for parameter estimation).
+# Amortized only (no proposal resampling).
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 06_spectral_analysis
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  import: "./src"
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
+
+buffer:
+  min_samples: 4092
+  max_samples: 4092
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
+  simulate_interval: 1
+  store_fraction: 0.0
+
+graph:
+  theta:
+    evidence: [x]
+    scaffolds: [y, n]
+
+    simulator:
+      _target_: falcon.priors.Product
+      priors:  # 10x CRB at N=100k
+        - ['normal', 2.75e-3, 1e-7]  # f0
+        - ['normal', 1.0,     1e-5]  # chirp_mass
+        - ['normal', 1.5,     1e-1]  # harmonic_decay
+
+    estimator:
+      _target_: falcon.estimators.Gaussian
+      loop:
+        num_epochs: 500
+        batch_size: 64
+        early_stop_patience: 32
+      network:
+        hidden_dim: 128
+        num_layers: 3
+        momentum: 0.1
+        min_var: 1.0e-25
+        eig_update_freq: 1
+      embedding:
+        _target_: embeddings.SVDEmbedding
+        N: 100000
+        n_components: 64
+        buffer_size: 256
+        momentum: 0.1
+        _input_: [x, y, n]
+      optimizer:
+        lr: 0.005
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 1.0
+        discard_samples: false
+        log_ratio_threshold: -20.0
+
+    ray:
+      num_gpus: 0.3
+
+  y:
+    parents: [theta]
+    simulator:
+      _target_: model.Signal
+      N: 100000
+    ray:
+      num_gpus: 0.3
+
+  n:
+    simulator:
+      _target_: model.Noise
+      N: 100000
+      sigma: 1.0
+
+  x:
+    parents: [y, n]
+    simulator:
+      _target_: model.Data
+    observed: "./data/obs.npz['x']"
+
+sample:
+  prior:
+    n: 1000
+  posterior:
+    n: 1000

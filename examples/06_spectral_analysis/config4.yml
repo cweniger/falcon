@@ -1,0 +1,112 @@
+# =============================================================================
+# Falcon Example Configuration: 06_spectral_analysis (N=256, SVD embedding)
+# -----------------------------------------------------------------------------
+# Like config3 but with scaffolded SVD embedding re-enabled.
+# Clean signal (y) and noise (n) are scaffolds — available during training
+# for whitening/PCA learning, but not at inference time.
+#
+# Graph: theta -> y (clean signal)
+#                  \
+#                   -> x (observed = y + n)
+#                  /
+#        n (noise)
+#
+# Prior ranges are Normal, 5σ CRB at N=256.
+# =============================================================================
+
+logging:
+  wandb:
+    enabled: false
+    project: falcon_examples
+    group: 06_spectral_analysis
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  import: "./src"
+  buffer: ${run_dir}/sim_dir
+  graph: ${run_dir}/graph_dir
+  samples: ${run_dir}/samples_dir
+
+buffer:
+  min_samples: 4000
+  max_samples: 4000
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: true
+  simulate_interval: 1
+  store_fraction: 0.0
+
+graph:
+  theta:
+    evidence: [x]
+    scaffolds: [y, n]
+
+    simulator:
+      _target_: falcon.priors.Product
+      priors:  # Normal, 5σ CRB at N=256
+        #        - ['normal', 2.7500000000e-3, 4.9540464808e-8]  # f0
+        #        - ['normal', 1.0000000000, 7.0304073517e-5]      # chirp_mass
+          #- ['normal', 1.5000000000, 2.9271998214e-1]       # harmonic_decay
+        - ['normal', 2.7500000200e-3, 4.9540464808e-8]  # f0
+        - ['normal', 1.0000200000, 7.0304073517e-5]      # chirp_mass
+        - ['normal', 1.6000000000, 2.9271998214e-1]       # harmonic_decay
+
+    estimator:
+      _target_: falcon.estimators.Gaussian
+      loop:
+        num_epochs: 500
+        batch_size: 256
+        early_stop_patience: 16
+      network:
+        hidden_dim: 512
+        num_layers: 3
+        momentum: 0.1
+        min_var: 1.0e-25
+        eig_update_freq: 1
+      embedding:
+        _target_: embeddings.SVDEmbedding
+        N: 256
+        n_components: 64
+        buffer_size: 512
+        momentum: 0.1
+        _input_: [x, y, n]
+      optimizer:
+        lr: 0.005
+        lr_decay_factor: 0.5
+        scheduler_patience: 16
+      inference:
+        gamma: 1.0
+        discard_samples: false
+        log_ratio_threshold: -20.0
+
+    ray:
+      num_gpus: 0.3
+
+  y:
+    parents: [theta]
+    simulator:
+      _target_: model.Signal
+      N: 256
+    ray:
+      num_gpus: 0.3
+
+  n:
+    simulator:
+      _target_: model.Noise
+      N: 256
+      sigma: 1.0
+
+  x:
+    parents: [y, n]
+    simulator:
+      _target_: model.Data
+    observed: "./data/obs_256.npz['x']"
+
+sample:
+  prior:
+    n: 1000
+  posterior:
+    n: 1000
