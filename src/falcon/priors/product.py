@@ -68,19 +68,31 @@ class Product(TransformedPrior):
       - "triangular": Triangular distribution. Parameters: a (min), c (mode), b (max).
       - "fixed": Fixed value (excluded from latent space). Parameters: value.
 
+    Two roles exclude a parameter from the latent space, i.e. from what the
+    estimator infers.  They differ in what the simulator receives:
+      - "fixed": pinned to a constant, so it cannot influence the data at all.
+      - marginalize=[i, ...]: keeps its declared distribution and is redrawn
+        from it on every call, so it still varies and still broadens the
+        likelihood -- the estimator learns the posterior marginalized over it.
+        Use for nuisance parameters.  Note that forward() cannot recover a
+        marginalized value from the latent vector, so the corresponding column
+        of any generated sample is a *prior* draw, not a posterior draw; the
+        marginals of the remaining parameters are unaffected.
+
     Example:
         prior = Product([
             ("uniform", -100.0, 100.0),
             ("fixed", 5.0),              # Fixed parameter, not in latent space
             ("normal", 0.0, 1.0),
-        ])
+            ("uniform", 0.0, 1.0),       # Nuisance, marginalized over
+        ], marginalize=[3])
 
         # Latent space has dim=2 (only free params)
-        # Output space has dim=3 (includes fixed params)
+        # Output space has dim=4 (includes fixed and marginalized params)
 
         # For Gaussian estimator (standard normal latent space)
-        z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 3) -> z: (..., 2)
-        theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 3)
+        z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 4) -> z: (..., 2)
+        theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 4)
 
         # For Flow estimator (hypercube latent space)
         u = prior.inverse(theta, mode="hypercube")
@@ -281,14 +293,19 @@ class Product(TransformedPrior):
         # Free and marginalized params are both drawn from their own prior; only
         # fixed params take a constant. (Marginalized params are absent from the
         # latent space but still fed to the simulator, so they must be sampled.)
+        # Note this is _param_dim + len(marginalize), not _param_dim.
+        num_sampled = len(self.priors) - len(self._fixed_indices)
+        u = torch.rand(batch_size, num_sampled, dtype=torch.float64)
+
         transformed = []
+        u_idx = 0
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
             if dist_type == "fixed":
                 x_i = torch.full((batch_size,), params[0], dtype=torch.float64)
             else:
-                u_i = torch.rand(batch_size, dtype=torch.float64)
-                x_i = self._forward_transform(u_i, dist_type, *params)
+                x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
+                u_idx += 1
             transformed.append(x_i)
 
         return torch.stack(transformed, dim=-1).numpy()
