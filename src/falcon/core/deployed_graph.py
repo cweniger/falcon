@@ -846,6 +846,8 @@ class DeployedGraph:
                     except Exception:
                         pass  # Node may not support request_stop
 
+            # Short poll: the loop's own pacing comes from the time.sleep()
+            # below, so a long timeout here just adds to simulate_interval.
             ready, train_future_list = ray.wait(
                 train_future_list, num_returns=len(train_future_list), timeout=0.05
             )
@@ -878,6 +880,8 @@ class DeployedGraph:
                             {k: v for k, v in prop_ref.items()
                              if k.split(".")[0] in latent_nodes}
                         )
+                    # Pipeline the append: block on the *previous* one, then
+                    # fire this one and let it overlap the next simulation.
                     if pending_append is not None:
                         ray.get(pending_append)
                     pending_append = dataset_manager.append_refs.remote(sample_refs)
