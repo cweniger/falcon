@@ -15,6 +15,9 @@ class DynamicSVD(torch.nn.Module):
     provided, update(x, signal) computes noise = x - signal and updates the
     whitener from it, so the whitener normalizes the *noise* to unit variance.
     forward() applies whitening at inference without updating statistics.
+    Without a whitener the same noise estimate is reduced to a single scalar
+    variance (see σ² below), which is the right trade when the noise is white
+    but not worth a per-feature model.
 
     Inputs with more than two dimensions are flattened to (batch_size, D)
     internally, so image-shaped data can be fed in directly.
@@ -32,19 +35,25 @@ class DynamicSVD(torch.nn.Module):
 
     forward(x) → stable k-dim coefficients:
         1. c = X_white @ V.T        (project onto eigenbasis)
-        2. c *= λ/(λ+1)             (Wiener filter, diagonal)
+        2. c *= λ/(λ+σ²)            (Wiener filter, diagonal)
         3. c /= √λ                  (normalize to ~unit variance)
         4. c_out = c @ R.T          (rotate to stable frame)
 
-    Steps 2-3 are applied jointly, and only when shrinkage=True; with
-    shrinkage=False the raw projection is returned.
+    Steps 2-3 are applied jointly as √λ/(λ+σ²), and only when shrinkage=True;
+    with shrinkage=False the raw projection is returned.
 
-    Note that step 2 is the textbook Wiener gain only when λ is *signal* power
-    measured in noise units, which requires both a whitener and
-    fit_on_signal=True.  Fitting on x instead gives λ ≈ λ_signal + 1, so the
-    gain becomes (λ_s+1)/(λ_s+2) >= 1/2 and a noise-only direction is passed
-    through at half amplitude rather than suppressed.  Without a whitener at
-    all, the `+ 1` is in raw data units and the threshold is arbitrary.
+    σ² is the noise variance *in the units the eigenvalues are measured in*:
+      - with a whitener, the noise is normalized per feature, so σ² = 1;
+      - without one, a single scalar is estimated from x - signal in update()
+        under a white-noise assumption, so the denominator stays commensurate
+        with λ instead of comparing raw signal power against an arbitrary 1;
+      - with neither a whitener nor a signal, nothing can be estimated and it
+        falls back to 1.
+
+    Step 2 is the textbook Wiener gain only when λ is *signal* power, i.e. when
+    fit_on_signal=True.  Fitting on x instead gives λ ≈ λ_signal + σ², so the
+    gain becomes (λ_s+σ²)/(λ_s+2σ²) >= 1/2 and a noise-only direction is passed
+    through at half amplitude rather than suppressed.
     """
 
     def __init__(
@@ -71,22 +80,42 @@ class DynamicSVD(torch.nn.Module):
         self.eigenvalues: Optional[torch.Tensor] = None  # (k,)
         self._R: Optional[torch.Tensor] = None           # (k, k)
 
+        # Scalar noise variance used in the Wiener denominator.  None means
+        # "assume 1", which is correct when a whitener is attached (it
+        # normalizes the noise) and is the fallback when nothing better is
+        # known.  Estimated from `signal` in update() otherwise.
+        self._noise_var: Optional[torch.Tensor] = None
+
     def update(self, x: torch.Tensor, signal: Optional[torch.Tensor] = None) -> None:
         """Accumulate a batch; trigger SVD update when buffer is full.
 
         Args:
             x: Input data, shape (batch_size, D) or (batch_size, ...).
-            signal: True signal estimate, same shape as x. If provided and a
-                    whitener is attached, noise = x - signal is used to update
-                    the whitener. With fit_on_signal=True it is also what the
-                    eigenbasis is fitted from, in place of x.
+            signal: True signal estimate, same shape as x. When provided,
+                    noise = x - signal updates the whitener if one is attached,
+                    or the scalar noise-variance estimate if not. With
+                    fit_on_signal=True it is additionally what the eigenbasis is
+                    fitted from, in place of x.
         """
         if x.dim() > 2:
             x = x.flatten(start_dim=1)
         if signal is not None and signal.dim() > 2:
             signal = signal.flatten(start_dim=1)
-        if self.whitener is not None and signal is not None:
-            self.whitener.update((x - signal).detach())
+        if signal is not None:
+            noise = (x - signal).detach()
+            if self.whitener is not None:
+                # Whitener normalizes the noise per feature, so downstream the
+                # noise variance is 1 by construction and _noise_var stays None.
+                self.whitener.update(noise)
+            else:
+                # No whitener: estimate a single scalar noise variance under a
+                # white-noise assumption, so the Wiener denominator below is in
+                # the same units as the eigenvalues instead of an arbitrary 1.
+                batch_var = noise.var(unbiased=False)
+                self._noise_var = batch_var if self._noise_var is None else (
+                    (1.0 - self.momentum) * self._noise_var
+                    + self.momentum * batch_var
+                )
 
         # fit_on_signal: the eigenbasis is fitted from the noise-free ``signal``
         # stream (a training-only scaffold); projections in forward() remain on
@@ -171,21 +200,37 @@ class DynamicSVD(torch.nn.Module):
 
         if self.shrinkage and self.eigenvalues is not None:
             Λ = self.eigenvalues.clamp(min=1e-12)
-            c = c * (Λ / (Λ + 1.0) / torch.sqrt(Λ)).unsqueeze(0)
+            # sqrt(Λ)/(Λ+σ²) == Λ/(Λ+σ²) · 1/sqrt(Λ), i.e. the Wiener gain and
+            # the unit-variance normalization folded into one factor.  Written
+            # this way it avoids dividing by sqrt of the 1e-12 clamp.
+            c = c * (torch.sqrt(Λ) / (Λ + self._sigma2())).unsqueeze(0)
 
         return c @ self._R.T
+
+    def _sigma2(self):
+        """Noise variance in the units the eigenvalues are measured in.
+
+        1.0 when a whitener normalized the noise, or when no signal was ever
+        supplied to estimate from; otherwise the running estimate built in
+        update() under a white-noise assumption.
+        """
+        return 1.0 if self._noise_var is None else self._noise_var
 
     def get_extra_state(self):
         return {
             'components': self.components,
             'eigenvalues': self.eigenvalues,
             '_R': self._R,
+            '_noise_var': self._noise_var,
         }
 
     def set_extra_state(self, state):
         self.components = state['components']
         self.eigenvalues = state['eigenvalues']
         self._R = state['_R']
+        # .get(): checkpoints written before the noise estimate existed have no
+        # such key, and None restores the previous "assume 1" behaviour.
+        self._noise_var = state.get('_noise_var')
 
     def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
         """Wiener-filter and reconstruct in whitened D-dimensional space."""
@@ -199,7 +244,7 @@ class DynamicSVD(torch.nn.Module):
         x_proj = x_white @ self.components.T
 
         if self.shrinkage:
-            shrink = self.eigenvalues / (self.eigenvalues + 1.0)
+            shrink = self.eigenvalues / (self.eigenvalues + self._sigma2())
             x_proj = x_proj * shrink.unsqueeze(0)
 
         return x_proj @ self.components
