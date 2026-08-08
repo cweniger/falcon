@@ -12,9 +12,18 @@ class DynamicSVD(torch.nn.Module):
     meaning across updates — critical when feeding into a neural network.
 
     Optionally wraps a whitener (e.g. DiagonalWhitener). When a whitener is
-    provided, update(x, signal) computes noise = x - signal, updates the
-    whitener from the noise, then whitens x before the SVD update. forward()
-    applies whitening at inference without updating statistics.
+    provided, update(x, signal) computes noise = x - signal and updates the
+    whitener from it, so the whitener normalizes the *noise* to unit variance.
+    forward() applies whitening at inference without updating statistics.
+
+    Inputs with more than two dimensions are flattened to (batch_size, D)
+    internally, so image-shaped data can be fed in directly.
+
+    The `signal` stream (a training-only scaffold; see falcon graph configs)
+    has two independent uses:
+      - it is always the noise estimate for the whitener, as above;
+      - with fit_on_signal=True it is also the stream the eigenbasis is fitted
+        from, while projections in forward() stay on x.
 
     Update (when buffer full):
         U = [ √(1-α) · diag(√Λ_old) · V_old ;  √(α/M) · X_white ]
@@ -26,6 +35,16 @@ class DynamicSVD(torch.nn.Module):
         2. c *= λ/(λ+1)             (Wiener filter, diagonal)
         3. c /= √λ                  (normalize to ~unit variance)
         4. c_out = c @ R.T          (rotate to stable frame)
+
+    Steps 2-3 are applied jointly, and only when shrinkage=True; with
+    shrinkage=False the raw projection is returned.
+
+    Note that step 2 is the textbook Wiener gain only when λ is *signal* power
+    measured in noise units, which requires both a whitener and
+    fit_on_signal=True.  Fitting on x instead gives λ ≈ λ_signal + 1, so the
+    gain becomes (λ_s+1)/(λ_s+2) >= 1/2 and a noise-only direction is passed
+    through at half amplitude rather than suppressed.  Without a whitener at
+    all, the `+ 1` is in raw data units and the threshold is arbitrary.
     """
 
     def __init__(
@@ -56,10 +75,11 @@ class DynamicSVD(torch.nn.Module):
         """Accumulate a batch; trigger SVD update when buffer is full.
 
         Args:
-            x: Input data, shape (batch_size, D).
+            x: Input data, shape (batch_size, D) or (batch_size, ...).
             signal: True signal estimate, same shape as x. If provided and a
                     whitener is attached, noise = x - signal is used to update
-                    the whitener before whitening x.
+                    the whitener. With fit_on_signal=True it is also what the
+                    eigenbasis is fitted from, in place of x.
         """
         if x.dim() > 2:
             x = x.flatten(start_dim=1)
@@ -128,8 +148,10 @@ class DynamicSVD(torch.nn.Module):
 
         Args:
             x: Input data, shape (batch_size, D).
-            signal: If provided and a whitener is attached, used to estimate
-                    noise for whitener updates (passed through to update()).
+            signal: Passed through to update() during training, where it feeds
+                    the whitener's noise estimate and, with fit_on_signal=True,
+                    the eigenbasis fit.  Never used for the projection itself,
+                    so it is not needed at inference.
 
         Returns:
             Coefficients of shape (batch_size, k), ~unit variance. Returns
