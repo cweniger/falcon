@@ -191,7 +191,7 @@ class DatasetManagerActor:
         if self.simulate_when_full:
             return self.simulate_count
         else:
-            num_train_samples = sum(self.status == SampleStatus.TRAINING)
+            num_train_samples = int((self.status == SampleStatus.TRAINING).sum())
             return min(
                 self.simulate_count, self.max_samples - num_train_samples
             )
@@ -331,7 +331,11 @@ class DatasetManagerActor:
         log({
             "n_total": len(self.ray_store),
             "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
-            "n_training": int(sum(self.status == SampleStatus.TRAINING)),
+            # n_training = the actual trainable pool: the dataloader draws from TRAINING +
+            # DISFAVOURED and min_samples floors their sum (see rotate_sample_buffer). n_disfavoured
+            # below is the subset marked for eviction (still trained on until tombstoned).
+            "n_training": int(sum((self.status == SampleStatus.TRAINING)
+                                  | (self.status == SampleStatus.DISFAVOURED))),
             "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
             "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
             "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
@@ -359,7 +363,9 @@ class DatasetManagerActor:
         self.rotate_sample_buffer()
 
         # Log buffer statistics
-        n_train = int(sum(self.status == SampleStatus.TRAINING))
+        # trainable pool = TRAINING + DISFAVOURED (what the dataloader draws; min_samples floors it)
+        n_train = int(sum((self.status == SampleStatus.TRAINING)
+                          | (self.status == SampleStatus.DISFAVOURED)))
         n_val = int(sum(self.status == SampleStatus.VALIDATION))
         log({
             "n_total": len(self.ray_store),

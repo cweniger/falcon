@@ -57,6 +57,11 @@ class MultiplexNodeWrapper:
 
         futures = []
         for i, (start, end) in enumerate(index_range_list):
+            if end - start <= 0:
+                # n_samples < num_actors leaves some actors with an empty
+                # slice; a zero-sample dispatch is rejected by _resolve_refs
+                # (explicit ValueError). Skip idle actors instead.
+                continue
             chunk_refs = {k: v[start:end] for k, v in condition_refs.items()} if condition_refs else None
             method = getattr(self.wrapped_node_list[i], method_name)
             futures.append(method.remote(end - start, condition_refs=chunk_refs))
@@ -254,6 +259,10 @@ class NodeWrapper:
         all_refs = []
         slices = {}
         for name, refs in condition_refs.items():
+            if len(refs) == 0:
+                raise ValueError(
+                    f"_resolve_refs: empty ref list for '{name}' "
+                    f"(zero-sample dispatch? n_samples < num_actors?)")
             if len(set(refs)) == 1:  # all same ref → broadcast
                 slices[name] = ('broadcast', len(all_refs))
                 all_refs.append(refs[0])
@@ -824,6 +833,7 @@ class DeployedGraph:
 
         train_future_list = list(train_futures.keys())
         stop_requested = False
+        pending_append = None
         while train_future_list:
             # Check for graceful stop request
             if stop_check is not None and stop_check():
@@ -836,8 +846,10 @@ class DeployedGraph:
                     except Exception:
                         pass  # Node may not support request_stop
 
+            # Short poll: the loop's own pacing comes from the time.sleep()
+            # below, so a long timeout here just adds to simulate_interval.
             ready, train_future_list = ray.wait(
-                train_future_list, num_returns=len(train_future_list), timeout=1
+                train_future_list, num_returns=len(train_future_list), timeout=0.05
             )
 
             # Skip simulation if stopping
@@ -868,7 +880,11 @@ class DeployedGraph:
                             {k: v for k, v in prop_ref.items()
                              if k.split(".")[0] in latent_nodes}
                         )
-                    ray.get(dataset_manager.append_refs.remote(sample_refs))
+                    # Pipeline the append: block on the *previous* one, then
+                    # fire this one and let it overlap the next simulation.
+                    if pending_append is not None:
+                        ray.get(pending_append)
+                    pending_append = dataset_manager.append_refs.remote(sample_refs)
 
             # Periodic status update (every ~60 seconds)
             now = time.time()
@@ -888,6 +904,10 @@ class DeployedGraph:
                         info(f"[{node_name}] Training completed (loss: {loss:.4f})")
                     else:
                         info(f"[{node_name}] Training completed")
+
+        # Flush the last deferred buffer append before shutdown.
+        if pending_append is not None:
+            ray.get(pending_append)
 
         # Save graph if path is provided
         if graph_path is not None:
