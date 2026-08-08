@@ -68,19 +68,31 @@ class Product(TransformedPrior):
       - "triangular": Triangular distribution. Parameters: a (min), c (mode), b (max).
       - "fixed": Fixed value (excluded from latent space). Parameters: value.
 
+    Two roles exclude a parameter from the latent space, i.e. from what the
+    estimator infers.  They differ in what the simulator receives:
+      - "fixed": pinned to a constant, so it cannot influence the data at all.
+      - marginalize=[i, ...]: keeps its declared distribution and is redrawn
+        from it on every call, so it still varies and still broadens the
+        likelihood -- the estimator learns the posterior marginalized over it.
+        Use for nuisance parameters.  Note that forward() cannot recover a
+        marginalized value from the latent vector, so the corresponding column
+        of any generated sample is a *prior* draw, not a posterior draw; the
+        marginals of the remaining parameters are unaffected.
+
     Example:
         prior = Product([
             ("uniform", -100.0, 100.0),
             ("fixed", 5.0),              # Fixed parameter, not in latent space
             ("normal", 0.0, 1.0),
-        ])
+            ("uniform", 0.0, 1.0),       # Nuisance, marginalized over
+        ], marginalize=[3])
 
         # Latent space has dim=2 (only free params)
-        # Output space has dim=3 (includes fixed params)
+        # Output space has dim=4 (includes fixed and marginalized params)
 
         # For Gaussian estimator (standard normal latent space)
-        z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 3) -> z: (..., 2)
-        theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 3)
+        z = prior.inverse(theta, mode="standard_normal")  # theta: (..., 4) -> z: (..., 2)
+        theta = prior.forward(z, mode="standard_normal")  # z: (..., 2) -> theta: (..., 4)
 
         # For Flow estimator (hypercube latent space)
         u = prior.inverse(theta, mode="hypercube")
