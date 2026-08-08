@@ -833,6 +833,7 @@ class DeployedGraph:
 
         train_future_list = list(train_futures.keys())
         stop_requested = False
+        pending_append = None
         while train_future_list:
             # Check for graceful stop request
             if stop_check is not None and stop_check():
@@ -879,7 +880,11 @@ class DeployedGraph:
                             {k: v for k, v in prop_ref.items()
                              if k.split(".")[0] in latent_nodes}
                         )
-                    ray.get(dataset_manager.append_refs.remote(sample_refs))
+                    # Pipeline the append: block on the *previous* one, then
+                    # fire this one and let it overlap the next simulation.
+                    if pending_append is not None:
+                        ray.get(pending_append)
+                    pending_append = dataset_manager.append_refs.remote(sample_refs)
 
             # Periodic status update (every ~60 seconds)
             now = time.time()
@@ -899,6 +904,10 @@ class DeployedGraph:
                         info(f"[{node_name}] Training completed (loss: {loss:.4f})")
                     else:
                         info(f"[{node_name}] Training completed")
+
+        # Flush the last deferred buffer append before shutdown.
+        if pending_append is not None:
+            ray.get(pending_append)
 
         # Save graph if path is provided
         if graph_path is not None:
