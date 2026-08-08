@@ -281,14 +281,19 @@ class Product(TransformedPrior):
         # Free and marginalized params are both drawn from their own prior; only
         # fixed params take a constant. (Marginalized params are absent from the
         # latent space but still fed to the simulator, so they must be sampled.)
+        # Note this is _param_dim + len(marginalize), not _param_dim.
+        num_sampled = len(self.priors) - len(self._fixed_indices)
+        u = torch.rand(batch_size, num_sampled, dtype=torch.float64)
+
         transformed = []
+        u_idx = 0
         for i, prior in enumerate(self.priors):
             dist_type, *params = prior
             if dist_type == "fixed":
                 x_i = torch.full((batch_size,), params[0], dtype=torch.float64)
             else:
-                u_i = torch.rand(batch_size, dtype=torch.float64)
-                x_i = self._forward_transform(u_i, dist_type, *params)
+                x_i = self._forward_transform(u[..., u_idx], dist_type, *params)
+                u_idx += 1
             transformed.append(x_i)
 
         return torch.stack(transformed, dim=-1).numpy()
