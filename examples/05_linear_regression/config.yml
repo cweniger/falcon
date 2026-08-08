@@ -99,11 +99,15 @@ graph:
         # lets noise eigenvalues (up to the Marchenko-Pastur edge) masquerade
         # as structure and crowd out real components in the top-32.
         fit_on_signal: true
-        # Required for the Wiener step to mean anything: the whitener trains on
-        # noise = x - mu, so it normalizes the noise to unit variance and the
-        # eigenvalues become signal-to-noise ratios.  Without it the `+ 1` in
-        # lambda/(lambda+1) would sit in raw data units (noise variance here is
-        # sigma^2 = 0.01), putting the filter threshold in the wrong place.
+        # The whitener trains on noise = x - mu, so it normalizes the noise to
+        # unit variance and the eigenvalues become signal-to-noise ratios,
+        # which is what makes lambda/(lambda+1) a real Wiener gain.
+        #
+        # The noise here is homoscedastic (sigma = 0.1 in every bin), so
+        # dropping this block would also be correct: DynamicSVD then estimates
+        # a single scalar noise variance from mu and uses lambda/(lambda+sigma^2)
+        # instead.  It is kept to demonstrate the general per-feature case,
+        # which is what you want as soon as the noise varies across bins.
         whitener:
           _target_: falcon.embeddings.DiagonalWhitener
           dim: 1000   # n_bins, must match the simulator below
