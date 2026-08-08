@@ -170,6 +170,9 @@ class DynamicSVD(torch.nn.Module):
         if self.components is None:
             raise ValueError("Call update() enough times before reconstruct().")
 
+        if x.dim() > 2:
+            x = x.flatten(start_dim=1)
+
         x_white = self.whitener(x) if self.whitener is not None else x
         x_proj = x_white @ self.components.T
 
