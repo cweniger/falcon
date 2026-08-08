@@ -36,11 +36,23 @@ class DynamicSVD(torch.nn.Module):
     forward(x) → stable k-dim coefficients:
         1. c = X_white @ V.T        (project onto eigenbasis)
         2. c *= λ/(λ+σ²)            (Wiener filter, diagonal)
-        3. c /= √λ                  (normalize to ~unit variance)
+        3. c /= √λ                  (express in units of the coefficient's own
+                                     standard deviation)
         4. c_out = c @ R.T          (rotate to stable frame)
 
-    Steps 2-3 are applied jointly as √λ/(λ+σ²), and only when shrinkage=True;
-    with shrinkage=False the raw projection is returned.
+    Steps 2-3 are gated together by wiener=True and applied as the single
+    factor √λ/(λ+σ²).  The resulting coefficient has standard deviation
+    √(λ/(λ+σ²)) = √(SNR/(SNR+1)): order 1 for directions measured well above
+    the noise, shrinking to 0 for those buried in it.  So the output is
+    SNR-weighted, *not* flatly unit-variance -- unit scale is only the λ >> σ²
+    asymptote, and suppressing the rest is the point.
+
+    wiener=False returns the raw projection instead, whose scale is √(λ+σ²)
+    and therefore varies by orders of magnitude across components.  That is
+    plain PCA scores; it is rarely what you want to hand to a network.
+
+    reconstruct() gates on the same flag but applies only step 2, since it
+    returns to data space where step 3's rescaling would be wrong.
 
     σ² is the noise variance *in the units the eigenvalues are measured in*:
       - with a whitener, the noise is normalized per feature, so σ² = 1;
@@ -61,7 +73,7 @@ class DynamicSVD(torch.nn.Module):
         n_components: int = 10,
         buffer_size: Optional[int] = None,
         momentum: float = 0.1,
-        shrinkage: bool = True,
+        wiener: bool = True,
         whitener=None,
         fit_on_signal: bool = False,
     ) -> None:
@@ -70,7 +82,7 @@ class DynamicSVD(torch.nn.Module):
         self.n_components = n_components
         self.buffer_size = buffer_size if buffer_size is not None else 4 * n_components
         self.momentum = momentum
-        self.shrinkage = shrinkage
+        self.wiener = wiener
         self.whitener = whitener
 
         self.buffer: List[torch.Tensor] = []
@@ -121,9 +133,9 @@ class DynamicSVD(torch.nn.Module):
         # stream (a training-only scaffold); projections in forward() remain on
         # ``x``. Removes noise-contaminated components (empirical eigenvalues up
         # to the Marchenko-Pastur edge (1+sqrt(D/N))^2 sigma^2 masquerade as
-        # structure when fitting on noisy x). With shrinkage=True the trailing
+        # structure when fitting on noisy x). With wiener=True the trailing
         # near-zero clean eigenvalues are damped, so the 1/sqrt(lambda)
-        # normalization cannot amplify observation noise.
+        # rescaling cannot amplify observation noise.
         fit_x = signal if (self.fit_on_signal and signal is not None) else x
         x_white = self.whitener(fit_x) if self.whitener is not None else fit_x
 
@@ -183,8 +195,10 @@ class DynamicSVD(torch.nn.Module):
                     so it is not needed at inference.
 
         Returns:
-            Coefficients of shape (batch_size, k), ~unit variance. Returns
-            random noise before the first SVD update (avoids all-zero gradients).
+            Coefficients of shape (batch_size, k).  With wiener=True each has
+            standard deviation √(SNR/(SNR+1)) -- order 1 where the direction is
+            well measured, near 0 where it is noise-dominated.  Returns random
+            noise before the first SVD update (avoids all-zero gradients).
         """
         if self.training:
             with torch.no_grad():
@@ -198,7 +212,7 @@ class DynamicSVD(torch.nn.Module):
         x_white = self.whitener(x) if self.whitener is not None else x
         c = x_white @ self.components.T
 
-        if self.shrinkage and self.eigenvalues is not None:
+        if self.wiener and self.eigenvalues is not None:
             Λ = self.eigenvalues.clamp(min=1e-12)
             # sqrt(Λ)/(Λ+σ²) == Λ/(Λ+σ²) · 1/sqrt(Λ), i.e. the Wiener gain and
             # the unit-variance normalization folded into one factor.  Written
@@ -243,7 +257,7 @@ class DynamicSVD(torch.nn.Module):
         x_white = self.whitener(x) if self.whitener is not None else x
         x_proj = x_white @ self.components.T
 
-        if self.shrinkage:
+        if self.wiener:
             shrink = self.eigenvalues / (self.eigenvalues + self._sigma2())
             x_proj = x_proj * shrink.unsqueeze(0)
 
