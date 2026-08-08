@@ -845,8 +845,10 @@ class DeployedGraph:
                     except Exception:
                         pass  # Node may not support request_stop
 
+            # Short poll: the loop's own pacing comes from the time.sleep()
+            # below, so a long timeout here just adds to simulate_interval.
             ready, train_future_list = ray.wait(
-                train_future_list, num_returns=len(train_future_list), timeout=1
+                train_future_list, num_returns=len(train_future_list), timeout=0.05
             )
 
             # Skip simulation if stopping
