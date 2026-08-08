@@ -293,6 +293,15 @@ Flow logs the following metrics during training:
         - save
         - load
 
-## Configuration Classes
+## Training Loop
 
-::: falcon.estimators.stepwise_base.TrainingLoopConfig
+`Flow` inherits its epoch loop from `StepwiseEstimator`. The loop parameters
+(`max_epochs`, `batch_size`, `early_stop_patience`, `cache_sync_every`,
+`max_cache_samples`, `cache_on_device`, `prior_epochs`) are `Flow.__init__`
+arguments, documented above.
+
+::: falcon.estimators.stepwise_base.StepwiseEstimator
+    options:
+      show_source: false
+      members:
+        - train

@@ -3,7 +3,6 @@
 import asyncio
 import time
 from abc import abstractmethod
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -11,29 +10,6 @@ import torch
 
 from falcon.core.base_estimator import BaseEstimator
 from falcon.core.logger import log, debug, info, warning, error
-
-
-@dataclass
-class TrainingLoopConfig:
-    """Generic training loop parameters."""
-
-    max_epochs: int = 100
-    batch_size: int = 128
-    early_stop_patience: int = 16
-    cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
-    max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
-    cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
-    prior_epochs: int = 0
-
-    # Rung training.  The adaptive dataset keeps being transformed continuously
-    # and simulation never pauses -- only the *trainer's view* of it is held
-    # stationary for a rung, so that decisions read off the network (notably
-    # deep-tail density quantiles) come from a settled model rather than one
-    # chasing data that moved under it.  Round-free but rung-structured.
-    rung_epochs: int = 0        # 0 = off (legacy: sync every cache_sync_every epochs)
-    rung_min_epochs: int = 8    # floor, so val noise cannot end a rung immediately
-    rung_max_epochs: int = 200  # ceiling, so a slowly-creeping val cannot stall forever
-    rung_patience: int = 12     # epochs without val improvement that end a rung
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -49,16 +25,25 @@ class StepwiseEstimator(BaseEstimator):
     - sample_prior/posterior/proposal
     - save/load
 
-    Optionally, subclasses may override on_rung_start/on_rung_end to take
-    decisions from a settled network at rung boundaries (see TrainingLoopConfig).
+    The loop reads its parameters off ``self`` -- max_epochs, batch_size,
+    early_stop_patience, cache_sync_every, max_cache_samples, cache_on_device,
+    prior_epochs -- which each subclass sets from its own __init__ kwargs.
+
+    Rung training.  The adaptive dataset keeps being transformed continuously
+    and simulation never pauses -- only the *trainer's view* of it is held
+    stationary for a rung, so that decisions read off the network (notably
+    deep-tail density quantiles) come from a settled model rather than one
+    chasing data that moved under it.  Round-free but rung-structured.
+    Subclasses opt in by setting rung_mode and may override
+    on_rung_start/on_rung_end to take those decisions at rung boundaries.
     """
 
-    # Class-level defaults so estimators that do not expose these as __init__
+    # Class-level defaults, so estimators that do not expose these as __init__
     # kwargs (Flow, GaussianFullCov) inherit legacy behaviour unchanged.
-    rung_epochs: int = 0
-    rung_min_epochs: int = 8
-    rung_max_epochs: int = 200
-    rung_patience: int = 12
+    rung_mode: bool = False     # off = legacy: sync every cache_sync_every epochs
+    rung_min_epochs: int = 8    # floor, so val noise cannot end a rung immediately
+    rung_max_epochs: int = 200  # ceiling, so a slowly-creeping val cannot stall forever
+    rung_patience: int = 12     # epochs without val improvement that end a rung
 
     # ==================== Rung hooks ====================
 
@@ -184,10 +169,9 @@ class StepwiseEstimator(BaseEstimator):
         # Instance attribute, not a local: on_epoch_end() needs to know how far
         # into the rung it is (e.g. to hold off checkpointing while settling).
         self._epoch_in_rung = 0
-        rung_mode = self.rung_epochs > 0
         t0 = time.perf_counter()
 
-        if rung_mode:
+        if self.rung_mode:
             log({"rung": rung})
             self.on_rung_start(rung)
 
@@ -197,7 +181,7 @@ class StepwiseEstimator(BaseEstimator):
             # Periodic incremental sync.  In rung mode the training view is
             # deliberately frozen for the whole rung and refreshed only at the
             # boundary below, so this must not fire.
-            if not rung_mode and epoch > 0 and epoch % sync_every == 0:
+            if not self.rung_mode and epoch > 0 and epoch % sync_every == 0:
                 train_cache.sync()
                 val_cache.sync()
 
@@ -286,7 +270,7 @@ class StepwiseEstimator(BaseEstimator):
             )
             self._total_epochs_trained += 1
 
-            if rung_mode:
+            if self.rung_mode:
                 self._epoch_in_rung += 1
                 settled = (
                     epochs_no_improve >= self.rung_patience
