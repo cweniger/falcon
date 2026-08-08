@@ -1,0 +1,313 @@
+"""Conditional flow-matching backend (velocity field, Euler sampling, CNF density).
+
+Framework-agnostic building blocks used by the GaussianizedFlowMatching estimator.
+All functions operate on flat 2-D tensors:
+
+    w : (M, param_dim)      points in the (whitened) target space
+    s : (M, cond_dim)       per-point conditioning embedding (zeros for marginal)
+    t : (M, 1) or scalar    time in [0, 1]
+
+The model is a velocity field ``v(w, t, s)`` trained by flow matching with the
+straight-line interpolant (base N(0,I) at t=0 -> data at t=1). Sampling integrates
+the ODE forward with Euler; density uses the continuous change-of-variables with the
+ODE run backward, accumulating the divergence (exact trace or Hutchinson estimate).
+"""
+
+from __future__ import annotations
+
+import copy
+import math
+
+import torch
+import torch.nn as nn
+
+
+class GaussianFourierTime(nn.Module):
+    """Random Fourier features for the scalar time input."""
+
+    def __init__(self, dim: int, scale: float = 3.0):
+        super().__init__()
+        assert dim % 2 == 0, "time_dim must be even"
+        self.register_buffer("freqs", torch.randn(dim // 2) * scale)
+
+    def forward(self, t: torch.Tensor) -> torch.Tensor:
+        proj = 2 * math.pi * t * self.freqs
+        return torch.cat([proj.sin(), proj.cos()], dim=-1)
+
+
+class VelocityField(nn.Module):
+    """MLP velocity field v(w, t, s) for conditional flow matching.
+
+    w_embed_dim > 0 linearly up-projects w before the input concat, so a
+    low-dim parameter is not variance-shadowed by a high-dim conditioning
+    summary (e.g. param_dim=1 vs cond_dim=128).
+
+    cond_embed_dim > 0 compresses the conditioning summary through a small MLP
+    (Linear-SiLU-Linear) before the input concat — a nonlinear information
+    bottleneck that limits how much capacity the field can spend on (mostly
+    uninformative) summary channels. Applied to the null token too, so
+    conditional and marginal branches stay consistent.
+
+    per_param_nets=True replaces the single MLP trunk with one independent MLP
+    per parameter ("legs"), each seeing the full (w, t, s) input and predicting
+    one velocity component — decouples the per-component FM-loss gradients so
+    hard components cannot crowd out easy ones in shared features. Input
+    projections (w_proj/cond_proj/time_embed) stay shared. Each leg uses the
+    full hidden/layers, so parameter count scales ~param_dim x; tune hidden
+    down if needed.
+
+    cond_per_param=True (requires per_param_nets=True) routes the conditioning
+    per leg: the summary is split into param_dim equal slices and leg i sees
+    only slice i (plus the full w and t). Pair with an embedding that emits one
+    summary block per parameter (e.g. TransformerEmbedding query pooling with
+    n_queries=param_dim), so each parameter has a private readout->leg pipeline
+    after the shared embedding body. Incompatible with cond_embed_dim (the
+    bottleneck would re-mix the slices).
+
+    focus_dims (debugging): restrict the flow to a subset of (whitened)
+    coordinates. Non-focus coordinates are zeroed in the input AND in the
+    output velocity, and fm_loss averages only over focus components. The
+    masked-loss minimizer is the exact *marginal* velocity field for the focus
+    coords (others marginalized over the buffer), while masked coordinates keep
+    v=0 -> they stay at their N(0,1) base draw, i.e. follow the whitener's
+    Gaussian buffer approximation, so sampling/density/importance weights stay
+    consistent. Indices refer to free parameters in prior order (whitening is
+    ZCA, so this is only approximate under strong correlations).
+    """
+
+    def __init__(self, param_dim: int, cond_dim: int, hidden: int = 256,
+                 layers: int = 4, time_dim: int = 64, layernorm: bool = True,
+                 w_embed_dim: int = 0, cond_embed_dim: int = 0,
+                 per_param_nets: bool = False, cond_per_param: bool = False,
+                 focus_dims=None, glu_cond: bool = False,
+                 residual: bool = False):
+        super().__init__()
+        if cond_per_param:
+            if not per_param_nets:
+                raise ValueError("cond_per_param requires per_param_nets=True")
+            if cond_embed_dim > 0:
+                raise ValueError("cond_per_param is incompatible with cond_embed_dim "
+                                 "(the bottleneck would re-mix the per-parameter slices)")
+            if cond_dim % param_dim != 0:
+                raise ValueError(f"cond_per_param needs cond_dim divisible by param_dim, "
+                                 f"got cond_dim={cond_dim}, param_dim={param_dim}")
+        if focus_dims:
+            mask = torch.zeros(param_dim)
+            mask[list(focus_dims)] = 1.0
+        else:
+            mask = None
+        self.register_buffer("focus_mask", mask)
+        self.param_dim = param_dim
+        self.cond_dim = cond_dim
+        self.time_embed = GaussianFourierTime(time_dim)
+        self.w_proj = nn.Linear(param_dim, w_embed_dim) if w_embed_dim > 0 else None
+        self.cond_proj = nn.Sequential(
+            nn.Linear(cond_dim, max(2 * cond_embed_dim, 64)),
+            nn.SiLU(),
+            nn.Linear(max(2 * cond_embed_dim, 64), cond_embed_dim),
+        ) if cond_embed_dim > 0 else None
+        w_dim = w_embed_dim if w_embed_dim > 0 else param_dim
+        c_dim = cond_embed_dim if cond_embed_dim > 0 else cond_dim
+        self.cond_slice = c_dim // param_dim if cond_per_param else 0
+        in_dim = w_dim + time_dim + (self.cond_slice if cond_per_param else c_dim)
+
+        def _make_mlp(out_dim: int) -> nn.Sequential:
+            dims = [in_dim] + [hidden] * layers
+            net = []
+            for d_in, d_out in zip(dims[:-1], dims[1:]):
+                net += [nn.Linear(d_in, d_out)]
+                if layernorm:                   # hidden layers only (never the input cat or output)
+                    net += [nn.LayerNorm(d_out)]
+                net += [nn.SiLU()]
+            net += [nn.Linear(hidden, out_dim)]
+            return nn.Sequential(*net)
+
+        if per_param_nets:
+            self.net = None
+            self.nets = nn.ModuleList([_make_mlp(1) for _ in range(param_dim)])
+        else:
+            self.net = _make_mlp(param_dim)
+            self.nets = None
+
+        # --- literature-informed options (FMPE, arXiv:2305.17161) -------
+        # glu_cond: gate every hidden activation with a sigmoid projection of
+        # the low-dimensional (w, t) pair, so it cannot be variance-shadowed
+        # by a wide conditioning summary in the input concat (FMPE Sec 3.2).
+        # residual: wrap consecutive hidden blocks as h + block(h) (universal
+        # in the GW-FM literature; plain deep MLPs underperform).
+        # Both default OFF -> module structure identical to before.
+        self.glu_cond = bool(glu_cond)
+        self.residual = bool(residual)
+        if (self.glu_cond or self.residual) and per_param_nets:
+            raise ValueError("glu_cond/residual not supported with per_param_nets")
+        if self.glu_cond:
+            gd = w_dim + time_dim
+            self.glu_gates = nn.ModuleList(
+                [nn.Linear(gd, hidden) for _ in range(layers)])
+        else:
+            self.glu_gates = None
+
+    def forward(self, w: torch.Tensor, t: torch.Tensor, s: torch.Tensor) -> torch.Tensor:
+        if t.ndim == 1:
+            t = t[:, None]
+        if self.focus_mask is not None:      # hide non-focus coords -> marginal field
+            w = w * self.focus_mask
+        wi = self.w_proj(w) if self.w_proj is not None else w
+        si = self.cond_proj(s) if self.cond_proj is not None else s
+        te = self.time_embed(t)
+        if self.cond_slice:                  # leg i sees only summary slice i
+            sc = si.reshape(si.shape[0], len(self.nets), self.cond_slice)
+            base = torch.cat([wi, te], dim=-1)
+            out = torch.cat([net(torch.cat([base, sc[:, i]], dim=-1))
+                             for i, net in enumerate(self.nets)], dim=-1)
+        else:
+            inp = torch.cat([wi, te, si], dim=-1)
+            if self.glu_cond or self.residual:
+                out = self._structured_forward(inp, torch.cat([wi, te], dim=-1))
+            else:
+                out = (torch.cat([net(inp) for net in self.nets], dim=-1)
+                       if self.nets is not None else self.net(inp))
+        if self.focus_mask is not None:      # frozen N(0,1) coords: v = 0
+            out = out * self.focus_mask
+        return out
+
+    def _structured_forward(self, inp: torch.Tensor,
+                            wt: torch.Tensor) -> torch.Tensor:
+        """Forward through self.net with optional per-layer (w,t) GLU gates
+        and residual skips. Walks the existing Sequential's modules so the
+        parametrization is shared with the flags-off path."""
+        mods = list(self.net)
+        h = inp
+        li = 0                                  # hidden-layer counter
+        i = 0
+        while i < len(mods):
+            m = mods[i]
+            if isinstance(m, nn.Linear) and i < len(mods) - 1:
+                # hidden block: Linear [+ LayerNorm] + SiLU
+                blk = m(h)
+                j = i + 1
+                while j < len(mods) - 1 and not isinstance(mods[j], nn.Linear):
+                    blk = mods[j](blk)
+                    j += 1
+                if self.glu_gates is not None and li < len(self.glu_gates):
+                    blk = blk * torch.sigmoid(self.glu_gates[li](wt))
+                h = (h + blk if (self.residual and blk.shape == h.shape)
+                     else blk)
+                li += 1
+                i = j
+            else:
+                h = m(h)
+                i += 1
+        return h
+
+
+class EMA:
+    """Maintains an exponential moving average copy of a velocity field."""
+
+    def __init__(self, decay: float = 0.999):
+        self.decay = decay
+
+    @torch.no_grad()
+    def update(self, ema_model: nn.Module, model: nn.Module) -> None:
+        d = self.decay
+        for pe, p in zip(ema_model.parameters(), model.parameters()):
+            pe.mul_(d).add_(p.detach(), alpha=1 - d)
+        for be, b in zip(ema_model.buffers(), model.buffers()):
+            be.copy_(b)
+
+    @staticmethod
+    def clone(model: nn.Module) -> nn.Module:
+        ema = copy.deepcopy(model)
+        for p in ema.parameters():
+            p.requires_grad_(False)
+        return ema
+
+
+# --------------------------------------------------------------------------- #
+# Training loss
+# --------------------------------------------------------------------------- #
+def fm_loss(net: VelocityField, w1: torch.Tensor, s: torch.Tensor,
+            antithetic: bool = True, time_alpha: float = 0.0) -> torch.Tensor:
+    """Flow-matching loss ‖v(w_t, t, s) − (w1 − w0)‖² with w0~N(0,I), t~U(0,1).
+
+    antithetic=True pairs each draw with its mirrors w0→−w0 and t→1−t (4 variants
+    per target) -- a variance-reduced estimator of the *same* expectation (both
+    N(0,I) and U(0,1) are symmetric), at 4x the net evaluations.
+    """
+    w0 = torch.randn_like(w1)
+    t = torch.rand(w1.shape[0], 1, device=w1.device, dtype=w1.dtype)
+    if time_alpha != 0.0:
+        # power-law time prior p(t) ~ t^{1/(1+alpha)} (FMPE Sec 3.3):
+        # alpha > 0 concentrates training capacity at t -> 1, where sharp /
+        # multimodal targets are hardest. alpha = 0 recovers uniform.
+        t = t.pow((1.0 + time_alpha) / (2.0 + time_alpha))
+    if antithetic:
+        w0 = torch.cat([w0, -w0, w0, -w0], dim=0)
+        t = torch.cat([t, t, 1 - t, 1 - t], dim=0)
+        w1 = w1.repeat(4, 1)
+        s = s.repeat(4, 1)
+    wt = (1 - t) * w0 + t * w1
+    target = w1 - w0
+    err = (net(wt, t, s) - target).pow(2)
+    mask = getattr(net, "focus_mask", None)
+    if mask is not None:                     # average over focus components only
+        return (err * mask).sum(-1).mean() / mask.sum()
+    return err.mean()
+
+
+# --------------------------------------------------------------------------- #
+# Sampling: forward Euler, t: 0 -> 1
+# --------------------------------------------------------------------------- #
+@torch.no_grad()
+def euler_sample(net: VelocityField, s: torch.Tensor, param_dim: int, steps: int) -> torch.Tensor:
+    """Draw w ~ model conditioned on s (one sample per row of s)."""
+    m = s.shape[0]
+    w = torch.randn(m, param_dim, device=s.device, dtype=s.dtype)
+    dt = 1.0 / steps
+    for i in range(steps):
+        tb = torch.full((m, 1), i * dt, device=s.device, dtype=w.dtype)
+        w = w + dt * net(w, tb, s)
+    return w
+
+
+# --------------------------------------------------------------------------- #
+# Velocity + divergence tr(∂v/∂w) for the CNF density
+# --------------------------------------------------------------------------- #
+def _vel_and_div(net, w, t, s, divergence, n_probe):
+    """Velocity v(w,t,s) and tr(∂v/∂w): exact (param_dim VJPs) or Hutchinson (n_probe probes)."""
+    with torch.enable_grad():
+        w = w.detach().requires_grad_(True)
+        v = net(w, t, s)
+        div = torch.zeros(w.shape[0], device=w.device, dtype=w.dtype)
+        if divergence == "exact":
+            for i in range(w.shape[1]):
+                gi = torch.autograd.grad(v[:, i].sum(), w, retain_graph=(i < w.shape[1] - 1))[0]
+                div = div + gi[:, i]
+        else:
+            for _ in range(n_probe):
+                eps = torch.randint(0, 2, w.shape, device=w.device, dtype=w.dtype) * 2 - 1
+                g = torch.autograd.grad(v, w, grad_outputs=eps, retain_graph=True)[0]
+                div = div + (g * eps).sum(1)
+            div = div / n_probe
+    return v.detach(), div.detach()
+
+
+# --------------------------------------------------------------------------- #
+# Density: backward Euler CNF, t: 1 -> 0
+# --------------------------------------------------------------------------- #
+def cnf_logprob(net: VelocityField, w: torch.Tensor, s: torch.Tensor, steps: int,
+                divergence: str = "hutch", n_probe: int = 4) -> torch.Tensor:
+    """log density of the model at points w (conditioned on s), in the model's space.
+
+    log p(w) = log N(z0; 0, I) + INT_{t=1}^{0} (∇·v) dt   (Euler integration).
+    """
+    z = w
+    logdet = torch.zeros(w.shape[0], device=w.device, dtype=w.dtype)
+    dt = -1.0 / steps
+    for i in range(steps):
+        tb = torch.full((z.shape[0], 1), 1.0 + i * dt, device=z.device, dtype=z.dtype)
+        v, d = _vel_and_div(net, z, tb, s, divergence, n_probe)
+        z = z + dt * v
+        logdet = logdet + dt * d
+    base = -0.5 * (z.pow(2).sum(1) + z.shape[1] * math.log(2 * math.pi))
+    return base + logdet

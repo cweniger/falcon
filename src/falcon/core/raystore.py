@@ -601,18 +601,25 @@ class CachedDataLoader:
         )
         self.count = len(self._active_rows)
 
-    def sync(self):
+    def sync(self, wait: bool = False):
         """Non-blocking incremental sync.
 
         Both checkout_refs and data fetching run in a background thread,
         so sync() never blocks the training loop.  The only exception is
         the very first call, which must block until initial data arrives.
+
+        ``wait=True`` blocks on the in-flight fetch instead of skipping it.
+        Used at rung boundaries, where the training view must actually
+        advance: because a fetch launched by one call is applied by the
+        *next* one, back-to-back non-blocking calls would find the fetch
+        still running and return without doing anything.  Two ``wait=True``
+        calls are therefore needed to reach current data.
         """
         first_sync = len(self._arrays) == 0
 
         # 1. Apply completed background work
         if self._pending_fetch is not None:
-            if first_sync or self._pending_fetch.done():
+            if first_sync or wait or self._pending_fetch.done():
                 new_tensors, checkout = self._pending_fetch.result()
                 self._pending_fetch = None
                 self._apply_fetch(new_tensors, checkout)

@@ -1,0 +1,94 @@
+# GaussianizedFlowMatching on a moderate 5D bimodal posterior (2^5 = 32 modes).
+
+logging:
+  wandb:
+    enabled: true
+    project: falcon_flow_example
+      #group: 06_gfm
+    dir: ${run_dir}
+  local:
+    enabled: true
+    dir: ${paths.graph}
+
+paths:
+  imports: ["./src"]
+  graph: ${run_dir}/graph
+  samples: ${run_dir}/samples
+
+buffer:
+  min_samples: 1024
+  max_samples: 8192
+  validation_samples: 256
+  simulate_count: 256
+  simulate_when_full: false
+  simulate_interval: 1
+  snapshot_every: 10
+
+graph:
+  z:
+    evidence: [x]
+    simulator:
+      _target_: falcon.priors.Product
+      priors:
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+        - ['normal', 0.0, 1.0]
+    estimator:
+      _target_: falcon.estimators.GaussianizedFlowMatching
+      max_epochs: 3000
+      lr: 0.001
+      gamma: 0.2
+      truncation_alpha: 1e-3
+      embedding:
+        _target_: model.E
+        _input_: [x]
+      batch_size: 256
+      early_stop_patience: 800
+      prior_epochs: 0
+      momentum: 0.01 # global whitener EMA
+      eig_update_freq: 1
+      flow_hidden: 256
+      flow_layers: 4
+      time_dim: 4
+      ema_decay: 0.9
+      sample_steps: 128
+      density_steps: 64
+      divergence: exact
+      lr_decay_factor: 1.0
+      lr_patience: 25
+      grad_clip: 0.
+      layernorm: false
+        #plasticity_period: 150
+        #plasticity_shrink: 0.8
+      betas: [0.5, 0.5]
+      discard_samples: true   # deprecate buffer samples below the truncation floor
+      num_proposals: 256
+      proposal_mixture_beta: 0.9
+      prior_sigma_bound: 6.0
+      use_best_models: true
+      tight_proposal_mode: true
+      truncation_momentum: 0.9     # EMA rate for the floor
+    ray:
+      num_gpus: 1
+
+  m:
+    parents: [z]
+    simulator: model.Signal
+
+  n:
+    simulator: model.Noise
+
+  x:
+    parents: [m, n]
+    simulator: model.Add
+    observed: "./data/x_obs2.npy"
+
+sample:
+  prior:
+    n: 2000
+  proposal:
+    n: 2000
+  posterior:
+    n: 2000
