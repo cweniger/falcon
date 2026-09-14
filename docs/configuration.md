@@ -52,7 +52,7 @@ Configure the rolling sample buffer that feeds training. Falcon continuously sim
 buffer:
   min_samples: 4096
   max_samples: 32768
-  validation_samples: 256
+  validation_fraction: 0.15
   simulate_count: 64
   simulate_interval: 1
   simulate_when_full: true
@@ -61,9 +61,9 @@ buffer:
 
 | Key | Type | Default | Description |
 |-----|------|---------|-------------|
-| `min_samples` | int | — | Minimum training samples required before training starts |
-| `max_samples` | int | — | Maximum training samples retained; the oldest samples are permanently removed when this is exceeded |
-| `validation_samples` | int | — | Number of samples held out for validation (used for early stopping) |
+| `min_samples` | int | — | Minimum number of samples (training + validation) required before training starts |
+| `max_samples` | int | — | Maximum number of samples (training + validation) retained; the oldest samples are permanently removed when this is exceeded |
+| `validation_fraction` | float | `0.15` | Share of samples held out for validation only (early stopping, LR schedule, best checkpoint). Assigned by insertion order and spread evenly over the buffer; a sample's role never changes, and validation samples age out and are discarded under the same rules as training samples. Must lie in (0, 0.5] |
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
