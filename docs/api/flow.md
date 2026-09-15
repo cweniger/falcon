@@ -13,7 +13,8 @@ Key features:
 - Dual flow architecture for posterior and proposal sampling
 - Parameter space normalization via hypercube mapping
 - Importance sampling with effective sample size monitoring
-- Automatic learning rate scheduling and early stopping
+- Round-based training with automatic learning rate scheduling and early stopping
+  (see [Training Loop](../training.md))
 
 ## Configuration
 
@@ -36,24 +37,26 @@ estimator:
 
 ### Training Loop
 
-Controls the training process.
+Controls the training process. Training runs in rounds of epochs on fixed data; see
+[Training Loop](../training.md) for the terminology and the full description.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `max_epochs` | int | 100 | Maximum training epochs |
+| `max_rounds` | int | null | Maximum number of rounds (`null` = unlimited) |
+| `patience_rounds` | int | 10 | Stop training after this many rejected rounds in a row |
+| `max_epochs` | int | 100 | Maximum epochs per round |
+| `patience_epochs` | int | 16 | End the round once the best validation loss is this many epochs old |
+| `val_every_epochs` | int | 1 | Validate after every N-th epoch (and at the last epoch of a round) |
 | `batch_size` | int | 128 | Training batch size |
-| `early_stop_patience` | int | 16 | Epochs without improvement before stopping |
-| `cache_sync_every` | int | 0 | Epochs between cache syncs with the buffer (0 = every epoch) |
 | `max_cache_samples` | int | 0 | Maximum samples to cache (0 = cache all available) |
 | `cache_on_device` | bool | false | Keep cached training data on the estimator's device (e.g. GPU) |
-| `prior_epochs` | int | 0 | Epochs to sample from prior before switching to proposal |
+| `prior_rounds` | int | 0 | Rounds that simulate from the prior before switching to the learned proposal (the first round always does) |
 | `device` | str | null | Device string (e.g. `"cuda:0"`); auto-detected if `null` |
 
 #### Data Caching
 
-Training data is loaded into a local cache that is periodically synced with the shared simulation buffer. This avoids repeated remote data fetches and allows fast random-access batching.
+Training data is loaded into a local cache that is refreshed from the shared simulation buffer at the start of every round and then stays fixed for the round. This avoids repeated remote data fetches and allows fast batching.
 
-- **`cache_sync_every`**: Controls how often the cache pulls new samples from the buffer. A value of `0` (default) syncs every epoch. Higher values reduce sync overhead at the cost of slightly stale data, which can be useful when simulations are slow.
 - **`max_cache_samples`**: Caps the number of samples held in the cache. Set to `0` to cache everything. A positive value randomly subsamples, which helps limit GPU memory usage for very large buffers.
 - **`cache_on_device`**: When `true`, cached tensors are moved to the estimator's device (typically GPU) once during sync rather than per-batch. This eliminates CPU-to-GPU transfer overhead during training but increases device memory usage.
 
@@ -87,9 +90,9 @@ Controls learning rate and scheduling.
 
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
-| `lr` | float | 0.01 | Initial learning rate |
-| `lr_decay_factor` | float | 0.1 | LR multiplier when plateau detected |
-| `lr_patience` | int | 8 | Epochs without improvement before LR decay |
+| `lr` | float | 0.01 | Learning rate at the start of every round |
+| `lr_decay_factor` | float | 1.0 | LR multiplier when plateau detected (1.0 = no decay) |
+| `lr_patience_epochs` | int | 8 | Epochs without validation improvement before LR decay |
 | `betas` | tuple | (0.9, 0.9) | AdamW beta coefficients |
 
 ### Inference
@@ -99,10 +102,10 @@ Controls posterior sampling and amortization.
 | Parameter | Type | Default | Description |
 |-----------|------|---------|-------------|
 | `gamma` | float | 0.5 | Amortization mixing coefficient (0=focused, 1=amortized) |
-| `discard_samples` | bool | true | Discard low-likelihood samples during training |
+| `discard_samples` | bool | true | After each accepted round, discard low-likelihood samples |
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
-| `use_best_models` | bool | true | Use best validation model for sampling |
+| `use_best_models` | bool | true | Sample from the best networks (instead of the networks being trained) |
 | `num_proposals` | int | 256 | Candidate samples drawn from the flow for importance sampling |
 | `reference_samples` | int | 128 | Samples used to evaluate the reference posterior |
 | `hypercube_bound` | float | 2.0 | Out-of-bounds threshold in hypercube space |
@@ -175,9 +178,9 @@ graph:
     estimator:
       _target_: falcon.estimators.Flow
       max_epochs: 100
+      patience_epochs: 16
+      patience_rounds: 10
       batch_size: 128
-      early_stop_patience: 16
-      cache_sync_every: 0
       max_cache_samples: 0
       net_type: zuko_nice
       theta_norm: true
@@ -186,8 +189,8 @@ graph:
         _target_: model.E
         _input_: [x]
       lr: 0.01
-      lr_decay_factor: 0.1
-      lr_patience: 8
+      lr_decay_factor: 1.0
+      lr_patience_epochs: 8
       gamma: 0.5
       discard_samples: true
       log_ratio_threshold: -20
@@ -260,23 +263,28 @@ Flow logs the following metrics during training:
 
 | Metric | Description |
 |--------|-------------|
-| `train:loss` | Training loss (negative log-likelihood) |
-| `val:loss` | Validation loss |
+| `train:loss` | Training loss of the conditional flow (negative log-likelihood) |
+| `train:loss_aux` | Training loss of the marginal flow |
+| `val:loss`, `val:loss_aux` | Validation losses (only for validated epochs) |
 | `lr` | Current learning rate |
-| `epoch` | Training epoch |
-| `checkpoint:conditional` | Epoch when conditional flow was checkpointed |
-| `checkpoint:marginal` | Epoch when marginal flow was checkpointed |
+| `round`, `epoch` | Current round, and epoch within the round |
+| `checkpoint:conditional` | Epoch at which the conditional flow reached its best validation loss in the round |
+| `checkpoint:marginal` | Epoch at which the marginal flow reached its best validation loss in the round |
+| `round:accepted` | 1 if the round was accepted |
+| `round:conditional:promoted`, `round:marginal:promoted` | 1 if the flow replaced its best network |
+
+See [Training Loop](../training.md#log-output-and-metrics) for all round metrics.
 
 ## Tips
 
 1. **Start with defaults**: The default configuration works well for most problems
-2. **Increase `max_epochs`** for complex posteriors
+2. **Increase `max_epochs`** (per round) for complex posteriors
 3. **Enable `discard_samples`** if training becomes unstable with outliers
 4. **Use GPU** (`ray.num_gpus: 1`) for faster training with large embeddings
 5. **Lower `gamma`** for single-observation inference, higher for amortization
-6. **Adjust `early_stop_patience`** based on expected convergence time
+6. **Adjust `patience_epochs`** based on expected convergence time within a round
 7. **Set `cache_on_device: true`** when GPU memory permits, to eliminate per-batch CPU-to-GPU transfers
-8. **Increase `cache_sync_every`** (e.g. 5-10) when simulations are slow and training data changes infrequently
+8. **Increase `val_every_epochs`** (e.g. 3) when validation is expensive; `patience_epochs` keeps its meaning
 
 ## Class Reference
 
@@ -295,10 +303,10 @@ Flow logs the following metrics during training:
 
 ## Training Loop
 
-`Flow` inherits its epoch loop from `StepwiseEstimator`. The loop parameters
-(`max_epochs`, `batch_size`, `early_stop_patience`, `cache_sync_every`,
-`max_cache_samples`, `cache_on_device`, `prior_epochs`) are `Flow.__init__`
-arguments, documented above.
+`Flow` inherits its round loop from `StepwiseEstimator`. The loop parameters
+(`max_rounds`, `patience_rounds`, `max_epochs`, `patience_epochs`,
+`val_every_epochs`, `batch_size`, `max_cache_samples`, `cache_on_device`,
+`prior_rounds`) are `Flow.__init__` arguments, documented above.
 
 ::: falcon.estimators.stepwise_base.StepwiseEstimator
     options:

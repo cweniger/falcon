@@ -126,15 +126,16 @@ The posterior learner. Falcon provides two estimators:
 
 All estimator parameters are specified **flat** directly under `estimator:` — there
 are no nested group keys (`loop`, `network`, etc.). The `embedding` key is special:
-it takes a nested `_target_` / `_input_` block as usual.
+it takes a nested `_target_` / `_input_` block as usual. Estimators train in rounds
+of epochs on fixed data; see [Training Loop](training.md) for the loop parameters.
 
 ```yaml
 estimator:
   _target_: falcon.estimators.Flow
-  max_epochs: 300
+  max_epochs: 300        # per round
+  patience_epochs: 50
+  patience_rounds: 10
   batch_size: 128
-  early_stop_patience: 50
-  cache_sync_every: 0
   max_cache_samples: 0
   cache_on_device: false
   net_type: nsf          # nsf, maf, zuko_nice, etc.
@@ -143,8 +144,8 @@ estimator:
     _target_: model.Embedding
     _input_: [x]
   lr: 0.01
-  lr_decay_factor: 0.1
-  lr_patience: 8
+  lr_decay_factor: 1.0
+  lr_patience_epochs: 8
   gamma: 0.5             # Proposal breadth (0=tight around posterior, higher=broader)
   discard_samples: true
 ```
