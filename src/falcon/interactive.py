@@ -20,6 +20,7 @@ class NodeStatus:
 
     name: str
     status: str = "idle"
+    current_round: int = 0
     current_epoch: int = 0
     total_epochs: int = 0
     loss: Optional[float] = None
@@ -182,6 +183,7 @@ class InteractiveDisplay:
         self,
         name: str,
         status: Optional[str] = None,
+        current_round: Optional[int] = None,
         current_epoch: Optional[int] = None,
         total_epochs: Optional[int] = None,
         loss: Optional[float] = None,
@@ -195,6 +197,8 @@ class InteractiveDisplay:
             node = self.state.nodes[name]
             if status is not None:
                 node.status = status
+            if current_round is not None:
+                node.current_round = current_round
             if current_epoch is not None:
                 node.current_epoch = current_epoch
             if total_epochs is not None:
@@ -287,7 +291,7 @@ class InteractiveDisplay:
                 details.append(f"{color}{node.status}\x1b[0m")
 
                 if node.total_epochs > 0:
-                    details.append(f"{node.current_epoch}/{node.total_epochs}")
+                    details.append(f"round {node.current_round} · {node.current_epoch}/{node.total_epochs}")
                 if node.loss is not None:
                     details.append(f"loss: {node.loss:.2e}")
                 if node.samples > 0:

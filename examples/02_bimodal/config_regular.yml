@@ -50,13 +50,13 @@ graph:
         _target_: model.E
         _input_: [x]
       batch_size: 128
-      early_stop_patience: 32
+      patience_epochs: 32
       theta_norm: true
       norm_momentum: 0.003
       use_log_update: true
       adaptive_momentum: false
-      lr_decay_factor: 0.5
-      lr_patience: 16
+      lr_decay_factor: 1
+      lr_patience_epochs: 16
       discard_samples: true
       log_ratio_threshold: -20
       sample_reference_posterior: false

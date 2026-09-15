@@ -134,6 +134,11 @@ class ToeplitzWhitener(torch.nn.Module):
         super().__init__()
         self.momentum = momentum
         self.eps = eps
+        # FIXME: a None buffer is left out of state_dict() and rejected by a strict
+        # load_state_dict() until the first update(). Copying weights between an
+        # updated and a not-yet-updated instance (e.g. promoting the current
+        # network to the best network during round-based training) then raises
+        # "Unexpected key(s) in state_dict: ...running_var".
         self.register_buffer("running_var", None)
         self.initialized = False
 

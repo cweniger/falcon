@@ -73,7 +73,7 @@ graph:
 
     estimator:                          # Posterior estimator network
       _target_: falcon.estimators.Flow   # Flow-based posterior estimation
-      max_epochs: 300
+      max_epochs: 300                   # Epoch cap per training round
       net_type: nsf                     # Neural spline flow (alternatives: zuko_gf, maf, naf, etc.)
       lr: 0.01
       gamma: 0.5                        # Mixing coefficient for amortization weighting
@@ -81,11 +81,12 @@ graph:
         _target_: model.E
         _input_: [x]
       batch_size: 128
-      early_stop_patience: 32
+      patience_epochs: 32               # End the round after N epochs without validation improvement
+      patience_rounds: 10               # Stop training after N rejected rounds in a row
       theta_norm: true                  # Normalize parameter space
       norm_momentum: 0.003              # Momentum for online normalization updates
-      lr_decay_factor: 0.5              # LR decay multiplier
-      lr_patience: 16                   # LR decay after N stagnant epochs
+      lr_decay_factor: 1                # LR decay multiplier (1 = no decay)
+      lr_patience_epochs: 16            # LR decay after N epochs without validation improvement
       discard_samples: false
       log_ratio_threshold: -20          # Stability cutoff for log ratios
 

@@ -13,7 +13,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.networks import build_mlp
-from falcon.estimators.stepwise_base import StepwiseEstimator
+from falcon.estimators.stepwise_base import NetworkGroup, StepwiseEstimator
 from falcon.core.logger import log, debug
 
 
@@ -215,19 +215,24 @@ class GaussianFullCov(StepwiseEstimator):
     """Full-covariance Gaussian posterior estimator for TransformedPrior simulators.
 
     Works in the standard-normal latent space; samples are mapped back to
-    parameter space after generation.
+    parameter space after generation. Training runs in rounds of epochs on
+    fixed data; see ``StepwiseEstimator``.
 
     Args:
-        max_epochs: Maximum training epochs.
-        lr: Learning rate.
+        max_epochs: Maximum epochs per round.
+        lr: Learning rate; reset at the start of every round.
         gamma: Proposal tempering coefficient.
         embedding: Embedding config dict or ``None``.
         device: Device string; auto-detected if ``None``.
         batch_size: Mini-batch size.
-        early_stop_patience: Epochs without improvement before stopping.
-        prior_epochs: Epochs to sample from prior before switching to proposal.
+        patience_epochs: End the round once the best validation loss is this
+            many epochs old (checked at validations).
+        val_every_epochs: Validate after every N-th epoch (and at the last epoch).
+        max_rounds: Maximum number of rounds (``None`` = unlimited).
+        patience_rounds: Stop training after this many rejected rounds in a row.
+        prior_rounds: Rounds that simulate from the prior before switching to
+            the learned proposal. The first round always uses the prior.
         cache_on_device: Cache training data on the estimator's device.
-        cache_sync_every: Resync buffer cache every N epochs (0 = every epoch).
         max_cache_samples: Cap on cached training samples (0 = all).
         hidden_dim: MLP hidden layer width.
         num_layers: MLP depth.
@@ -236,8 +241,8 @@ class GaussianFullCov(StepwiseEstimator):
         eig_update_freq: Eigendecomposition update frequency.
         betas: AdamW beta coefficients.
         lr_decay_factor: LR decay factor (1.0 = no decay).
-        lr_patience: Plateau patience before LR decay.
-        discard_samples: Discard low log-ratio training samples.
+        lr_patience_epochs: Epochs without validation improvement before LR decay.
+        discard_samples: Run a discard sweep after every accepted round.
         log_ratio_threshold: Log-ratio cutoff for discarding.
     """
 
@@ -252,10 +257,12 @@ class GaussianFullCov(StepwiseEstimator):
         device=None,
         # Training loop
         batch_size: int = 128,
-        early_stop_patience: int = 16,
-        prior_epochs: int = 0,
+        patience_epochs: int = 16,
+        val_every_epochs: int = 1,
+        max_rounds: Optional[int] = None,
+        patience_rounds: int = 10,
+        prior_rounds: int = 0,
         cache_on_device: bool = False,
-        cache_sync_every: int = 0,
         max_cache_samples: int = 0,
         # Network architecture
         hidden_dim: int = 128,
@@ -266,7 +273,7 @@ class GaussianFullCov(StepwiseEstimator):
         # Optimizer
         betas: tuple = (0.9, 0.9),
         lr_decay_factor: float = 1.0,
-        lr_patience: int = 8,
+        lr_patience_epochs: int = 8,
         # Inference / sampling
         discard_samples: bool = False,
         log_ratio_threshold: float = -20.0,
@@ -277,10 +284,12 @@ class GaussianFullCov(StepwiseEstimator):
         self.embedding = embedding
         self.device = device
         self.batch_size = batch_size
-        self.early_stop_patience = early_stop_patience
-        self.prior_epochs = prior_epochs
+        self.patience_epochs = patience_epochs
+        self.val_every_epochs = val_every_epochs
+        self.max_rounds = max_rounds
+        self.patience_rounds = patience_rounds
+        self.prior_rounds = prior_rounds
         self.cache_on_device = cache_on_device
-        self.cache_sync_every = cache_sync_every
         self.max_cache_samples = max_cache_samples
         self.hidden_dim = hidden_dim
         self.num_layers = num_layers
@@ -289,7 +298,7 @@ class GaussianFullCov(StepwiseEstimator):
         self.eig_update_freq = eig_update_freq
         self.betas = betas
         self.lr_decay_factor = lr_decay_factor
-        self.lr_patience = lr_patience
+        self.lr_patience_epochs = lr_patience_epochs
         self.discard_samples = discard_samples
         self.log_ratio_threshold = log_ratio_threshold
 
@@ -321,7 +330,6 @@ class GaussianFullCov(StepwiseEstimator):
 
         self._model: Optional[nn.Module] = None
         self._best_model: Optional[nn.Module] = None
-        self._best_loss: float = float("inf")
         self._init_theta: Optional[torch.Tensor] = None
         self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
         self._optimizer = None
@@ -331,13 +339,26 @@ class GaussianFullCov(StepwiseEstimator):
 
     def _build_optimizer(self):
         self._optimizer = AdamW(self._model.parameters(), lr=self.lr, betas=self.betas)
+        self._build_scheduler()
+
+    def _build_scheduler(self):
+        # Stepped once per validation, so the patience is converted from epochs
         self._scheduler = (
             ReduceLROnPlateau(
                 self._optimizer, mode="min",
-                factor=self.lr_decay_factor, patience=self.lr_patience,
+                factor=self.lr_decay_factor,
+                patience=self._epochs_to_validations(self.lr_patience_epochs),
             )
             if self.lr_decay_factor < 1.0 else None
         )
+
+    def _network_groups(self):
+        return {
+            "model": NetworkGroup(
+                self._model.posterior, self._best_model.posterior, "loss",
+                self._model.embedding, self._best_model.embedding,
+            ),
+        }
 
     # ==================== Model Building ====================
 
@@ -386,27 +407,26 @@ class GaussianFullCov(StepwiseEstimator):
 
     # ==================== Loss ====================
 
-    def _compute_loss(self, batch):
+    def _unpack_batch(self, batch):
         theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
         theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
             k: self._to_tensor(batch[f"{k}.value"], self.device)
             for k in self.condition_keys if f"{k}.value" in batch
         }
-
         theta_latent = self.simulator_instance.inverse(theta, mode="standard_normal")
+        return theta_latent, theta_logprob, conditions
+
+    def _compute_loss(self, batch, train: bool, use_best: bool = False):
+        theta_latent, _, conditions = self._unpack_batch(batch)
 
         ts = time.time()
-        self.history["train_ids"].extend((ts, id) for id in batch._ids.tolist())
+        self.history["train_ids" if train else "val_ids"].extend((ts, id) for id in batch._ids.tolist())
 
-        loss = self._model.loss(theta_latent, conditions)
-
-        if self.discard_samples:
-            with torch.no_grad():
-                self._model.eval()
-                log_prob = self._model.log_prob(theta_latent, conditions).cpu()
-            discard_mask = (log_prob - theta_logprob) < self.log_ratio_threshold
-            batch.discard(discard_mask)
+        model = self._best_model if use_best else self._model
+        model.train(train)
+        s = self._summary(batch, "model", conditions, use_best=use_best, train=train)
+        loss = model.posterior.loss(theta_latent, s)
 
         return loss, {"loss": loss.item()}
 
@@ -417,25 +437,29 @@ class GaussianFullCov(StepwiseEstimator):
             self._initialize_model(batch)
 
         self._optimizer.zero_grad()
-        self._model.train()
-        loss, metrics = self._compute_loss(batch)
+        loss, metrics = self._compute_loss(batch, train=True)
         loss.backward()
         self._optimizer.step()
         return metrics
 
-    def val_step(self, batch) -> Dict[str, float]:
-        with torch.no_grad():
-            self._model.eval()
-            _, metrics = self._compute_loss(batch)
+    def val_step(self, batch, use_best: bool = False) -> Dict[str, float]:
+        _, metrics = self._compute_loss(batch, train=False, use_best=use_best)
         return metrics
 
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
-        val_loss = val_metrics.get("loss", float("inf"))
+    def discard_mask(self, batch):
+        theta_latent, theta_logprob, conditions = self._unpack_batch(batch)
+        self._best_model.eval()
+        s = self._summary(batch, "model", conditions, use_best=True)
+        log_prob = self._best_model.posterior.log_prob(theta_latent, s).cpu()
+        return (log_prob - theta_logprob.cpu()) < self.log_ratio_threshold
 
-        if val_loss < self._best_loss:
-            self._best_loss = val_loss
-            self._best_model.load_state_dict(self._model.state_dict())
-            log({"checkpoint": epoch})
+    def on_round_start(self) -> None:
+        for group in self._optimizer.param_groups:
+            group["lr"] = self.lr
+        self._build_scheduler()
+
+    def on_validation_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
+        val_loss = val_metrics.get("loss", float("inf"))
 
         if self._scheduler is not None:
             self._scheduler.step(val_loss)
@@ -459,7 +483,7 @@ class GaussianFullCov(StepwiseEstimator):
         return {"value": samples, "log_prob": np.zeros(num_samples)}
 
     def _sample(self, num_samples: int, conditions, gamma) -> dict:
-        if not self.networks_initialized:
+        if not self._has_best:
             return self.sample_prior(num_samples)
 
         assert conditions, "Conditions must be provided for sampling."
@@ -481,7 +505,7 @@ class GaussianFullCov(StepwiseEstimator):
         return self._sample(num_samples, conditions, gamma=self._posterior_gamma)
 
     def sample_proposal(self, num_samples: int, conditions=None) -> dict:
-        if self._total_epochs_trained < self.prior_epochs:
+        if self._use_prior_proposal():
             return self.sample_prior(num_samples)
         result = self._sample(num_samples, conditions, gamma=self._proposal_gamma)
         log({
@@ -512,6 +536,7 @@ class GaussianFullCov(StepwiseEstimator):
         torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
         torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
         torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
+        self._save_round_state(node_dir)
 
     def load(self, node_dir) -> None:
         node_dir = Path(node_dir)
@@ -531,3 +556,4 @@ class GaussianFullCov(StepwiseEstimator):
 
         tep = node_dir / "total_epochs_trained.pth"
         self._total_epochs_trained = torch.load(tep) if tep.exists() else 0
+        self._load_round_state(node_dir)

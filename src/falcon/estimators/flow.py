@@ -12,34 +12,43 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.logger import log, debug
 from falcon.estimators.flow_density import FlowDensity
-from falcon.estimators.stepwise_base import StepwiseEstimator
+from falcon.estimators.stepwise_base import NetworkGroup, StepwiseEstimator
 from falcon.embeddings import instantiate_embedding
 
 
 class Flow(StepwiseEstimator):
     """Flow-based posterior estimation using a conditional + marginal flow pair.
 
+    Training runs in rounds of epochs on fixed data; see ``StepwiseEstimator``.
+    The conditional flow (with the embedding) and the marginal flow are
+    promoted to best networks independently; a round is accepted when the
+    conditional flow improves.
+
     Args:
-        max_epochs: Maximum training epochs.
+        max_epochs: Maximum epochs per round.
         net_type: Flow architecture (``zuko_nice``, ``nsf``, ``maf``, ``zuko_gf``, ...).
-        lr: Learning rate.
+        lr: Learning rate; reset at the start of every round.
         gamma: Proposal tempering coefficient.
         embedding: Embedding config dict (with ``_target_`` etc.) or ``None``.
         device: Device string (e.g. ``"cuda:0"``); auto-detected if ``None``.
         batch_size: Mini-batch size.
-        early_stop_patience: Epochs without improvement before stopping.
-        prior_epochs: Epochs to sample from prior before switching to proposal.
+        patience_epochs: End the round once the best validation loss is this
+            many epochs old (checked at validations).
+        val_every_epochs: Validate after every N-th epoch (and at the last epoch).
+        max_rounds: Maximum number of rounds (``None`` = unlimited).
+        patience_rounds: Stop training after this many rejected rounds in a row.
+        prior_rounds: Rounds that simulate from the prior before switching to
+            the learned proposal. The first round always uses the prior.
         cache_on_device: Cache training data on the estimator device.
-        cache_sync_every: Resync buffer cache every N epochs (0 = every epoch).
         max_cache_samples: Cap on cached training samples (0 = all).
         theta_norm: Normalise parameter space online.
         norm_momentum: EMA momentum for online normalisation.
         adaptive_momentum: Adaptive momentum for normalisation.
         use_log_update: Use log-space normalisation update.
         betas: AdamW beta coefficients.
-        lr_decay_factor: LR decay factor for plateau scheduler.
-        lr_patience: Plateau patience before LR decay.
-        discard_samples: Discard low log-ratio training samples.
+        lr_decay_factor: LR decay factor for plateau scheduler (1.0 = no decay).
+        lr_patience_epochs: Epochs without validation improvement before LR decay.
+        discard_samples: Run a discard sweep after every accepted round.
         log_ratio_threshold: Log-ratio cutoff for discarding.
         sample_reference_posterior: Sample reference posterior for proposals.
         use_best_models: Use best-checkpoint networks for sampling.
@@ -67,10 +76,12 @@ class Flow(StepwiseEstimator):
         device: Optional[str] = None,
         # Training loop
         batch_size: int = 128,
-        early_stop_patience: int = 16,
-        prior_epochs: int = 0,
+        patience_epochs: int = 16,
+        val_every_epochs: int = 1,
+        max_rounds: Optional[int] = None,
+        patience_rounds: int = 10,
+        prior_rounds: int = 0,
         cache_on_device: bool = False,
-        cache_sync_every: int = 0,
         max_cache_samples: int = 0,
         # Network
         theta_norm: bool = True,
@@ -79,8 +90,8 @@ class Flow(StepwiseEstimator):
         use_log_update: bool = False,
         # Optimizer
         betas: tuple = (0.9, 0.9),
-        lr_decay_factor: float = 0.1,
-        lr_patience: int = 8,
+        lr_decay_factor: float = 1.0,
+        lr_patience_epochs: int = 8,
         # Inference
         discard_samples: bool = True,
         log_ratio_threshold: float = -20.0,
@@ -100,10 +111,12 @@ class Flow(StepwiseEstimator):
         self.embedding = embedding
         self.device = device
         self.batch_size = batch_size
-        self.early_stop_patience = early_stop_patience
-        self.prior_epochs = prior_epochs
+        self.patience_epochs = patience_epochs
+        self.val_every_epochs = val_every_epochs
+        self.max_rounds = max_rounds
+        self.patience_rounds = patience_rounds
+        self.prior_rounds = prior_rounds
         self.cache_on_device = cache_on_device
-        self.cache_sync_every = cache_sync_every
         self.max_cache_samples = max_cache_samples
         self.theta_norm = theta_norm
         self.norm_momentum = norm_momentum
@@ -111,7 +124,7 @@ class Flow(StepwiseEstimator):
         self.use_log_update = use_log_update
         self.betas = betas
         self.lr_decay_factor = lr_decay_factor
-        self.lr_patience = lr_patience
+        self.lr_patience_epochs = lr_patience_epochs
         self.discard_samples = discard_samples
         self.log_ratio_threshold = log_ratio_threshold
         self.sample_reference_posterior = sample_reference_posterior
@@ -140,9 +153,6 @@ class Flow(StepwiseEstimator):
         self._best_marginal_flow = None
         self._best_embedding = None
         self._init_parameters = None
-
-        self.best_conditional_flow_val_loss = float("inf")
-        self.best_marginal_flow_val_loss = float("inf")
 
         self._optimizer = None
         self._scheduler = None
@@ -181,15 +191,31 @@ class Flow(StepwiseEstimator):
             + list(self._embedding.parameters())
         )
         self._optimizer = AdamW(parameters, lr=self.lr, betas=self.betas)
-        self._scheduler = ReduceLROnPlateau(
-            self._optimizer,
-            mode="min",
-            factor=self.lr_decay_factor,
-            patience=self.lr_patience,
-        )
+        self._build_scheduler()
 
         self.networks_initialized = True
         debug("Networks initialized.")
+
+    def _build_scheduler(self) -> None:
+        # Stepped once per validation, so the patience is converted from epochs
+        self._scheduler = (
+            ReduceLROnPlateau(
+                self._optimizer,
+                mode="min",
+                factor=self.lr_decay_factor,
+                patience=self._epochs_to_validations(self.lr_patience_epochs),
+            )
+            if self.lr_decay_factor < 1.0 else None
+        )
+
+    def _network_groups(self):
+        return {
+            "conditional": NetworkGroup(
+                self._conditional_flow, self._best_conditional_flow, "loss",
+                self._embedding, self._best_embedding,
+            ),
+            "marginal": NetworkGroup(self._marginal_flow, self._best_marginal_flow, "loss_aux"),
+        }
 
     def _create_flow(self, theta, s, is_conditional=True):
         return FlowDensity(
@@ -225,17 +251,15 @@ class Flow(StepwiseEstimator):
 
         return ids, theta, theta_logprob, conditions, u, u_device, conditions_device
 
-    def _compute_flow_losses(self, u_device, s, train: bool):
-        if train:
-            self._conditional_flow.train()
-            self._marginal_flow.train()
-        else:
-            self._conditional_flow.eval()
-            self._marginal_flow.eval()
+    def _compute_flow_losses(self, u_device, s, train: bool, use_best: bool = False):
+        conditional_flow = self._best_conditional_flow if use_best else self._conditional_flow
+        marginal_flow = self._best_marginal_flow if use_best else self._marginal_flow
+        conditional_flow.train(train)
+        marginal_flow.train(train)
 
-        loss_cond = self._conditional_flow.loss(u_device, s).mean()
+        loss_cond = conditional_flow.loss(u_device, s).mean()
         s_marginal = s.detach() * 0 if train else s * 0
-        loss_marg = self._marginal_flow.loss(u_device, s_marginal).mean()
+        loss_marg = marginal_flow.loss(u_device, s_marginal).mean()
 
         return loss_cond, loss_marg
 
@@ -246,7 +270,7 @@ class Flow(StepwiseEstimator):
         if not self.networks_initialized:
             self._initialize_networks(u, conditions)
 
-        s = self._embed(conditions_device, train=True)
+        s = self._summary(batch, "conditional", conditions_device, train=True)
 
         with torch.no_grad():
             self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
@@ -257,47 +281,44 @@ class Flow(StepwiseEstimator):
         (loss_cond + loss_marg).backward()
         self._optimizer.step()
 
-        if self.discard_samples:
-            discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
-            batch.discard(discard_mask)
-
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
-    def val_step(self, batch) -> Dict[str, float]:
+    def val_step(self, batch, use_best: bool = False) -> Dict[str, float]:
         _, theta, theta_logprob, conditions, u, u_device, conditions_device = \
             self._unpack_batch(batch, "val")
 
-        s = self._embed(conditions_device, train=False)
-
-        with torch.no_grad():
-            loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False)
-
-            # Same discard rule as training, so both sets cover the same region
-            if self.discard_samples:
-                discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
-                batch.discard(discard_mask)
+        s = self._summary(batch, "conditional", conditions_device, use_best=use_best)
+        loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False, use_best=use_best)
 
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
-    def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
-        val_loss = val_metrics.get("loss", float("inf"))
-        val_aux_loss = val_metrics.get("loss_aux", float("inf"))
-
-        if val_loss < self.best_conditional_flow_val_loss:
-            self.best_conditional_flow_val_loss = val_loss
-            self._update_best_weights("conditional")
-            log({"checkpoint:conditional": epoch})
-
-        if val_aux_loss < self.best_marginal_flow_val_loss:
-            self.best_marginal_flow_val_loss = val_aux_loss
-            self._update_best_weights("marginal")
-            log({"checkpoint:marginal": epoch})
-
-        self._scheduler.step(val_loss)
+    def on_validation_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
+        if self._scheduler is not None:
+            self._scheduler.step(val_metrics.get("loss", float("inf")))
         lr = self._optimizer.param_groups[0]["lr"]
         log({"lr": lr})
 
         return {"lr": lr}
+
+    def on_round_start(self) -> None:
+        for group in self._optimizer.param_groups:
+            group["lr"] = self.lr
+        self._build_scheduler()
+
+    def discard_mask(self, batch):
+        theta = self._to_tensor(batch[f"{self.theta_key}.value"])
+        theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
+        conditions = {
+            k: self._to_tensor(batch[f"{k}.value"], self.device)
+            for k in self.condition_keys if f"{k}.value" in batch
+        }
+        u = self.simulator_instance.inverse(theta).to(self.device)
+        s = self._summary(batch, "conditional", conditions, use_best=True)
+
+        self._best_conditional_flow.eval()
+        log_prob = self._best_conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
+        log_ratio = log_prob - theta_logprob.cpu()
+        return log_ratio < self.log_ratio_threshold
 
     # ==================== Sampling ====================
 
@@ -309,15 +330,13 @@ class Flow(StepwiseEstimator):
         return {'value': samples, 'log_prob': log_prob}
 
     def sample_posterior(self, num_samples: int, conditions=None) -> dict:
-        if not self.networks_initialized:
+        if not self._has_best:
             return self.sample_prior(num_samples)
         samples, logprob = self._importance_sample(num_samples, mode="posterior", conditions=conditions or {})
         return {'value': samples.numpy(), 'log_prob': logprob.numpy()}
 
     def sample_proposal(self, num_samples: int, conditions=None) -> dict:
-        if self._total_epochs_trained < self.prior_epochs:
-            return self.sample_prior(num_samples)
-        if not self.networks_initialized:
+        if self._use_prior_proposal():
             return self.sample_prior(num_samples)
 
         conditions = conditions or {}
@@ -455,6 +474,7 @@ class Flow(StepwiseEstimator):
 
         if self._best_embedding is not None:
             torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
+        self._save_round_state(node_dir)
 
     def load(self, node_dir: Path) -> None:
         debug(f"Loading: {node_dir}")
@@ -467,8 +487,13 @@ class Flow(StepwiseEstimator):
         if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
             self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
 
+        # A resumed run starts from the best networks
+        for group in self._network_groups().values():
+            self._copy_modules(group.best_modules(), group.current_modules())
+
         _tep = node_dir / "total_epochs_trained.pth"
         self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
+        self._load_round_state(node_dir)
 
     # ==================== Private Helpers ====================
 
@@ -479,29 +504,3 @@ class Flow(StepwiseEstimator):
         )
         embedding.train() if train else embedding.eval()
         return embedding(conditions)
-
-    def _update_best_weights(self, network_type: str) -> None:
-        if network_type == "conditional":
-            self._best_conditional_flow.load_state_dict(
-                self._conditional_flow.state_dict()
-            )
-            self._best_embedding.load_state_dict(
-                self._embedding.state_dict()
-            )
-        else:
-            self._best_marginal_flow.load_state_dict(
-                self._marginal_flow.state_dict()
-            )
-
-    def _compute_discard_mask(self, theta, theta_logprob, conditions):
-        u = self.simulator_instance.inverse(theta)
-        s = self._embed(conditions, train=False, use_best_fit=True)
-
-        u = u.expand(len(theta), *u.shape[1:]) if u.shape[0] == 1 else u
-        s = s.expand(len(theta), *s.shape[1:]) if s.shape[0] == 1 else s
-
-        u = u.to(self.device)
-        self._conditional_flow.eval()
-        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
-        log_ratio = log_prob - theta_logprob.cpu()
-        return log_ratio < self.log_ratio_threshold

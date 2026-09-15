@@ -60,10 +60,10 @@ graph:
             out_features: 512
             _input_: [x]
       batch_size: 128
-      early_stop_patience: 32
+      patience_epochs: 32
       theta_norm: true
-      lr_decay_factor: 0.5
-      lr_patience: 16
+      lr_decay_factor: 1
+      lr_patience_epochs: 16
       discard_samples: false
       log_ratio_threshold: -20
       sample_reference_posterior: false
@@ -97,10 +97,10 @@ graph:
           _target_: model.Unsqueeze
           _input_: [x]
       batch_size: 128
-      early_stop_patience: 32
+      patience_epochs: 32
       theta_norm: true
-      lr_decay_factor: 0.5
-      lr_patience: 16
+      lr_decay_factor: 1
+      lr_patience_epochs: 16
       discard_samples: false
       log_ratio_threshold: -20
       sample_reference_posterior: false

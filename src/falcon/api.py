@@ -19,7 +19,7 @@ class Config:
 
             cfg = falcon.config("config.yml").override(
                 "buffer.max_samples=500",
-                "graph.theta.estimator.loop.max_epochs=200",
+                "graph.theta.estimator.max_epochs=200",
             )
         """
         overrides = OmegaConf.from_dotlist(list(dotted_strings))

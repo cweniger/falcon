@@ -496,12 +496,13 @@ class CachedDataLoader:
     """Cached dataloader with pre-stacked torch tensors for fast batch sampling.
 
     Stores samples as contiguous torch tensors on a configurable device (CPU or
-    GPU). sync() incrementally updates: new samples fill free slots from
-    evictions or are bulk-appended. sample_batch() uses torch fancy indexing,
-    which is ~5x faster than numpy for large arrays.
+    GPU). refresh() incrementally updates: new samples fill free slots from
+    evictions or are bulk-appended. Between refreshes the cache is fixed, and
+    iter_batches() / sample_batch() use torch fancy indexing, which is ~5x
+    faster than numpy for large arrays.
 
-    Data fetching (ray.get) runs in a background thread so the training event
-    loop is not blocked. New data becomes available one sync() call later.
+    Data fetching (ray.get) runs in a background thread that refresh() awaits,
+    so the actor's event loop keeps serving other calls in the meantime.
 
     When device='cuda', the entire buffer lives on GPU for maximum speed
     (~50x vs numpy dict cache). Falls back to CPU when GPU memory is
@@ -530,7 +531,6 @@ class CachedDataLoader:
 
         # Background fetch thread
         self._fetch_executor = ThreadPoolExecutor(max_workers=1)
-        self._pending_fetch = None  # Future -> (new_data, checkout)
 
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
@@ -627,43 +627,13 @@ class CachedDataLoader:
         )
         self.count = len(self._active_rows)
 
-    def sync(self):
-        """Non-blocking incremental sync.
-
-        Both checkout_refs and data fetching run in a background thread,
-        so sync() never blocks the training loop.  The only exception is
-        the very first call, which must block until initial data arrives.
-        """
-        first_sync = len(self._arrays) == 0
-
-        # 1. Apply completed background work
-        if self._pending_fetch is not None:
-            if first_sync or self._pending_fetch.done():
-                new_tensors, checkout = self._pending_fetch.result()
-                self._pending_fetch = None
-                self._apply_fetch(new_tensors, checkout)
-            else:
-                # Still running — don't block, training continues
-                return
-
-        # 2. Launch new background checkout + fetch
-        self._pending_fetch = self._fetch_executor.submit(
-            self._checkout_and_fetch, self.active_ids.copy()
-        )
-
-        # First sync must block — training needs initial data
-        if first_sync:
-            new_tensors, checkout = self._pending_fetch.result()
-            self._pending_fetch = None
-            self._apply_fetch(new_tensors, checkout)
-
     async def refresh(self):
         """Bring the cache up to date with the buffer and wait until it is.
 
-        The checkout and fetch run in the background thread as in sync(), but
-        the call awaits them, so the actor's event loop keeps serving other
-        calls (e.g. proposal sampling) while the data arrives. Afterwards the
-        cache stays fixed until the next refresh.
+        The checkout and fetch run in the background thread and are awaited,
+        so the actor's event loop keeps serving other calls (e.g. proposal
+        sampling) while the data arrives. Afterwards the cache stays fixed
+        until the next refresh.
         """
         future = self._fetch_executor.submit(
             self._checkout_and_fetch, self.active_ids.copy()
@@ -713,10 +683,9 @@ class BufferView:
                     *[f"{k}.value" for k in self.condition_keys]]
             train_cache = buffer.cached_loader(keys)
             val_cache = buffer.cached_val_loader(keys)
-            train_cache.sync()
-            val_cache.sync()
-            for step in range(steps_per_epoch):
-                batch = train_cache.sample_batch(batch_size)
+            await train_cache.refresh()
+            await val_cache.refresh()
+            for batch in train_cache.iter_batches(batch_size, shuffle=True):
                 theta = batch[f'{self.theta_key}.value']
                 ...
     """

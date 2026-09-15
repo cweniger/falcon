@@ -377,7 +377,9 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
                     parts = [str(ns.get("status", "?"))]
                     total_epochs = ns.get("total_epochs", 0)
                     if total_epochs:
-                        parts.append(f"{ns.get('current_epoch', 0)}/{total_epochs} epochs")
+                        parts.append(
+                            f"round {ns.get('round', 0)} · epoch {ns.get('current_epoch', 0)}/{total_epochs}"
+                        )
                     loss = ns.get("loss")
                     if loss is not None:
                         parts.append(f"loss={loss:.4g}")
@@ -756,6 +758,7 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
                             display.update_node(
                                 name=name,
                                 status=node_status.get("status", "unknown"),
+                                current_round=node_status.get("round", 0),
                                 current_epoch=node_status.get("current_epoch", 0),
                                 total_epochs=node_status.get("total_epochs", 0),
                                 loss=node_status.get("loss"),
