@@ -526,6 +526,7 @@ class CachedDataLoader:
         self._stacked_ids = np.array([], dtype=int)
         self._id_to_row = {}    # sample_id -> row index in stacked arrays
         self._free_rows = []    # reusable row indices from evicted samples
+        self._active_rows = torch.zeros(0, dtype=torch.long, device=self.device)
 
         # Background fetch thread
         self._fetch_executor = ThreadPoolExecutor(max_workers=1)
@@ -656,14 +657,48 @@ class CachedDataLoader:
             self._pending_fetch = None
             self._apply_fetch(new_tensors, checkout)
 
+    async def refresh(self):
+        """Bring the cache up to date with the buffer and wait until it is.
+
+        The checkout and fetch run in the background thread as in sync(), but
+        the call awaits them, so the actor's event loop keeps serving other
+        calls (e.g. proposal sampling) while the data arrives. Afterwards the
+        cache stays fixed until the next refresh.
+        """
+        future = self._fetch_executor.submit(
+            self._checkout_and_fetch, self.active_ids.copy()
+        )
+        new_tensors, checkout = await asyncio.wrap_future(future)
+        self._apply_fetch(new_tensors, checkout)
+
+    def _batch(self, rows):
+        """Batch object for the given row indices of the stacked arrays."""
+        ids = self._stacked_ids[rows.cpu().numpy()]
+        data = {key: arr[rows] for key, arr in self._arrays.items()}
+        return Batch(ids, data, self.dataset_manager)
+
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
         import torch
         idx = torch.randint(0, self.count, (batch_size,), device=self.device)
-        rows = self._active_rows[idx]
-        ids = self._stacked_ids[rows.cpu().numpy()] if self.device.type != 'cpu' else self._stacked_ids[rows.numpy()]
-        data = {key: arr[rows] for key, arr in self._arrays.items()}
-        return Batch(ids, data, self.dataset_manager)
+        return self._batch(self._active_rows[idx])
+
+    def iter_batches(self, batch_size, shuffle=False, drop_last=False):
+        """Yield Batch objects that together cover every cached sample once.
+
+        Args:
+            batch_size: Samples per batch.
+            shuffle: Visit samples in random order instead of cache order.
+            drop_last: Skip a final partial batch, unless it is the only batch.
+        """
+        import torch
+        rows = self._active_rows
+        if shuffle:
+            rows = rows[torch.randperm(self.count, device=self.device)]
+        num_full = self.count // batch_size
+        num_batches = num_full if drop_last and num_full > 0 else -(-self.count // batch_size)
+        for b in range(num_batches):
+            yield self._batch(rows[b * batch_size:(b + 1) * batch_size])
 
 
 class BufferView:
