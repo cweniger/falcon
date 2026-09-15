@@ -3,7 +3,6 @@
 import asyncio
 import time
 from abc import abstractmethod
-from dataclasses import dataclass
 from typing import Dict, List, Optional
 
 import numpy as np
@@ -11,19 +10,6 @@ import torch
 
 from falcon.core.base_estimator import BaseEstimator
 from falcon.core.logger import log, debug, info, warning, error
-
-
-@dataclass
-class TrainingLoopConfig:
-    """Generic training loop parameters."""
-
-    max_epochs: int = 100
-    batch_size: int = 128
-    early_stop_patience: int = 16
-    cache_sync_every: int = 0  # 0 = sync every epoch, N = sync every N epochs
-    max_cache_samples: int = 0  # 0 = cache all, >0 = cache random subset
-    cache_on_device: bool = False  # True = cache training data on estimator's device (GPU)
-    prior_epochs: int = 0
 
 
 class StepwiseEstimator(BaseEstimator):
@@ -38,6 +24,10 @@ class StepwiseEstimator(BaseEstimator):
     - train_step() / val_step() / on_epoch_end()
     - sample_prior/posterior/proposal
     - save/load
+
+    The loop reads its parameters off ``self`` -- max_epochs, batch_size,
+    early_stop_patience, cache_sync_every, max_cache_samples, cache_on_device,
+    prior_epochs -- which each subclass sets from its own __init__ kwargs.
     """
 
     def setup(
