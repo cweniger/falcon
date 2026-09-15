@@ -3,6 +3,7 @@ import asyncio
 import sys
 from dataclasses import dataclass
 from enum import IntEnum
+from fractions import Fraction
 from pathlib import Path
 from typing import List, Optional
 
@@ -25,9 +26,9 @@ class PathConfig:
 class BufferConfig:
     """Configuration for the rolling sample buffer."""
 
-    min_samples: int = MISSING
-    max_samples: int = MISSING
-    validation_samples: int = MISSING
+    min_samples: int = MISSING  # training + validation
+    max_samples: int = MISSING  # training + validation
+    validation_fraction: float = 0.15  # share of samples held out for validation only
     simulate_count: int = 64
     simulate_interval: float = 1.0
     simulate_chunk_size: int = 0
@@ -125,14 +126,25 @@ class DatasetManager:
 
 
 class SampleStatus(IntEnum):
-    # Live samples (used for validation/training)
-    VALIDATION = 0  # New samples for validation
-    TRAINING = 1  # Older samples for training
-    DISFAVOURED = 2  # Can be moved to tombstone
+    """Lifecycle of a sample, independent of its SamplePurpose."""
+
+    # Live samples (used by the loader of their purpose)
+    ACTIVE = 0  # Regular live sample
+    DISFAVOURED = 1  # Still used until evicted; can be moved to tombstone
 
     # Dead samples (will not be used anymore)
-    TOMBSTONE = 3  # Marked for deletion when no longer referenced by any actor
-    DELETED = 4  # Permanently deleted
+    TOMBSTONE = 2  # Marked for deletion when no longer referenced by any actor
+    DELETED = 3  # Permanently deleted
+
+
+class SamplePurpose(IntEnum):
+    """Fixed at insertion and never changed, so training and validation never mix."""
+
+    TRAINING = 0
+    VALIDATION = 1
+
+
+LIVE_STATUSES = [SampleStatus.ACTIVE, SampleStatus.DISFAVOURED]
 
 
 @ray.remote
@@ -141,7 +153,7 @@ class DatasetManagerActor:
         self,
         max_samples,
         min_samples,
-        validation_samples,
+        validation_fraction,
         simulate_count,
         simulate_interval,
         simulate_chunk_size,
@@ -153,7 +165,7 @@ class DatasetManagerActor:
     ):
         self.max_samples = max_samples
         self.min_samples = min_samples
-        self.validation_samples = validation_samples
+        self._set_validation_fraction(validation_fraction)
         self.simulate_count = simulate_count
         self.simulate_when_full = simulate_when_full
         self.simulate_interval = simulate_interval
@@ -168,6 +180,7 @@ class DatasetManagerActor:
         # Store
         self.ray_store = []
         self.status = np.zeros(0, dtype=int)
+        self.purpose = np.zeros(0, dtype=np.int8)
         self.ref_counts = np.zeros(0, dtype=int)
 
         # Create logger and set as module-level logger
@@ -175,9 +188,31 @@ class DatasetManagerActor:
             logger = Logger("dataset", log_config, capture_exceptions=True)
             set_logger(logger)
 
-        info(f"Dataset manager initialized | max_samples={max_samples} validation_samples={validation_samples}")
+        info(
+            f"Dataset manager initialized | min_samples={min_samples} max_samples={max_samples} "
+            f"validation_fraction={self._val_p}/{self._val_q}"
+        )
 
         asyncio.create_task(self.monitor())
+
+    def _set_validation_fraction(self, validation_fraction):
+        """Store the validation fraction as an exact integer ratio p/q and derive the floors."""
+        p, q = Fraction(validation_fraction).limit_denominator(1000).as_integer_ratio()
+        if p < 1 or 2 * p > q:
+            raise ValueError(
+                f"buffer.validation_fraction={validation_fraction} must lie in (0, 0.5] "
+                "(and be representable with denominator <= 1000)"
+            )
+        if self.min_samples < 2:
+            raise ValueError(f"buffer.min_samples={self.min_samples} must be >= 2")
+        self._val_p, self._val_q = p, q
+        # Floors: number of each purpose among the first min_samples insertion ids
+        self._min_validation = int(self._is_validation(np.arange(self.min_samples)).sum())
+        self._min_training = self.min_samples - self._min_validation
+
+    def _is_validation(self, ids):
+        """Sample id i is validation-only iff (i * p) % q < p: exactly p in every q ids, evenly spread."""
+        return (np.asarray(ids) * self._val_p) % self._val_q < self._val_p
 
     async def monitor(self):
         while True:
@@ -185,15 +220,15 @@ class DatasetManagerActor:
             await asyncio.sleep(10.0)
 
     def num_initial_samples(self):
-        return self.min_samples + self.validation_samples
+        return self.min_samples
 
     def num_resims(self):
         if self.simulate_when_full:
             return self.simulate_count
         else:
-            num_train_samples = int((self.status == SampleStatus.TRAINING).sum())
+            num_active_samples = int((self.status == SampleStatus.ACTIVE).sum())
             return min(
-                self.simulate_count, self.max_samples - num_train_samples
+                self.simulate_count, self.max_samples - num_active_samples
             )
 
     def get_simulate_interval(self):
@@ -204,55 +239,47 @@ class DatasetManagerActor:
     
     # FIXME: Logging should happen through wandb only, and not funneled through training nodes
     def get_store_stats(self):
+        # training/validation = live pool per purpose (what each loader draws from)
+        live = np.isin(self.status, LIVE_STATUSES)
         stats = {
             "total_length": len(self.ray_store),
-            "validation": sum(self.status == SampleStatus.VALIDATION),
-            "training": sum(self.status == SampleStatus.TRAINING),
-            "disfavoured": sum(self.status == SampleStatus.DISFAVOURED),
-            "tombstone": sum(self.status == SampleStatus.TOMBSTONE),
-            "deleted": sum(self.status == SampleStatus.DELETED),
+            "validation": int((live & (self.purpose == SamplePurpose.VALIDATION)).sum()),
+            "training": int((live & (self.purpose == SamplePurpose.TRAINING)).sum()),
+            "disfavoured": int((self.status == SampleStatus.DISFAVOURED).sum()),
+            "tombstone": int((self.status == SampleStatus.TOMBSTONE).sum()),
+            "deleted": int((self.status == SampleStatus.DELETED).sum()),
         }
         return stats
 
     def rotate_sample_buffer(self):
         """
-        Rotate samples through lifecycle: VAL -> TRAIN -> DISFAVOURED -> TOMBSTONE.
+        Rotate samples through lifecycle: ACTIVE -> DISFAVOURED -> TOMBSTONE.
 
-        Keeps most recent samples for validation, older samples for training,
-        and marks oldest samples as disfavoured and then tombstone for deletion.
+        Purposes are fixed, so this only ages samples out; training and
+        validation samples follow the same rules.
         """
-        # 1) Maximum number of VALIDATION samples should be validation_samples
-        #    Move excess validation samples to training
-        ids_validation = np.where(self.status == SampleStatus.VALIDATION)[0]
-        num_val_samples = len(ids_validation)
-        if num_val_samples > self.validation_samples:
-            ids_to_train = ids_validation[: -self.validation_samples]
-            self.status[ids_to_train] = SampleStatus.TRAINING
-
-        # 2) Minimum number of TRAINING+DISFAVOURED samples should be min_samples
-        #    Move excess disfavoured samples to tombstone
-        ids_disfavoured = np.where(self.status == SampleStatus.DISFAVOURED)[0]
-        num_train_samples = sum(self.status == SampleStatus.TRAINING)
-        num_disfavoured_samples = len(ids_disfavoured)
-        num_disfavoured_samples_to_keep = max(
-            0, self.min_samples - num_train_samples
-        )
-        if num_disfavoured_samples_to_keep == 0:
-            self.status[ids_disfavoured] = SampleStatus.TOMBSTONE
-        elif num_disfavoured_samples > num_disfavoured_samples_to_keep:
-            ids_to_tombstone = ids_disfavoured[:-num_disfavoured_samples_to_keep]
+        # 1) Per purpose, ACTIVE+DISFAVOURED should stay >= its share of min_samples
+        #    Move excess disfavoured samples (oldest first) to tombstone
+        for purpose, floor in (
+            (SamplePurpose.TRAINING, self._min_training),
+            (SamplePurpose.VALIDATION, self._min_validation),
+        ):
+            in_purpose = self.purpose == purpose
+            ids_disfavoured = np.where(in_purpose & (self.status == SampleStatus.DISFAVOURED))[0]
+            num_active = int((in_purpose & (self.status == SampleStatus.ACTIVE)).sum())
+            num_to_keep = min(len(ids_disfavoured), max(0, floor - num_active))
+            ids_to_tombstone = ids_disfavoured[: len(ids_disfavoured) - num_to_keep]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-        # 3) Maximum number of TRAINING samples is max_samples
-        #    Move excess training samples to tombstone
-        ids_training = np.where(self.status == SampleStatus.TRAINING)[0]
-        num_train_samples = len(ids_training)
-        if num_train_samples > self.max_samples:
-            ids_to_tombstone = ids_training[: -self.max_samples]
+        # 2) Maximum number of ACTIVE samples (both purposes) is max_samples
+        #    Move oldest excess to tombstone; purposes are interleaved, so the ratio is kept
+        ids_active = np.where(self.status == SampleStatus.ACTIVE)[0]
+        if len(ids_active) > self.max_samples:
+            ids_to_tombstone = ids_active[: -self.max_samples]
             self.status[ids_to_tombstone] = SampleStatus.TOMBSTONE
 
-    def checkout_refs(self, status, keys, max_samples=0, already_cached_ids=None):
-        """Select samples by status, return refs for uncached samples only.
+    def checkout_refs(self, status, keys, max_samples=0, already_cached_ids=None, purpose=None):
+        """Select samples by status (and purpose), return refs for uncached samples only.
 
         Increments ref_counts for new (uncached) sample IDs. The caller
         resolves these from the object store, then calls release_refs().
@@ -263,6 +290,7 @@ class DatasetManagerActor:
             max_samples: 0 = all samples, >0 = random subset
             already_cached_ids: np.array of IDs the caller already has cached.
                 Only refs for IDs NOT in this set are returned.
+            purpose: SamplePurpose to restrict to, or None for any purpose
 
         Returns:
             dict with:
@@ -270,10 +298,10 @@ class DatasetManagerActor:
                 '_new_ids': np.array of IDs that need to be fetched
                 key: [ObjectRef, ...] for _new_ids only
         """
-        if isinstance(status, list):
-            ids = np.where(np.isin(self.status, status))[0]
-        else:
-            ids = np.where(self.status == status)[0]
+        mask = np.isin(self.status, status if isinstance(status, list) else [status])
+        if purpose is not None:
+            mask &= self.purpose == purpose
+        ids = np.where(mask)[0]
         if max_samples > 0 and len(ids) > max_samples:
             ids = np.random.choice(ids, size=max_samples, replace=False)
 
@@ -304,11 +332,37 @@ class DatasetManagerActor:
             self.ref_counts[ids] -= 1
 
     def deactivate(self, ids):
-        # Get subset of ids that are currently TRAINING, only these can be disfavoured
+        # Get subset of ids that are currently ACTIVE, only these can be disfavoured
         ids = np.array(ids)
         if len(ids) > 0:
-            ids_training = ids[self.status[ids] == SampleStatus.TRAINING]
-            self.status[ids_training] = SampleStatus.DISFAVOURED
+            ids_active = ids[self.status[ids] == SampleStatus.ACTIVE]
+            self.status[ids_active] = SampleStatus.DISFAVOURED
+
+    def _register_new_samples(self, num_new_samples):
+        """Extend per-sample bookkeeping; purpose is fixed here by insertion id."""
+        ids = np.arange(len(self.status), len(self.status) + num_new_samples)
+        self.status = np.append(
+            self.status, np.full(num_new_samples, SampleStatus.ACTIVE)
+        )
+        self.purpose = np.append(
+            self.purpose,
+            np.where(self._is_validation(ids), SamplePurpose.VALIDATION, SamplePurpose.TRAINING).astype(np.int8),
+        )
+        self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
+
+    def _log_buffer_stats(self):
+        # n_training/n_validation = live pool per purpose (ACTIVE + DISFAVOURED, what each
+        # loader draws from). n_disfavoured is the subset marked for eviction.
+        stats = self.get_store_stats()
+        log({
+            "n_total": stats["total_length"],
+            "n_validation": stats["validation"],
+            "n_training": stats["training"],
+            "n_disfavoured": stats["disfavoured"],
+            "n_tombstone": stats["tombstone"],
+            "n_deleted": stats["deleted"],
+        }, prefix="buffer")
+        return stats
 
     def append(self, data):
         """Append samples to the buffer.
@@ -320,26 +374,10 @@ class DatasetManagerActor:
         for sample in data:
             sample_ray_objects = {key: ray.put(value) for key, value in sample.items()}
             self.ray_store.append(sample_ray_objects)
-        self.status = np.append(
-            self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
-        )
-        self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
+        self._register_new_samples(num_new_samples)
 
         self.rotate_sample_buffer()
-
-        # Log buffer statistics
-        log({
-            "n_total": len(self.ray_store),
-            "n_validation": int(sum(self.status == SampleStatus.VALIDATION)),
-            # n_training = the actual trainable pool: the dataloader draws from TRAINING +
-            # DISFAVOURED and min_samples floors their sum (see rotate_sample_buffer). n_disfavoured
-            # below is the subset marked for eviction (still trained on until tombstoned).
-            "n_training": int(sum((self.status == SampleStatus.TRAINING)
-                                  | (self.status == SampleStatus.DISFAVOURED))),
-            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
-            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
-            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
-        }, prefix="buffer")
+        self._log_buffer_stats()
 
         self.dump_store(data)
 
@@ -350,33 +388,18 @@ class DatasetManagerActor:
             sample_refs: List of dicts, each dict has {key: ObjectRef}
         """
         num_new_samples = len(sample_refs)
-        total_after = len(self.ray_store) + num_new_samples
 
         # Store refs directly - no ray.put() needed
         self.ray_store.extend(sample_refs)
-
-        self.status = np.append(
-            self.status, np.full(num_new_samples, SampleStatus.VALIDATION)
-        )
-        self.ref_counts = np.append(self.ref_counts, np.zeros(num_new_samples))
+        self._register_new_samples(num_new_samples)
 
         self.rotate_sample_buffer()
+        stats = self._log_buffer_stats()
 
-        # Log buffer statistics
-        # trainable pool = TRAINING + DISFAVOURED (what the dataloader draws; min_samples floors it)
-        n_train = int(sum((self.status == SampleStatus.TRAINING)
-                          | (self.status == SampleStatus.DISFAVOURED)))
-        n_val = int(sum(self.status == SampleStatus.VALIDATION))
-        log({
-            "n_total": len(self.ray_store),
-            "n_validation": n_val,
-            "n_training": n_train,
-            "n_disfavoured": int(sum(self.status == SampleStatus.DISFAVOURED)),
-            "n_tombstone": int(sum(self.status == SampleStatus.TOMBSTONE)),
-            "n_deleted": int(sum(self.status == SampleStatus.DELETED)),
-        }, prefix="buffer")
-
-        info(f"Appended {num_new_samples} samples | total={total_after} train={n_train} val={n_val}")
+        info(
+            f"Appended {num_new_samples} samples | total={stats['total_length']} "
+            f"train={stats['training']} val={stats['validation']}"
+        )
 
         # Disk dump: fetch values lazily if needed
         if self._snapshot_enabled():
@@ -486,12 +509,13 @@ class CachedDataLoader:
     """
 
     def __init__(self, dataset_manager, keys, sample_status, max_cache_samples=0,
-                 device=None):
+                 device=None, sample_purpose=None):
         import torch
         from concurrent.futures import ThreadPoolExecutor
         self.dataset_manager = dataset_manager
         self.keys = keys
         self.sample_status = sample_status
+        self.sample_purpose = sample_purpose
         self.max_cache_samples = max_cache_samples
         self.device = torch.device(device) if device else torch.device('cpu')
         self.active_ids = np.array([], dtype=int)
@@ -524,6 +548,7 @@ class CachedDataLoader:
             self.dataset_manager.checkout_refs.remote(
                 self.sample_status, self.keys, self.max_cache_samples,
                 already_cached_ids=active_ids_snapshot,
+                purpose=self.sample_purpose,
             )
         )
         new_ids = checkout['_new_ids']
@@ -675,7 +700,8 @@ class BufferView:
         """Create a training dataloader with cached tensors on the configured device."""
         return CachedDataLoader(
             self._dataset_manager, keys,
-            sample_status=[SampleStatus.TRAINING, SampleStatus.DISFAVOURED],
+            sample_status=LIVE_STATUSES,
+            sample_purpose=SamplePurpose.TRAINING,
             max_cache_samples=max_cache_samples,
             device=self._cache_device,
         )
@@ -684,7 +710,8 @@ class BufferView:
         """Create a validation dataloader with cached tensors on the configured device."""
         return CachedDataLoader(
             self._dataset_manager, keys,
-            sample_status=SampleStatus.VALIDATION,
+            sample_status=LIVE_STATUSES,
+            sample_purpose=SamplePurpose.VALIDATION,
             max_cache_samples=max_cache_samples,
             device=self._cache_device,
         )

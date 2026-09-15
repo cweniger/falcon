@@ -272,6 +272,11 @@ class Flow(StepwiseEstimator):
         with torch.no_grad():
             loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False)
 
+            # Same discard rule as training, so both sets cover the same region
+            if self.discard_samples:
+                discard_mask = self._compute_discard_mask(theta, theta_logprob, conditions_device)
+                batch.discard(discard_mask)
+
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
     def on_epoch_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:

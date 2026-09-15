@@ -42,7 +42,7 @@ cd examples/01_minimal && falcon launch -o output/run_01
 
 **Distributed Execution** (`falcon/core/raystore.py`):
 - `NodeWrapper`: Ray actor wrapping individual nodes for async training
-- `DatasetManagerActor`: Centralized dataset orchestration with sample lifecycle (VALIDATION → TRAINING → DISFAVOURED → TOMBSTONE)
+- `DatasetManagerActor`: Centralized dataset orchestration with sample lifecycle (ACTIVE → DISFAVOURED → TOMBSTONE → DELETED) and a separate, fixed purpose per sample (TRAINING or VALIDATION, a `buffer.validation_fraction` share spread evenly by insertion id)
 
 **Estimators** (`falcon/estimators/`):
 - `BaseEstimator` (`falcon/core/base_estimator.py`): Abstract interface defining train/sample/save/load contract

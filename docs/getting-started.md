@@ -61,7 +61,7 @@ paths:
 buffer:
   min_samples: 1000
   max_samples: 10000
-  validation_samples: 256
+  validation_fraction: 0.15
   simulate_count: 64
   simulate_interval: 1
 

@@ -60,7 +60,6 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
         # Reduce sample counts for faster testing
         "buffer.min_samples=64",
         "buffer.max_samples=128",
-        "buffer.validation_samples=16",
         "buffer.simulate_count=32",
     ] + epoch_overrides
 

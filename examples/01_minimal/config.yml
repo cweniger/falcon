@@ -49,9 +49,9 @@ paths:
 # Training buffer parameters
 # -----------------------------------------------------------------------------
 buffer:
-  min_samples: 4096                     # Minimum samples before training starts
-  max_samples: 32768                    # Maximum number of samples retained in buffer
-  validation_samples: 256               # Size of validation split (for early stopping)
+  min_samples: 4096                     # Minimum samples (training + validation) before training starts
+  max_samples: 32768                    # Maximum number of samples (training + validation) retained in buffer
+  validation_fraction: 0.15             # Share of samples held out for validation only, spread evenly over the buffer
   simulate_count: 64                    # Number of new samples generated per simulation round
   simulate_when_full: true              # If true, keep simulating when buffer is full (old samples disfavoured); if false, stop at max_samples
   simulate_interval: 1                  # Seconds between simulation rounds

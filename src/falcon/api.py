@@ -108,7 +108,7 @@ _DEFAULT_GRAPH_CONFIG = {
     "buffer": {
         "min_samples": 4096,
         "max_samples": 32768,
-        "validation_samples": 256,
+        "validation_fraction": 0.15,
         "simulate_count": 64,
         "simulate_when_full": True,
         "simulate_interval": 1,

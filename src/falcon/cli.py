@@ -530,7 +530,7 @@ def _run_pipeline(
     from omegaconf import OmegaConf
     import falcon
     from falcon.core.graph import create_graph_from_config
-    from falcon.core.logger import Logger, set_logger, info
+    from falcon.core.logger import Logger, set_logger, info, warning
 
     if stop_check is None:
         stop_check = lambda: False
@@ -609,7 +609,14 @@ def _run_pipeline(
 
         from omegaconf import OmegaConf as _OmegaConf
         from falcon.core.raystore import BufferConfig as _BufferConfig
-        buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), cfg.buffer)
+        user_buffer_cfg = _OmegaConf.to_container(cfg.buffer, resolve=True)
+        if user_buffer_cfg.pop("validation_samples", None) is not None:
+            warning(
+                "buffer.validation_samples is no longer used and is ignored: validation samples are now "
+                "a fixed share of the buffer (buffer.validation_fraction), and min_samples/max_samples "
+                "count training + validation samples."
+            )
+        buffer_cfg = _OmegaConf.merge(_OmegaConf.structured(_BufferConfig), user_buffer_cfg)
         buffer_base = path_cfg["buffer"]
         dataset_manager = falcon.get_ray_dataset_manager(
             buffer_cfg,

@@ -51,7 +51,6 @@ paths:
 buffer:
   min_samples: 2048
   max_samples: 2048
-  validation_samples: 256
   simulate_count: 128
   simulate_chunk_size: 128
   simulate_when_full: true

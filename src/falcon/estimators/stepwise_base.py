@@ -96,7 +96,9 @@ class StepwiseEstimator(BaseEstimator):
             Dict of metrics to log. Must include "loss" key for early stopping.
 
         Note:
-            NO batch.discard() calls - validation does not affect sample lifecycle.
+            No parameter updates. Should call batch.discard(mask) with the same
+            criterion as train_step, so validation samples (a fixed, disjoint
+            subset of the buffer) age out like training samples.
         """
         pass
 
