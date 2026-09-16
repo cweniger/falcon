@@ -1004,12 +1004,21 @@ def main():
 
     cfg = load_config(config_name, run_dir, overrides)
 
-    if mode == "launch":
-        launch_mode(cfg, interactive=interactive, log_lines=log_lines, auto_sample=auto_sample, timeout=timeout)
-    elif mode == "graph":
-        graph_mode(cfg)
-    else:
-        sample_mode(cfg, sample_type)
+    try:
+        if mode == "launch":
+            launch_mode(cfg, interactive=interactive, log_lines=log_lines, auto_sample=auto_sample, timeout=timeout)
+        elif mode == "graph":
+            graph_mode(cfg)
+        else:
+            sample_mode(cfg, sample_type)
+    except KeyboardInterrupt:
+        # Second Ctrl+C: forced quit. The run summary has already been printed,
+        # so a traceback through ray.get() only adds noise.
+        print(
+            "\n\x1b[33mforced quit: the current round was abandoned and its networks were not saved\x1b[0m",
+            flush=True,
+        )
+        sys.exit(130)
 
 
 if __name__ == "__main__":

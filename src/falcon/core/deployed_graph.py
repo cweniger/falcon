@@ -842,7 +842,7 @@ class DeployedGraph:
         pending_append = None
         while train_future_list:
             # Check for graceful stop request
-            if stop_check is not None and stop_check():
+            if not stop_requested and stop_check is not None and stop_check():
                 info("Graceful stop requested, finishing the current round's acceptance test...")
                 stop_requested = True
                 # Signal all training nodes to stop after their current step
