@@ -14,37 +14,56 @@ IN_CI = os.environ.get("CI") == "true"
 
 _skip_ci = pytest.mark.skipif(IN_CI, reason="Too resource-heavy for CI runners")
 
+# Prefix of a config name: run the config with ray.num_gpus instead of the split GPU keys
+LEGACY_GPUS = "legacy_gpus:"
+
 # Define test cases with their specific configurations
 # Each tuple: (example_dir_name, config_name, epoch_overrides)
 EXAMPLE_CONFIGS = [
     # 01_minimal: single estimator 'z'
     ("01_minimal", "config.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2"]),
+    # 01_minimal with the deprecated ray.num_gpus, as in configs saved before the actor split
+    pytest.param(
+        "01_minimal", LEGACY_GPUS + "config.yml",
+        ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2"],
+        id="01_minimal/legacy_num_gpus",
+    ),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
-    ("02_bimodal", "config_regular.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2", "graph.z.ray.num_gpus=0"]),
+    ("02_bimodal", "config_regular.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2",
+                                          "graph.z.ray.num_train_gpus=0", "graph.z.ray.num_sample_gpus=0"]),
     # 03_composite: two ResNet18 + Ray actors exceed CI runner memory
     pytest.param(
         "03_composite", "config.yml",
         ["graph.z1.estimator.max_epochs=2", "graph.z1.estimator.max_rounds=2",
          "graph.z2.estimator.max_epochs=2", "graph.z2.estimator.max_rounds=2",
-         "graph.z1.ray.num_gpus=0", "graph.z2.ray.num_gpus=0"],
+         "graph.z1.ray.num_train_gpus=0", "graph.z1.ray.num_sample_gpus=0",
+         "graph.z2.ray.num_train_gpus=0", "graph.z2.ray.num_sample_gpus=0"],
         marks=_skip_ci,
     ),
     # 04_gaussian: SNPE_gaussian with exponential forward model (needs GPU override)
-    ("04_gaussian", "config.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2", "graph.z.ray.num_gpus=0"]),
+    ("04_gaussian", "config.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2",
+                                   "graph.z.ray.num_train_gpus=0", "graph.z.ray.num_sample_gpus=0"]),
     # 05_linear_regression: requires GPU
     pytest.param(
         "05_linear_regression", "config.yml",
-        ["graph.theta.estimator.max_epochs=2", "graph.theta.estimator.max_rounds=2", "graph.theta.ray.num_gpus=0"],
+        ["graph.theta.estimator.max_epochs=2", "graph.theta.estimator.max_rounds=2",
+         "graph.theta.ray.num_train_gpus=0", "graph.theta.ray.num_sample_gpus=0"],
         marks=_skip_ci,
     ),
 ]
+
+
+def _case_id(case):
+    if hasattr(case, "values"):  # pytest.param
+        return case.id or f"{case.values[0]}/{case.values[1]}"
+    return f"{case[0]}/{case[1]}"
 
 
 @pytest.mark.slow
 @pytest.mark.parametrize(
     "example_name,config_name,epoch_overrides",
     EXAMPLE_CONFIGS,
-    ids=[f"{e[0]}/{e[1]}" for e in EXAMPLE_CONFIGS],
+    ids=[_case_id(case) for case in EXAMPLE_CONFIGS],
 )
 def test_example_runs_without_error(example_name, config_name, epoch_overrides, tmp_path):
     """
@@ -52,6 +71,14 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
     Uses temporary directory for outputs to avoid polluting example dirs.
     """
     example_dir = EXAMPLES_DIR / example_name
+    if config_name.startswith(LEGACY_GPUS):
+        text = (example_dir / config_name[len(LEGACY_GPUS):]).read_text()
+        text = text.replace("num_train_gpus: 0 ", "num_gpus: 0 ")
+        text = "\n".join(line for line in text.splitlines() if "num_sample_gpus" not in line)
+        assert "num_gpus: 0" in text
+        legacy_config = tmp_path.parent / f"{tmp_path.name}_config.yml"
+        legacy_config.write_text(text)
+        config_name = str(legacy_config)  # absolute, so the example dir stays the cwd
 
     cmd = [
         "falcon",
@@ -96,14 +123,15 @@ def test_example_runs_without_error(example_name, config_name, epoch_overrides, 
     driver_log = graph_dir / "driver" / "output.log"
     assert driver_log.exists(), f"Driver output.log not found at {driver_log}"
 
-    # Check that at least one node has output.log (actor logging works)
-    node_logs = list(graph_dir.glob("*/output.log"))
-    # Filter out driver to check actor logs specifically
-    actor_logs = [p for p in node_logs if p.parent.name != "driver"]
-    assert len(actor_logs) > 0, (
-        f"No actor output.log files found in {graph_dir}. "
-        f"Found directories: {[p.name for p in graph_dir.iterdir() if p.is_dir()]}"
-    )
+    # Every estimator node has a sample actor and a train actor, each with its own log,
+    # and the train actor wrote the checkpoint
+    estimator_nodes = [o.split(".")[1] for o in epoch_overrides if o.endswith(".estimator.max_rounds=2")]
+    for node in estimator_nodes:
+        for log in (graph_dir / node / "output.log", graph_dir / node / "train" / "output.log"):
+            assert log.exists(), (
+                f"{log} not found. Found: {sorted(str(p.relative_to(graph_dir)) for p in graph_dir.rglob('output.log'))}"
+            )
+        assert (graph_dir / node / "best_state.npz").exists()
 
     # Check driver/output.log exists with runtime logging
     driver_log = graph_dir / "driver" / "output.log"

@@ -91,7 +91,8 @@ graph:
       log_ratio_threshold: -20          # Stability cutoff for log ratios
 
     ray:
-      num_gpus: 0                       # GPU count per Ray worker (0 = CPU)
+      num_train_gpus: 0.2                 # GPUs of the train actor z/train (0 = CPU)
+      num_sample_gpus: 0.2                # GPUs of the sample actor z
 
   x:
     parents: [z]                        # Node x depends on latent parameters z

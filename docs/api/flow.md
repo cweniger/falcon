@@ -195,7 +195,8 @@ graph:
       log_ratio_threshold: -20
 
     ray:
-      num_gpus: 0
+      num_train_gpus: 0
+      num_sample_gpus: 0
 
   x:
     parents: [z]
@@ -272,6 +273,9 @@ Flow logs the following metrics during training:
 | `round:accepted` | 1 if the round was accepted |
 | `round:conditional:promoted`, `round:marginal:promoted` | 1 if the flow replaced its best network |
 
+Training metrics are written to the `z/train` stream (`graph/z/train/metrics`);
+sampling metrics (`importance_sample:*`, `sample_proposal:*`) to the `z` stream.
+
 See [Training Loop](../training.md#log-output-and-metrics) for all round metrics.
 
 ## Tips
@@ -279,7 +283,7 @@ See [Training Loop](../training.md#log-output-and-metrics) for all round metrics
 1. **Start with defaults**: The default configuration works well for most problems
 2. **Increase `max_epochs`** (per round) for complex posteriors
 3. **Enable `discard_samples`** if training becomes unstable with outliers
-4. **Use GPU** (`ray.num_gpus: 1`) for faster training with large embeddings
+4. **Use GPU** (`ray.num_train_gpus`, `ray.num_sample_gpus`) for faster training and sampling with large embeddings
 5. **Lower `gamma`** for single-observation inference, higher for amortization
 6. **Adjust `patience_epochs`** based on expected convergence time within a round
 7. **Set `cache_on_device: true`** when GPU memory permits, to eliminate per-batch CPU-to-GPU transfers
@@ -292,23 +296,20 @@ See [Training Loop](../training.md#log-output-and-metrics) for all round metrics
       show_source: true
       members:
         - __init__
+        - build
         - train_step
         - val_step
-        - sample_prior
-        - sample_posterior
-        - sample_proposal
-        - save
-        - load
+        - discard_test
 
 ## Training Loop
 
-`Flow` inherits its round loop from `StepwiseEstimator`. The loop parameters
-(`max_rounds`, `patience_rounds`, `max_epochs`, `patience_epochs`,
+`Flow` is trained by `RoundTrainer` in the node's train actor. The loop
+parameters (`max_rounds`, `patience_rounds`, `max_epochs`, `patience_epochs`,
 `val_every_epochs`, `batch_size`, `max_cache_samples`, `cache_on_device`,
-`prior_rounds`) are `Flow.__init__` arguments, documented above.
+`prior_rounds`, `discard_samples`) are `Flow.__init__` arguments, documented above.
 
-::: falcon.estimators.stepwise_base.StepwiseEstimator
+::: falcon.core.round_trainer.RoundTrainer
     options:
       show_source: false
       members:
-        - train
+        - run

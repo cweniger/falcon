@@ -61,7 +61,8 @@ graph:
       log_ratio_threshold: -20
       sample_reference_posterior: false
     ray:
-      num_gpus: 1
+      num_train_gpus: 0.5               # training and sampling share one GPU
+      num_sample_gpus: 0.5
   
   m:
     parents: [z]
