@@ -19,6 +19,7 @@ __all__ = [
     "config",
     "init",
     "launch",
+    "load_posterior",
     "shutdown",
     "estimators",
     "priors",
@@ -48,6 +49,7 @@ _LAZY_IMPORTS = {
     "config": ".api",
     "init": ".api",
     "launch": ".api",
+    "load_posterior": ".api",
     "shutdown": ".api",
 }
 

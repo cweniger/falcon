@@ -10,7 +10,7 @@ Usage:
     run = load_run('output/run_01')
     run.config                    # OmegaConf config
     run.samples.posterior         # SampleSetReader
-    run.metrics['z']['loss']      # MetricReader
+    run.metrics['z/train']['val/loss']  # MetricReader (training metrics of node z)
     run.observations              # Dict[str, np.ndarray]
 """
 
@@ -122,12 +122,22 @@ class Run:
 
         return self._observations
 
-    def plot_metrics(self, nodes=None, metrics=("train", "val"), figsize=None):
+    def training_streams(self) -> Dict[str, str]:
+        """Nodes with training metrics, mapped to the stream holding them (e.g. 'z/train')."""
+        streams = {}
+        for name in self.metrics.list_nodes():
+            node = name.split("/")[0]
+            stream = self.metrics.training_stream(node)
+            if node not in streams and (self.metrics.run_dir / stream / "metrics" / "val").exists():
+                streams[node] = stream
+        return streams
+
+    def plot_metrics(self, nodes=None, metrics=("train/loss", "val/loss"), figsize=None):
         """Plot training metric curves.
 
         Args:
-            nodes: Node names to plot. Defaults to all nodes with metric data.
-            metrics: Metric names to look for (e.g. ``("train", "val")``).
+            nodes: Node names to plot. Defaults to all nodes with training metrics.
+            metrics: Metric names to plot (e.g. ``("train/loss", "val/loss")``).
             figsize: Matplotlib figure size. Auto-scaled if *None*.
 
         Returns:
@@ -135,8 +145,8 @@ class Run:
         """
         import matplotlib.pyplot as plt
 
-        available = self.metrics.list_nodes()
-        plot_nodes = [n for n in (nodes or available) if n in available]
+        streams = self.training_streams()
+        plot_nodes = [n for n in (nodes or streams) if n in streams]
 
         if not plot_nodes:
             print("No metric data found.")
@@ -147,17 +157,15 @@ class Run:
         axes = axes[0]
 
         for ax, node_name in zip(axes, plot_nodes):
-            node_reader = self.metrics[node_name]
-            node_metrics = node_reader.list_metrics()
+            node_reader = self.metrics[streams[node_name]]
             plotted = False
             for metric in metrics:
-                if metric in node_metrics:
-                    try:
-                        r = node_reader[metric]
-                        ax.plot(r.steps, r.values, label=metric)
-                        plotted = True
-                    except Exception:
-                        pass
+                try:
+                    r = node_reader[metric]
+                    ax.plot(r.steps, r.values, label=metric)
+                    plotted = True
+                except FileNotFoundError:
+                    pass
             if not plotted:
                 ax.text(0.5, 0.5, "no data", ha="center", va="center", transform=ax.transAxes)
             ax.set_title(node_name)
@@ -175,31 +183,27 @@ class Run:
 
         # Per-node metrics summary
         metric_rows = []
-        for node_name in self.metrics.list_nodes():
-            node_reader = self.metrics[node_name]
-            available = node_reader.list_metrics()
+        for node_name, stream in self.training_streams().items():
+            node_reader = self.metrics[stream]
             final_loss = ""
-            for key in ("val", "train"):
-                if key in available:
-                    try:
-                        vals = node_reader[key].values
-                        if len(vals):
-                            final_loss = f"{vals[-1]:.4f}"
-                    except Exception:
-                        pass
-                    break
-            n_steps = ""
-            if "epoch" in available:
-                try:
-                    n_steps = str(int(node_reader["epoch"].values[-1]))
-                except Exception:
-                    pass
+            try:
+                vals = node_reader["val/loss"].values
+                vals = vals[~np.isnan(vals)]
+                if len(vals):
+                    final_loss = f"{vals[-1]:.4f}"
+            except FileNotFoundError:
+                pass
+            n_rounds = ""
+            try:
+                n_rounds = str(int(node_reader["round"].values[-1]))
+            except FileNotFoundError:
+                pass
             td = "padding:2px 8px"
             metric_rows.append(
                 f"<tr>"
                 f"<td style='{td}'><code>{node_name}</code></td>"
                 f"<td style='{td};text-align:right'>{final_loss}</td>"
-                f"<td style='{td};text-align:right'>{n_steps}</td>"
+                f"<td style='{td};text-align:right'>{n_rounds}</td>"
                 f"</tr>"
             )
 
@@ -208,8 +212,8 @@ class Run:
                 "<table style='border-collapse:collapse;margin-top:6px'>"
                 "<tr>"
                 "<th style='text-align:left;padding:2px 8px'>node</th>"
-                "<th style='text-align:right;padding:2px 8px'>final loss</th>"
-                "<th style='text-align:right;padding:2px 8px'>epochs</th>"
+                "<th style='text-align:right;padding:2px 8px'>final val loss</th>"
+                "<th style='text-align:right;padding:2px 8px'>rounds</th>"
                 "</tr>"
                 + "".join(metric_rows)
                 + "</table>"
@@ -250,7 +254,7 @@ def load_run(path: str) -> Run:
         run.config                    # OmegaConf config
         run.samples.posterior['z']    # List of z arrays
         run.samples.posterior.stacked['z']  # Stacked array
-        run.metrics['z']['loss'].values     # Loss curve
+        run.metrics['z/train']['val/loss'].values  # Validation loss curve
         run.observations              # {'x': array(...)}
     """
     return Run(Path(path))

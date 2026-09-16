@@ -1,18 +1,19 @@
 """Estimators for simulation-based inference.
 
 Provides Flow (normalizing flow) and Gaussian posterior estimators,
-along with base classes for building custom estimators.
+along with the base class for torch-based estimators.
 
 Flow requires the sbi package: pip install falcon-sbi[sbi]
 """
 
-from falcon.estimators.stepwise_base import StepwiseEstimator
+from falcon.estimators.torch_model import NetworkGroup, TorchModel
 from falcon.estimators.gaussian_fullcov import GaussianFullCov
 
 __all__ = [
     "Flow",
     "GaussianFullCov",
-    "StepwiseEstimator",
+    "NetworkGroup",
+    "TorchModel",
 ]
 
 # Lazy imports for sbi-dependent classes

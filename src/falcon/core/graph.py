@@ -164,14 +164,16 @@ class Graph:
             num_actors: Number of Ray actors to spawn for this node.
             sample_chunk_size: Chunk size for sampling (0 = no chunking).
             **ray_kwargs: Node-level Ray actor options, prefixed with ``ray_``
-                (e.g. ``ray_num_gpus=0.5``, ``ray_num_cpus=2``,
-                ``ray_runtime_env={...}``).  The ``ray_`` prefix is stripped
-                before passing to Ray.
+                (e.g. ``ray_num_train_gpus=0.5``, ``ray_num_sample_gpus=0.5``,
+                ``ray_num_cpus=2``, ``ray_runtime_env={...}``).  The ``ray_``
+                prefix is stripped before passing to Ray.
 
         Returns:
             *self*, so calls can be chained.
         """
         import numpy as np
+
+        _validate_node_name(name)
 
         # Collect actor config from ray_* kwargs
         actor_config = {}
@@ -180,7 +182,7 @@ class Graph:
                 raise TypeError(
                     f"add_node() got unexpected keyword argument '{key}'. "
                     f"Ray actor options must be prefixed with 'ray_' "
-                    f"(e.g. ray_num_gpus=0.5)."
+                    f"(e.g. ray_num_train_gpus=0.5)."
                 )
             actor_config[key[4:]] = val  # strip "ray_" prefix
 
@@ -385,6 +387,12 @@ _VALID_NODE_KEYS = frozenset({
 })
 
 
+def _validate_node_name(node_name) -> None:
+    """Node names become directory names; '/' is reserved for per-node streams like 'z/train'."""
+    if not isinstance(node_name, str) or not node_name or "/" in node_name:
+        raise ValueError(f"Invalid node name {node_name!r}: must be a non-empty string without '/'")
+
+
 def _validate_node_config(node_name: str, node_config: dict) -> None:
     """Validate a node configuration, raising errors or warnings as appropriate.
 
@@ -395,6 +403,8 @@ def _validate_node_config(node_name: str, node_config: dict) -> None:
     Raises:
         ValueError: If required fields are missing
     """
+    _validate_node_name(node_name)
+
     # Check for unknown keys (likely typos)
     unknown_keys = set(node_config.keys()) - _VALID_NODE_KEYS
     if unknown_keys:

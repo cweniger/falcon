@@ -501,9 +501,6 @@ class CachedDataLoader:
     iter_batches() / sample_batch() use torch fancy indexing, which is ~5x
     faster than numpy for large arrays.
 
-    Data fetching (ray.get) runs in a background thread that refresh() awaits,
-    so the actor's event loop keeps serving other calls in the meantime.
-
     When device='cuda', the entire buffer lives on GPU for maximum speed
     (~50x vs numpy dict cache). Falls back to CPU when GPU memory is
     insufficient.
@@ -512,7 +509,6 @@ class CachedDataLoader:
     def __init__(self, dataset_manager, keys, sample_status, max_cache_samples=0,
                  device=None, sample_purpose=None):
         import torch
-        from concurrent.futures import ThreadPoolExecutor
         self.dataset_manager = dataset_manager
         self.keys = keys
         self.sample_status = sample_status
@@ -529,21 +525,13 @@ class CachedDataLoader:
         self._free_rows = []    # reusable row indices from evicted samples
         self._active_rows = torch.zeros(0, dtype=torch.long, device=self.device)
 
-        # Background fetch thread
-        self._fetch_executor = ThreadPoolExecutor(max_workers=1)
-
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
         import torch
         return torch.as_tensor(np.array(arr)).to(self.device)
 
     def _checkout_and_fetch(self, active_ids_snapshot):
-        """Run checkout + data fetch + tensor build in background thread.
-
-        Moves checkout_refs, ray.get data resolution, AND the expensive
-        np.stack + tensor conversion off the main thread.  _apply_fetch
-        on the main thread only does fast indexed scatter/cat.
-        """
+        """Check out the samples not cached yet and build their tensors."""
         import torch
         checkout = ray.get(
             self.dataset_manager.checkout_refs.remote(
@@ -562,11 +550,7 @@ class CachedDataLoader:
         return new_tensors, checkout
 
     def _apply_fetch(self, new_tensors, checkout):
-        """Apply pre-built tensors to the cache (runs on main thread).
-
-        Tensors are already stacked and on-device (built in background thread).
-        This method only does fast indexed scatter and torch.cat.
-        """
+        """Apply pre-built tensors to the cache with indexed scatter and torch.cat."""
         import torch
         active_ids = checkout['_active_ids']
         new_ids = checkout['_new_ids']
@@ -627,18 +611,9 @@ class CachedDataLoader:
         )
         self.count = len(self._active_rows)
 
-    async def refresh(self):
-        """Bring the cache up to date with the buffer and wait until it is.
-
-        The checkout and fetch run in the background thread and are awaited,
-        so the actor's event loop keeps serving other calls (e.g. proposal
-        sampling) while the data arrives. Afterwards the cache stays fixed
-        until the next refresh.
-        """
-        future = self._fetch_executor.submit(
-            self._checkout_and_fetch, self.active_ids.copy()
-        )
-        new_tensors, checkout = await asyncio.wrap_future(future)
+    def refresh(self):
+        """Bring the cache up to date with the buffer; it then stays fixed until the next refresh."""
+        new_tensors, checkout = self._checkout_and_fetch(self.active_ids.copy())
         self._apply_fetch(new_tensors, checkout)
 
     def _batch(self, rows):
@@ -674,17 +649,16 @@ class CachedDataLoader:
 class BufferView:
     """View into the sample buffer for estimator training.
 
-    Passed to estimator.train() - estimator requests cached dataloaders with specific keys.
+    Passed to RoundTrainer.run(), which requests cached dataloaders with specific keys.
     Keys use flat dotted format: 'theta.value', 'theta.log_prob', 'x.value', etc.
 
     Example:
-        async def train(self, buffer: BufferView):
-            keys = [f"{self.theta_key}.value", f"{self.theta_key}.log_prob",
-                    *[f"{k}.value" for k in self.condition_keys]]
+        def run(self, buffer: BufferView):
+            keys = self.model.batch_keys()
             train_cache = buffer.cached_loader(keys)
             val_cache = buffer.cached_val_loader(keys)
-            await train_cache.refresh()
-            await val_cache.refresh()
+            train_cache.refresh()
+            val_cache.refresh()
             for batch in train_cache.iter_batches(batch_size, shuffle=True):
                 theta = batch[f'{self.theta_key}.value']
                 ...

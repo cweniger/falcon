@@ -154,3 +154,29 @@ class TestReadRun:
 
         assert isinstance(result, RunReader)
         assert "z" in result.nodes
+
+
+class TestTrainStreams:
+    def test_lists_nested_streams(self, tmp_path):
+        """A node's train actor writes to a stream nested in the node directory."""
+        (tmp_path / "z" / "metrics").mkdir(parents=True)
+        (tmp_path / "z" / "train" / "metrics").mkdir(parents=True)
+        (tmp_path / "x" / "metrics").mkdir(parents=True)
+
+        reader = RunReader(tmp_path)
+
+        assert reader.nodes == ["x", "z", "z/train"]
+        assert reader.training_stream("z") == "z/train"
+        assert reader.training_stream("x") == "x"  # runs from before the split
+
+    def test_reads_metrics_of_nested_stream(self, tmp_path):
+        metric_dir = tmp_path / "z" / "train" / "metrics" / "val" / "loss"
+        metric_dir.mkdir(parents=True)
+        np.savez(
+            metric_dir / "chunk_000000.npz",
+            step=np.array([0], dtype=np.int64),
+            value=np.array([0.25], dtype=np.float64),
+            walltime=np.array([100.0], dtype=np.float64),
+        )
+
+        assert read_run(str(tmp_path))["z/train"]["val/loss"].values[0] == 0.25

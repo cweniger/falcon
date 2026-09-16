@@ -5,6 +5,7 @@ Provides lazy-loaded access to metrics stored in chunked NPZ files.
 
 Usage:
     run = read_run(path)
+    run['z/train']['val/loss'].values   # training metrics of node z
     run['z']['loss'].values     # np.array, concatenated from all chunks
     run['z']['loss'].steps      # np.array of step numbers
     run['z']['loss'].walltime   # np.array of timestamps
@@ -134,7 +135,7 @@ class NodeReader:
 class RunReader:
     """Dict-like access to nodes in a run.
 
-    Provides lazy access to nodes via indexing: run['z'], run['theta'], etc.
+    Provides lazy access to nodes via indexing: run['z'], run['z/train'], etc.
     """
 
     def __init__(self, run_dir: Path):
@@ -150,15 +151,30 @@ class RunReader:
         return self._nodes_cache[node_name]
 
     def list_nodes(self) -> List[str]:
-        """List all available nodes in this run."""
+        """List all metric streams in this run.
+
+        A stream is a directory with a 'metrics' subdirectory: a node's sample
+        actor (``z``) or a stream nested inside it, like its train actor
+        (``z/train``).
+        """
         if not self.run_dir.exists():
             return []
-        # A node directory should have a 'metrics' subdirectory
         nodes = []
-        for d in self.run_dir.iterdir():
-            if d.is_dir() and (d / "metrics").exists():
+        for d in sorted(self.run_dir.iterdir()):
+            if not d.is_dir():
+                continue
+            if (d / "metrics").exists():
                 nodes.append(d.name)
+            for sub in sorted(d.iterdir()):
+                if sub.is_dir() and sub.name != "metrics" and (sub / "metrics").exists():
+                    nodes.append(f"{d.name}/{sub.name}")
         return nodes
+
+    def training_stream(self, node_name: str) -> str:
+        """Stream holding a node's training metrics: ``<node>/train``, or ``<node>``
+        for runs from before the train actor had its own stream."""
+        train = f"{node_name}/train"
+        return train if (self.run_dir / train / "metrics").exists() else node_name
 
     @property
     def nodes(self) -> List[str]:
