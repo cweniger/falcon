@@ -105,7 +105,6 @@ Controls posterior sampling and amortization.
 | `discard_samples` | bool | true | After each accepted round, discard low-likelihood samples |
 | `log_ratio_threshold` | float | -20 | Log-likelihood threshold for sample discarding |
 | `sample_reference_posterior` | bool | false | Sample from reference posterior |
-| `use_best_models` | bool | true | Sample from the best networks (instead of the networks being trained) |
 | `num_proposals` | int | 256 | Candidate samples drawn from the flow for importance sampling |
 | `reference_samples` | int | 128 | Samples used to evaluate the reference posterior |
 | `hypercube_bound` | float | 2.0 | Out-of-bounds threshold in hypercube space |

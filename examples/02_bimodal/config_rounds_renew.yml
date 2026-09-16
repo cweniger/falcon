@@ -60,7 +60,6 @@ graph:
       discard_samples: false
       log_ratio_threshold: -20
       sample_reference_posterior: false
-      use_best_models: true
     ray:
       num_gpus: 1
   

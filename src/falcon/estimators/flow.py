@@ -51,7 +51,6 @@ class Flow(StepwiseEstimator):
         discard_samples: Run a discard sweep after every accepted round.
         log_ratio_threshold: Log-ratio cutoff for discarding.
         sample_reference_posterior: Sample reference posterior for proposals.
-        use_best_models: Use best-checkpoint networks for sampling.
         num_proposals: Importance sampling proposal count.
         proposal_mixture_beta: Fraction of proposals drawn from the conditional
             flow in the multiple-importance-sampling mixture (balance heuristic);
@@ -96,7 +95,6 @@ class Flow(StepwiseEstimator):
         discard_samples: bool = True,
         log_ratio_threshold: float = -20.0,
         sample_reference_posterior: bool = False,
-        use_best_models: bool = True,
         num_proposals: int = 256,
         proposal_mixture_beta: float = 0.5,
         reference_samples: int = 128,
@@ -128,7 +126,6 @@ class Flow(StepwiseEstimator):
         self.discard_samples = discard_samples
         self.log_ratio_threshold = log_ratio_threshold
         self.sample_reference_posterior = sample_reference_posterior
-        self.use_best_models = use_best_models
         self.num_proposals = num_proposals
         self.proposal_mixture_beta = proposal_mixture_beta
         self.reference_samples = reference_samples
@@ -166,7 +163,8 @@ class Flow(StepwiseEstimator):
         self._init_parameters = [theta, conditions]
 
         conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-        s = self._embed(conditions_device, train=False).detach()
+        self._embedding.eval()
+        s = self._embedding(conditions_device).detach()
         theta_device = theta.to(self.device)
 
         self._conditional_flow = self._create_flow(theta_device, s, is_conditional=True)
@@ -360,15 +358,13 @@ class Flow(StepwiseEstimator):
         assert conditions, "Conditions must be provided."
         conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
 
-        use_best = self.use_best_models and self._best_conditional_flow is not None
-        if use_best:
-            conditional_net = self._best_conditional_flow
-            marginal_net = self._best_marginal_flow
-            s = self._embed(conditions, train=False, use_best_fit=True)
-        else:
-            conditional_net = self._conditional_flow
-            marginal_net = self._marginal_flow
-            s = self._embed(conditions, train=False)
+        # Sampling always draws from the best networks: the ones the acceptance
+        # test promoted and save() writes out. Callers return prior samples while
+        # there is no best network yet.
+        conditional_net = self._best_conditional_flow
+        marginal_net = self._best_marginal_flow
+        self._best_embedding.eval()
+        s = self._best_embedding(conditions)
 
         s = s.expand(num_samples, *s.shape[1:])
 
@@ -494,13 +490,3 @@ class Flow(StepwiseEstimator):
         _tep = node_dir / "total_epochs_trained.pth"
         self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
         self._load_round_state(node_dir)
-
-    # ==================== Private Helpers ====================
-
-    def _embed(self, conditions: Dict, train: bool = True, use_best_fit: bool = False):
-        embedding = (
-            self._best_embedding if use_best_fit and self._best_embedding is not None
-            else self._embedding
-        )
-        embedding.train() if train else embedding.eval()
-        return embedding(conditions)
