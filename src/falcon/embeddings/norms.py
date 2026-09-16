@@ -1,11 +1,13 @@
 import torch
 import torch.nn as nn
-from torch.nn.parameter import UninitializedParameter
 
 from falcon.core.logger import log
+from falcon.embeddings.lazy import LazyBuffersMixin
 
 
-class RunningNorm(nn.Module):
+class RunningNorm(LazyBuffersMixin, nn.Module):
+    _lazy_buffers = ("running_mean", "running_var", "min_variance")
+
     def __init__(
         self,
         momentum=0.01,
@@ -27,11 +29,10 @@ class RunningNorm(nn.Module):
         self.use_log_update = use_log_update
         self.adaptive_momentum = adaptive_momentum
 
+        # Created from the first minibatch
         self.register_buffer("running_mean", None)
         self.register_buffer("running_var", None)
         self.register_buffer("min_variance", None)
-
-        self.initialized = False
 
     def forward(self, x):
         dim = self.dim
@@ -43,7 +44,6 @@ class RunningNorm(nn.Module):
                 dim=dim, keepdim=True
             ).detach() + self.epsilon**2
             self.min_variance = self.running_var.clone()
-            self.initialized = True
 
         if self.training:
             # Compute batch mean and variance over specified dims
@@ -120,7 +120,7 @@ def hartley_transform(x):
     return fft.real - fft.imag
 
 
-class ToeplitzWhitener(torch.nn.Module):
+class ToeplitzWhitener(LazyBuffersMixin, torch.nn.Module):
     """Whitener for 1D time series assuming stationary (Toeplitz) noise covariance.
 
     Estimates per-frequency variance via EMA in Hartley space and whitens by
@@ -130,17 +130,13 @@ class ToeplitzWhitener(torch.nn.Module):
     __call__(x)    — whiten x (Hartley → divide by std → inverse Hartley)
     """
 
+    _lazy_buffers = ("running_var",)
+
     def __init__(self, momentum: float = 0.1, eps: float = 1e-8) -> None:
         super().__init__()
         self.momentum = momentum
         self.eps = eps
-        # FIXME: a None buffer is left out of state_dict() and rejected by a strict
-        # load_state_dict() until the first update(). Copying weights between an
-        # updated and a not-yet-updated instance (e.g. promoting the current
-        # network to the best network during round-based training) then raises
-        # "Unexpected key(s) in state_dict: ...running_var".
-        self.register_buffer("running_var", None)
-        self.initialized = False
+        self.register_buffer("running_var", None)  # created by the first update()
 
     def update(self, noise: torch.Tensor) -> None:
         """Update EMA variance from noise samples of shape (batch_size, T)."""
@@ -148,7 +144,6 @@ class ToeplitzWhitener(torch.nn.Module):
         batch_var = h.var(dim=0, unbiased=False).detach()
         if not self.initialized:
             self.running_var = batch_var
-            self.initialized = True
         else:
             self.running_var = (1 - self.momentum) * self.running_var + self.momentum * batch_var
 
@@ -159,9 +154,13 @@ class ToeplitzWhitener(torch.nn.Module):
         return hartley_transform(h_white)
 
 
-class DiagonalWhitener(torch.nn.Module):
+class DiagonalWhitener(LazyBuffersMixin, torch.nn.Module):
+    _lazy_buffers = ("running_mean", "running_var")
+
     def __init__(self, dim, momentum=0.1, eps=1e-8, use_fourier=False, track_mean=True):
         """
+        Until the first update() the whitener uses mean 0 and variance 1.
+
         dim: number of features (last dimension of x)
         momentum: how much of the new batch stats to use (PyTorch-style)
         eps: small constant for numerical stability
@@ -174,9 +173,9 @@ class DiagonalWhitener(torch.nn.Module):
         self.use_fourier = use_fourier
         self.track_mean = track_mean
 
-        self.register_buffer("running_mean", torch.zeros(dim))
-        self.register_buffer("running_var", torch.ones(dim))
-        self.initialized = False
+        # Created by the first update(), so that initialized is part of the state
+        self.register_buffer("running_mean", None)
+        self.register_buffer("running_var", None)
 
     def update(self, x):
         """
@@ -192,7 +191,6 @@ class DiagonalWhitener(torch.nn.Module):
         if not self.initialized:
             self.running_mean = batch_mean.detach()
             self.running_var = batch_var.detach()
-            self.initialized = True
         else:
             self.running_mean = (
                 1 - self.momentum
@@ -211,8 +209,10 @@ class DiagonalWhitener(torch.nn.Module):
         if self.use_fourier:
             x = hartley_transform(x)
 
-        std = torch.sqrt(self.running_var + self.eps)
-        x_white = (x - self.running_mean) / std
+        if self.initialized:
+            x_white = (x - self.running_mean) / torch.sqrt(self.running_var + self.eps)
+        else:
+            x_white = x / (1.0 + self.eps) ** 0.5
 
         if self.use_fourier:
             x_white = hartley_transform(x_white)
