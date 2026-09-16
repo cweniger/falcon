@@ -46,7 +46,7 @@ cd examples/01_minimal && falcon launch -o output/run_01
 
 **Estimators** (`falcon/estimators/`):
 - `BaseEstimator` (`falcon/core/base_estimator.py`): Abstract interface defining train/sample/save/load contract
-- `StepwiseEstimator`, `LossBasedEstimator` (`base.py`): Base classes for epoch-based training with early stopping
+- `StepwiseEstimator` (`stepwise_base.py`): Base class for round-based training (fixed data per round, epochs until convergence, acceptance test against the best network, discard sweep after accepted rounds; see `docs/training.md`)
 - `Flow` (`flow.py`): Flow-based posterior estimation using conditional + marginal flow pair with importance sampling
 - `FlowDensity` (`flow_density.py`): Flow network wrapper around `sbi.neural_nets` (the only file importing `sbi`)
 - `Gaussian` (`gaussian.py`): Factory creating a `LossBasedEstimator` with full covariance Gaussian posterior

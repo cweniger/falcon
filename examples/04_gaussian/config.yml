@@ -72,7 +72,7 @@ graph:
         _target_: model.E_identity
         _input_: [x]
       batch_size: 128
-      early_stop_patience: 128
+      patience_epochs: 128
       hidden_dim: 128                 # MLP hidden layer dimension
       num_layers: 3                   # Number of hidden layers
       momentum: 0.01                  # EMA momentum for running statistics

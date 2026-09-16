@@ -27,7 +27,7 @@ estimator:
   _target_: falcon.estimators.GaussianFullCov
   max_epochs: 1000
   batch_size: 128
-  early_stop_patience: 32
+  patience_epochs: 32
   hidden_dim: 128
   num_layers: 3
   momentum: 0.01
@@ -38,7 +38,7 @@ estimator:
     _input_: [x]
   lr: 0.01
   lr_decay_factor: 1.0
-  lr_patience: 8
+  lr_patience_epochs: 8
   gamma: 0.5
   discard_samples: false
   log_ratio_threshold: -20.0
@@ -56,10 +56,13 @@ estimator:
 | `min_var` | float | 1e-20 | Minimum variance for numerical stability |
 | `eig_update_freq` | int | 1 | Eigendecomposition update frequency |
 
-The training loop, optimizer, and inference parameters (`max_epochs`, `batch_size`,
-`early_stop_patience`, `lr`, `lr_decay_factor`, `lr_patience`, `prior_epochs`,
+The training loop, optimizer, and inference parameters (`max_rounds`,
+`patience_rounds`, `max_epochs`, `patience_epochs`, `val_every_epochs`,
+`batch_size`, `lr`, `lr_decay_factor`, `lr_patience_epochs`, `prior_rounds`,
 `gamma`, `discard_samples`, `log_ratio_threshold`, etc.) are identical to those in
-[Flow](flow.md#configuration-reference).
+[Flow](flow.md#configuration-reference); see [Training Loop](../training.md) for
+how rounds work. `GaussianFullCov` has a single network group: the Gaussian
+posterior together with its embedding.
 
 !!! note "gamma for GaussianFullCov"
     Unlike `Flow`, where `gamma` controls importance-sampling breadth, in
@@ -85,7 +88,7 @@ graph:
       _target_: falcon.estimators.GaussianFullCov
       max_epochs: 8000
       batch_size: 128
-      early_stop_patience: 128
+      patience_epochs: 128
       hidden_dim: 128
       num_layers: 3
       momentum: 0.01
@@ -96,7 +99,7 @@ graph:
         _input_: [x]
       lr: 0.01
       lr_decay_factor: 1.0
-      lr_patience: 8
+      lr_patience_epochs: 8
       gamma: 0.1
       discard_samples: false
       log_ratio_threshold: -20.0

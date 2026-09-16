@@ -202,9 +202,9 @@ class NodeWrapper:
         self._stop_requested = False
 
     def request_stop(self):
-        """Request graceful stop after current epoch."""
+        """Request graceful stop after the current training step."""
         self._stop_requested = True
-        # Signal to estimator to terminate after current epoch
+        # Signal to estimator to stop after the current step (its acceptance test still runs)
         if self.estimator_instance is not None and hasattr(self.estimator_instance, 'interrupt'):
             self.estimator_instance.interrupt()
 
@@ -225,8 +225,8 @@ class NodeWrapper:
 
         # Get final loss for completion message
         final_loss = None
-        if hasattr(self.estimator_instance, 'best_conditional_flow_val_loss'):
-            final_loss = self.estimator_instance.best_conditional_flow_val_loss
+        if getattr(self.estimator_instance, 'best_val_loss', None) is not None:
+            final_loss = self.estimator_instance.best_val_loss
         elif hasattr(self.estimator_instance, 'history'):
             losses = self.estimator_instance.history.get('val_loss', [])
             if losses:
@@ -437,6 +437,8 @@ class NodeWrapper:
             "name": self.name,
             "status": self._status,
             "samples": 0,
+            "round": 0,
+            "rounds_accepted": 0,
             "current_epoch": 0,
             "total_epochs": 0,
             "loss": None,
@@ -447,10 +449,14 @@ class NodeWrapper:
         if self.estimator_instance is not None:
             est = self.estimator_instance
             if hasattr(est, "history"):
-                status["loss_history"] = est.history.get("val_loss", [])[-20:]
+                # val_loss is NaN for epochs without a validation
+                val_losses = [v for v in est.history.get("val_loss", []) if v == v]
+                status["loss_history"] = val_losses[-20:]
                 if status["loss_history"]:
                     status["loss"] = status["loss_history"][-1]
-                status["current_epoch"] = len(est.history.get("epochs", []))
+            status["round"] = getattr(est, "_round", 0)
+            status["rounds_accepted"] = getattr(est, "_rounds_accepted", 0)
+            status["current_epoch"] = getattr(est, "_round_epoch", 0)
             if hasattr(est, "max_epochs"):
                 status["total_epochs"] = est.max_epochs
             if hasattr(est, "history") and est.history.get("n_samples"):
@@ -836,10 +842,10 @@ class DeployedGraph:
         pending_append = None
         while train_future_list:
             # Check for graceful stop request
-            if stop_check is not None and stop_check():
-                info("Graceful stop requested, finishing current epoch...")
+            if not stop_requested and stop_check is not None and stop_check():
+                info("Graceful stop requested, finishing the current round's acceptance test...")
                 stop_requested = True
-                # Signal all training nodes to stop after current epoch
+                # Signal all training nodes to stop after their current step
                 for name, node in self.wrapped_nodes_dict.items():
                     try:
                         ray.get(node.request_stop.remote(), timeout=1)
@@ -922,11 +928,12 @@ class DeployedGraph:
         for name, node in self.wrapped_nodes_dict.items():
             status = ray.get(node.get_status.remote())
             if status["status"] == "training":
+                rnd = status.get("round", 0)
                 epoch = status.get("current_epoch", 0)
                 total = status.get("total_epochs", 0)
                 loss = status.get("loss")
                 loss_str = f"{loss:.2f}" if loss is not None else "?"
-                info(f"[{name}] epoch {epoch}/{total}, loss {loss_str}")
+                info(f"[{name}] round {rnd}, epoch {epoch}/{total}, loss {loss_str}")
 
         # Log buffer stats (including total ever simulated)
         stats = ray.get(dataset_manager.get_store_stats.remote())

@@ -111,8 +111,7 @@ graph:
           _target_: falcon.embeddings.DiagonalWhitener
           dim: 1000   # n_bins, must match the simulator below
       batch_size: 128
-      prior_epochs: 20
-      early_stop_patience: 128
+      patience_epochs: 128
       hidden_dim: 128
       num_layers: 3
       momentum: 0.01
@@ -122,10 +121,9 @@ graph:
 
       betas: [0.9, 0.9]
       lr_decay_factor: 1
-      lr_patience: 16
+      lr_patience_epochs: 16
       discard_samples: false
       log_ratio_threshold: -20.0
-      cache_sync_every: 1
       cache_on_device: false
 
     sample_chunk_size: 128

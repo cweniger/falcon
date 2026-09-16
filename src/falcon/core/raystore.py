@@ -496,12 +496,13 @@ class CachedDataLoader:
     """Cached dataloader with pre-stacked torch tensors for fast batch sampling.
 
     Stores samples as contiguous torch tensors on a configurable device (CPU or
-    GPU). sync() incrementally updates: new samples fill free slots from
-    evictions or are bulk-appended. sample_batch() uses torch fancy indexing,
-    which is ~5x faster than numpy for large arrays.
+    GPU). refresh() incrementally updates: new samples fill free slots from
+    evictions or are bulk-appended. Between refreshes the cache is fixed, and
+    iter_batches() / sample_batch() use torch fancy indexing, which is ~5x
+    faster than numpy for large arrays.
 
-    Data fetching (ray.get) runs in a background thread so the training event
-    loop is not blocked. New data becomes available one sync() call later.
+    Data fetching (ray.get) runs in a background thread that refresh() awaits,
+    so the actor's event loop keeps serving other calls in the meantime.
 
     When device='cuda', the entire buffer lives on GPU for maximum speed
     (~50x vs numpy dict cache). Falls back to CPU when GPU memory is
@@ -526,10 +527,10 @@ class CachedDataLoader:
         self._stacked_ids = np.array([], dtype=int)
         self._id_to_row = {}    # sample_id -> row index in stacked arrays
         self._free_rows = []    # reusable row indices from evicted samples
+        self._active_rows = torch.zeros(0, dtype=torch.long, device=self.device)
 
         # Background fetch thread
         self._fetch_executor = ThreadPoolExecutor(max_workers=1)
-        self._pending_fetch = None  # Future -> (new_data, checkout)
 
     def _to_tensor(self, arr):
         """Convert numpy scalar/array to torch tensor on the configured device."""
@@ -626,44 +627,48 @@ class CachedDataLoader:
         )
         self.count = len(self._active_rows)
 
-    def sync(self):
-        """Non-blocking incremental sync.
+    async def refresh(self):
+        """Bring the cache up to date with the buffer and wait until it is.
 
-        Both checkout_refs and data fetching run in a background thread,
-        so sync() never blocks the training loop.  The only exception is
-        the very first call, which must block until initial data arrives.
+        The checkout and fetch run in the background thread and are awaited,
+        so the actor's event loop keeps serving other calls (e.g. proposal
+        sampling) while the data arrives. Afterwards the cache stays fixed
+        until the next refresh.
         """
-        first_sync = len(self._arrays) == 0
-
-        # 1. Apply completed background work
-        if self._pending_fetch is not None:
-            if first_sync or self._pending_fetch.done():
-                new_tensors, checkout = self._pending_fetch.result()
-                self._pending_fetch = None
-                self._apply_fetch(new_tensors, checkout)
-            else:
-                # Still running — don't block, training continues
-                return
-
-        # 2. Launch new background checkout + fetch
-        self._pending_fetch = self._fetch_executor.submit(
+        future = self._fetch_executor.submit(
             self._checkout_and_fetch, self.active_ids.copy()
         )
+        new_tensors, checkout = await asyncio.wrap_future(future)
+        self._apply_fetch(new_tensors, checkout)
 
-        # First sync must block — training needs initial data
-        if first_sync:
-            new_tensors, checkout = self._pending_fetch.result()
-            self._pending_fetch = None
-            self._apply_fetch(new_tensors, checkout)
+    def _batch(self, rows):
+        """Batch object for the given row indices of the stacked arrays."""
+        ids = self._stacked_ids[rows.cpu().numpy()]
+        data = {key: arr[rows] for key, arr in self._arrays.items()}
+        return Batch(ids, data, self.dataset_manager)
 
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
         import torch
         idx = torch.randint(0, self.count, (batch_size,), device=self.device)
-        rows = self._active_rows[idx]
-        ids = self._stacked_ids[rows.cpu().numpy()] if self.device.type != 'cpu' else self._stacked_ids[rows.numpy()]
-        data = {key: arr[rows] for key, arr in self._arrays.items()}
-        return Batch(ids, data, self.dataset_manager)
+        return self._batch(self._active_rows[idx])
+
+    def iter_batches(self, batch_size, shuffle=False, drop_last=False):
+        """Yield Batch objects that together cover every cached sample once.
+
+        Args:
+            batch_size: Samples per batch.
+            shuffle: Visit samples in random order instead of cache order.
+            drop_last: Skip a final partial batch, unless it is the only batch.
+        """
+        import torch
+        rows = self._active_rows
+        if shuffle:
+            rows = rows[torch.randperm(self.count, device=self.device)]
+        num_full = self.count // batch_size
+        num_batches = num_full if drop_last and num_full > 0 else -(-self.count // batch_size)
+        for b in range(num_batches):
+            yield self._batch(rows[b * batch_size:(b + 1) * batch_size])
 
 
 class BufferView:
@@ -678,10 +683,9 @@ class BufferView:
                     *[f"{k}.value" for k in self.condition_keys]]
             train_cache = buffer.cached_loader(keys)
             val_cache = buffer.cached_val_loader(keys)
-            train_cache.sync()
-            val_cache.sync()
-            for step in range(steps_per_epoch):
-                batch = train_cache.sample_batch(batch_size)
+            await train_cache.refresh()
+            await val_cache.refresh()
+            for batch in train_cache.iter_batches(batch_size, shuffle=True):
                 theta = batch[f'{self.theta_key}.value']
                 ...
     """
