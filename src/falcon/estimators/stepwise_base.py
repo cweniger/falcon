@@ -295,6 +295,13 @@ class StepwiseEstimator(BaseEstimator):
                 continue
 
             self._round += 1
+            train_batches = max(1, train_cache.count // self.batch_size)
+            val_batches = -(-val_cache.count // self.batch_size)
+            info(
+                f"Round {self._round} starting | n_train={train_cache.count} "
+                f"({train_batches} batches of {self.batch_size}) | "
+                f"n_val={val_cache.count} ({val_batches} batches)"
+            )
             self._begin_round()
             epochs = await self._train_epochs(train_cache, val_cache, t0)
             if epochs == 0:

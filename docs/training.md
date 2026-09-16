@@ -120,6 +120,13 @@ estimator:
 
 ## Log output and metrics
 
+Each round starts by reporting the data it is training on, which stays fixed
+until the round ends:
+
+```text
+Round 2 starting | n_train=27853 (217 batches of 128) | n_val=4915 (39 batches)
+```
+
 Each epoch prints one line; validation fields appear only for validated epochs:
 
 ```text
