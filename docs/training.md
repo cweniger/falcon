@@ -123,13 +123,13 @@ estimator:
 Each epoch prints one line; validation fields appear only for validated epochs:
 
 ```text
-Round 1 | epoch 9/300 | steps=243 | n_sims=5184 | train_loss=-3.619e+00 | val_loss=-5.202e+00 | lr=1.000e-02
+Round 1 | epoch 9/300 | steps=243 | train_loss=-3.619e+00 | val_loss=-5.202e+00 | lr=1.000e-02
 ```
 
 Each round prints its decision:
 
 ```text
-Round 1 ACCEPTED | epochs=271 | n_train=3481 n_val=615 | conditional: -1.405e+01 vs best none promoted | marginal: 4.209e+00 vs best none promoted
+Round 1 ACCEPTED | epochs=271 | n_train=3481 n_val=615 | n_sims=32128 | conditional: -1.405e+01 vs best none promoted | marginal: 4.209e+00 vs best none promoted
 ```
 
 | Metric | Description |
@@ -142,6 +142,7 @@ Round 1 ACCEPTED | epochs=271 | n_train=3481 n_val=615 | conditional: -1.405e+01
 | `round:<group>:candidate`, `round:<group>:best` | Validation losses compared in the acceptance test |
 | `round:<group>:promoted` | 1 if the group replaced its best network |
 | `round:epochs`, `round:n_train`, `round:n_val` | Size of the round |
+| `n_samples` | Samples simulated in total, recorded once per round |
 | `round:n_discarded_train`, `round:n_discarded_val` | Samples discarded by the sweep |
 
 ## Migrating from the epoch-based loop

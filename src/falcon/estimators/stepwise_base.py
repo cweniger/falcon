@@ -296,7 +296,7 @@ class StepwiseEstimator(BaseEstimator):
 
             self._round += 1
             self._begin_round()
-            epochs = await self._train_epochs(train_cache, val_cache, buffer, t0)
+            epochs = await self._train_epochs(train_cache, val_cache, t0)
             if epochs == 0:
                 break  # interrupted before the first validation: nothing to test
 
@@ -311,7 +311,7 @@ class StepwiseEstimator(BaseEstimator):
                     record.update(await self._discard_sweep(train_cache, val_cache))
             else:
                 self._stall += 1
-            self._log_round(record)
+            self._log_round(record, buffer)
 
             if self._terminated:
                 break
@@ -332,7 +332,7 @@ class StepwiseEstimator(BaseEstimator):
                 self._copy_modules(group.best_modules(), group.current_modules())
         self.on_round_start()
 
-    async def _train_epochs(self, train_cache, val_cache, buffer, t0) -> int:
+    async def _train_epochs(self, train_cache, val_cache, t0) -> int:
         """Train the current networks for one round.
 
         Restores each network group to its best validated epoch before returning.
@@ -353,7 +353,7 @@ class StepwiseEstimator(BaseEstimator):
             self._total_epochs_trained += 1
 
             if epoch % self.val_every_epochs and epoch != self.max_epochs:
-                self._log_epoch(epoch, train_metrics, None, None, t0, buffer)
+                self._log_epoch(epoch, train_metrics, None, None, t0)
                 continue
 
             val_metrics = await self._validate(val_cache)
@@ -367,7 +367,7 @@ class StepwiseEstimator(BaseEstimator):
                     snapshots[name] = self._snapshot(group.current_modules())
                     log({f"checkpoint:{name}": epoch})
             extra = self.on_validation_end(epoch, val_metrics)
-            self._log_epoch(epoch, train_metrics, val_metrics, extra, t0, buffer)
+            self._log_epoch(epoch, train_metrics, val_metrics, extra, t0)
 
             val_loss = val_metrics.get("loss", float("nan"))
             if val_loss < best_loss:
@@ -464,21 +464,14 @@ class StepwiseEstimator(BaseEstimator):
 
     # ==================== Logging ====================
 
-    def _log_epoch(self, epoch, train_metrics, val_metrics, extra, t0, buffer) -> None:
+    def _log_epoch(self, epoch, train_metrics, val_metrics, extra, t0) -> None:
         """Log and print one epoch; validation fields only when it was validated."""
         log({"round": self._round, "epoch": epoch, "total_steps": self._total_steps})
         if val_metrics is not None:
             for k, v in val_metrics.items():
                 log({f"val:{k}": v})
-        try:
-            n_sims = buffer.get_stats()["total_length"]
-            log({"n_samples": n_sims})
-        except Exception:
-            n_sims = None
 
         summary = f"Round {self._round} | epoch {epoch}/{self.max_epochs} | steps={self._total_steps}"
-        if n_sims is not None:
-            summary += f" | n_sims={n_sims}"
         summary += f" | train_loss={train_metrics.get('loss', float('nan')):.3e}"
         if val_metrics is not None:
             summary += f" | val_loss={val_metrics.get('loss', float('nan')):.3e}"
@@ -494,11 +487,18 @@ class StepwiseEstimator(BaseEstimator):
         elapsed = (time.perf_counter() - t0) / 60.0
         self.history["elapsed_min"].append(elapsed)
         log({"elapsed_minutes": elapsed})
-        if n_sims is not None:
-            self.history["n_samples"].append(n_sims)
 
-    def _log_round(self, record) -> None:
+    def _log_round(self, record, buffer) -> None:
         """Log and print the outcome of a round."""
+        # Total samples ever simulated; fetched once per round, not per epoch,
+        # because it is a blocking call to the dataset manager.
+        try:
+            n_sims = buffer.get_stats()["total_length"]
+            log({"n_samples": n_sims})
+            self.history["n_samples"].append(n_sims)
+        except Exception:
+            n_sims = None
+
         metrics = {
             "round": record["round"],
             "round:epochs": record["epochs"],
@@ -511,6 +511,8 @@ class StepwiseEstimator(BaseEstimator):
             f"epochs={record['epochs']}",
             f"n_train={record['n_train']} n_val={record['n_val']}",
         ]
+        if n_sims is not None:
+            parts.append(f"n_sims={n_sims}")
         for name, g in record["groups"].items():
             metrics[f"round:{name}:candidate"] = g["candidate"]
             metrics[f"round:{name}:promoted"] = int(g["promoted"])
