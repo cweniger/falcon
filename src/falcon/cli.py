@@ -705,7 +705,9 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
         ray_init_args = cfg.get("ray", {}).get("init", {})
         console_level = logging_cfg.get("console", {}).get("level", None)
-        ray_init_args.setdefault("log_to_driver", console_level is not None)
+        # The interactive display tails each node's output.log itself; Ray's
+        # forwarded actor stdout would bypass it and scroll over the screen.
+        ray_init_args.setdefault("log_to_driver", console_level is not None and display is None)
         ray_init_args.setdefault("namespace", "falcon")
         ray_init_args.setdefault("logging_level", "ERROR")
         ray.init(**ray_init_args)
