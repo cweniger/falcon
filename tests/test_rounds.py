@@ -323,3 +323,72 @@ def test_save_without_a_completed_round_writes_nothing(tmp_path):
     trainer = RoundTrainer(ToyModel(_parabola))
     assert not trainer.save(tmp_path)
     assert not any(tmp_path.iterdir())
+
+
+class ProposalModel(ToyModel):
+    """Records the round hooks and keeps a proposal state that counts its moves."""
+
+    def __init__(self, *args, **kwargs):
+        super().__init__(*args, **kwargs)
+        self.train_start_ids = []   # ids handed to on_train_start, per round
+        self.round_end = []         # (round, promoted, primary weight) at on_round_end
+        self.moves = 0
+
+    def on_train_start(self, batches):
+        self.events.append(("train_start", self.trainer.round))
+        self.train_start_ids.append(sorted(i for batch in batches for i in batch._ids.tolist()))
+
+    def on_round_end(self, promoted):
+        self.round_end.append((self.trainer.round, dict(promoted), self.current.w.item()))
+        self.moves += 1
+        return True
+
+    def export_proposal(self, full):
+        return {"moves": self.moves, "full": full}
+
+    def import_proposal(self, tree):
+        self.moves = int(tree["moves"])
+
+
+def test_train_start_gets_the_training_set_after_the_baseline_validation():
+    model = ProposalModel(_parabola, patience_rounds=1, discard_samples=False)
+    _train(model)
+
+    assert model.train_start_ids == [list(range(10))] * 2
+    events = [e for e in model.events if e[0] in ("validate", "train_start")]
+    assert events.index(("validate", 2, 0)) < events.index(("train_start", 2)) < events.index(("validate", 2, 1))
+
+
+def test_round_end_sees_the_best_state_and_publishes_the_proposal():
+    model = ProposalModel(_parabola, patience_rounds=1, discard_samples=False)
+    trainer, _ = _train(model)
+
+    # Round 2 is rejected, yet the model sees the best network (w=2) at its end
+    assert model.round_end == [
+        (1, {"primary": True, "aux": True}, 2.0),
+        (2, {"primary": False, "aux": False}, 2.0),
+    ]
+    with_proposal = [t for t in trainer.published if "proposal" in t]
+    assert [("groups" in t, t["proposal"]) for t in with_proposal] == [
+        (True, {"moves": 1, "full": False}),
+        (False, {"moves": 2, "full": False}),
+    ]
+
+
+def test_proposal_state_is_checkpointed_and_restored(tmp_path):
+    model = ProposalModel(_parabola, patience_rounds=1)
+    trainer, _ = _train(model)
+    assert trainer.save(tmp_path)
+    assert trainer.state()["proposal"] == {"moves": 2, "full": True}
+
+    resumed_model = ProposalModel(_parabola)
+    assert RoundTrainer(resumed_model).load(tmp_path)
+    assert resumed_model.moves == 2
+
+
+def test_graceful_stop_does_not_move_the_proposal():
+    model = ProposalModel(lambda w: -w, batch_size=2, stop_at_step=7)
+    trainer, _ = _train(model)
+
+    assert model.round_end == []
+    assert "groups" in trainer.published[-1] and "proposal" not in trainer.published[-1]

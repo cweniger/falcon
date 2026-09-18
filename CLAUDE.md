@@ -47,7 +47,7 @@ cd examples/01_minimal && falcon launch -o output/run_01
 - `DatasetManagerActor`: Centralized dataset orchestration with sample lifecycle (ACTIVE → DISFAVOURED → TOMBSTONE → DELETED) and a separate, fixed purpose per sample (TRAINING or VALIDATION, a `buffer.validation_fraction` share spread evenly by insertion id)
 
 **Engines** (`falcon/core/`, framework-free — no torch imports):
-- `BaseEstimator` (`base_estimator.py`): Model contract used unchanged by both actors (build, train_step/evaluate/discard_mask, snapshot/restore, export_state/import_state as numpy trees, sample_prior/sample with an explicit rng); `RoundConfig` holds the loop parameters
+- `BaseEstimator` (`base_estimator.py`): Model contract used unchanged by both actors (build, train_step/evaluate/discard_mask, snapshot/restore, export_state/import_state as numpy trees, sample_prior/sample with an explicit rng); `RoundConfig` holds the loop parameters. Optional hooks: `on_train_start(batches)` (round's training set, after the baseline validation), `on_round_end(promoted)` (best state installed), `set_observations` (conditions at the observation, derived evidence simulated at launch), `export_proposal`/`import_proposal` (non-network proposal state, published and checkpointed)
 - `RoundTrainer` (`round_trainer.py`): Round-based training loop (fixed data per round, best network validated at round start, epochs until convergence, acceptance test, publish, discard sweep after accepted rounds; see `docs/training.md`); owns round counters, best state and the checkpoint
 - `ModelSampler` (`model_sampler.py`): Installs published states and falls back to the prior (no best state yet / `prior_rounds`)
 - `state_io.py`: State trees (nested dicts of numpy arrays and plain values) and `graph/<node>/best_state.npz`
@@ -56,12 +56,13 @@ cd examples/01_minimal && falcon launch -o output/run_01
 - `TorchModel` (`torch_model.py`): Base class for torch estimators; network groups, state conversion, seeded sampling, legacy `.pth` loading
 - `Flow` (`flow.py`): Flow-based posterior estimation using conditional + marginal flow pair with importance sampling
 - `FlowDensity` (`flow_density.py`): Flow network wrapper around `sbi.neural_nets` (the only file importing `sbi`)
+- `FlowMatching` (`flow_matching.py`): Conditional + marginal flow-matching velocity fields in the standard-normal latent space (requires a `TransformedPrior`), each in the frame of an exact ZCA whitener refit every round; EMA networks; proposal = prior truncated to a region of the region ladder (`region_ladder.py`), which moves once per round in the train actor; posterior = conditional-flow draws cut at the `x_sigma` contour
 - `GaussianFullCov` (`gaussian_fullcov.py`): Full covariance Gaussian posterior (requires a `TransformedPrior` such as `Product`)
 - `EmbeddedPosterior` (`embedded_posterior.py`): Wrapper combining embedding network with posterior model
 - `networks.py`: MLP builder utility
 
 **Priors** (`falcon/priors/`):
-- `Product` (`product.py`): Product of independent marginals; supports `mode="hypercube"` (for Flow) and `mode="standard_normal"` (for Gaussian), plus `"fixed"` parameters
+- `Product` (`product.py`): Product of independent marginals; supports `mode="hypercube"` (for Flow) and `mode="standard_normal"` (for Gaussian and FlowMatching), plus `"fixed"` parameters
 
 **Embeddings** (`falcon/embeddings/`):
 - `instantiate_embedding` (`builder.py`): Declarative embedding builder supporting nested configurations
@@ -166,8 +167,10 @@ graph:
 - `falcon/estimators/torch_model.py`: Base class for torch estimators
 - `falcon/estimators/flow.py`: Flow-based posterior estimation (conditional + marginal flows)
 - `falcon/estimators/flow_density.py`: sbi-backed flow networks (only sbi import point)
+- `falcon/estimators/flow_matching.py`: Flow matching with a truncated-prior proposal
+- `falcon/estimators/region_ladder.py`: Region ladder of the truncated-prior proposal
 - `falcon/estimators/gaussian_fullcov.py`: Full covariance Gaussian posterior estimation
 - `falcon/priors/product.py`: Product prior with latent space transformations (hypercube and standard_normal modes)
 - `falcon/embeddings/builder.py`: Declarative embedding pipeline builder
 - `falcon/interactive.py`: Interactive TUI display for launch mode
-- `examples/`: 01_minimal, 02_bimodal, 03_composite, 04_gaussian, 05_linear_regression
+- `examples/`: 01_minimal (also `config_flow_matching.yml`), 02_bimodal, 03_composite, 04_gaussian, 05_linear_regression

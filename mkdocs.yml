@@ -49,6 +49,7 @@ nav:
           - BaseEstimator: api/base-estimator.md
       - Estimators:
           - Flow: api/flow.md
+          - FlowMatching: api/flow-matching.md
           - Gaussian: api/gaussian.md
           - FlowDensity: api/flow-density.md
       - Priors:
