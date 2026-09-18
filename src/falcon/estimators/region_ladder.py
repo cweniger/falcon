@@ -32,6 +32,10 @@ covers. Fast retreat, cautious approach.
 Sampling a region is importance sampling: draw from the region's marginal
 flow, keep the draws inside the region, weight them by prior over marginal
 flow, and resample without replacement so that no simulation is spent twice.
+The pool of weighted draws keeps growing until its effective sample size is
+``ess_factor`` times the number of draws taken from it, so a pass that hits a
+hole in the marginal flow buys more passes instead of feeding a tilted batch
+to the buffer.
 """
 
 import math
@@ -86,6 +90,7 @@ class LadderConfig:
     n_region: int = 65536
     n_mout: int = 65536
     max_sample_passes: int = 64
+    ess_factor: float = 4.0
 
 
 class FlowPair:
@@ -368,27 +373,52 @@ class RegionLadder:
 
     @torch.no_grad()
     def sample(self, n: int) -> Tuple[torch.Tensor, torch.Tensor]:
-        """``n`` latent draws from the prior truncated to ``O``, with their log density."""
+        """``n`` latent draws from the prior truncated to ``O``, with their log density.
+
+        Draws are taken without replacement from a pool of weighted draws of
+        ``O``, which lives until ``O`` changes. Before taking them, the pool
+        is extended until its effective sample size is ``ess_factor`` times
+        everything taken from it so far, this request included (at most
+        ``max_sample_passes`` passes; a pool that misses the target stops
+        enforcing it).
+        """
         if self.outer == PRIOR:
             u = torch.randn(n, self.param_dim, dtype=torch.float64, device=self.device)
             return u, log_normal(u)
         pool = self._pool
         if pool is None or pool["region"] != self.outer:
+            empty = torch.zeros(0, dtype=torch.float64, device=self.device)
             pool = self._pool = {
                 "region": self.outer,
                 "u": torch.zeros(0, self.param_dim, dtype=torch.float64, device=self.device),
-                "logw": torch.zeros(0, dtype=torch.float64, device=self.device),
+                "logw": empty,       # draws still available
+                "logw_all": empty,   # every draw the pool ever held, for its ESS
+                "taken": 0,
+                "gate_failed": False,
             }
+        cfg = self.config
+
+        def short():
+            gated = not pool["gate_failed"] and self.pool_ess() < cfg.ess_factor * (pool["taken"] + n)
+            return len(pool["u"]) < n or gated
+
         passes = 0
-        while len(pool["u"]) < n and passes < self.config.max_sample_passes:
+        while passes < cfg.max_sample_passes and short():
             passes += 1
             self._fill(pool)
+        if not pool["gate_failed"] and self.pool_ess() < cfg.ess_factor * (pool["taken"] + n):
+            # Give up on the gate for this region instead of paying the passes on every request
+            pool["gate_failed"] = True
+            warning(f"Region {self.outer}: pool ESS {self.pool_ess():.0f} after {passes} passes, "
+                    f"below {cfg.ess_factor:g} x {pool['taken'] + n} draws taken; "
+                    "not enforced again until the region changes")
         take = min(n, len(pool["u"]))
         idx = gumbel_top_k(pool["logw"], take)
         u = pool["u"][idx]
         remaining = torch.ones(len(pool["u"]), dtype=torch.bool, device=self.device)
         remaining[idx] = False
         pool["u"], pool["logw"] = pool["u"][remaining], pool["logw"][remaining]
+        pool["taken"] += take
         if take < n:
             if take == 0:
                 warning(f"Region {self.outer}: no accepted draws in {passes} passes; "
@@ -399,6 +429,13 @@ class RegionLadder:
                     "repeating some")
             u = torch.cat([u, u[torch.randint(take, (n - take,), device=self.device)]])
         return u, log_normal(u) - math.log(self.volume(self.outer))
+
+    def pool_ess(self) -> float:
+        """Effective sample size of every draw the current proposal pool has held."""
+        if self._pool is None or len(self._pool["logw_all"]) == 0:
+            return 0.0
+        logw = self._pool["logw_all"]
+        return _ess(torch.exp(logw - logw.max()))
 
     def _fill(self, pool) -> None:
         """One pass of ``n_region`` marginal-flow draws of ``O`` into the pool."""
@@ -412,11 +449,12 @@ class RegionLadder:
         u, logw = u[finite], (log_normal(u) - lqm)[finite]
         pool["u"] = torch.cat([pool["u"], u])
         pool["logw"] = torch.cat([pool["logw"], logw])
+        pool["logw_all"] = torch.cat([pool["logw_all"], logw])
         eps = _ess(torch.exp(logw - logw.max())) / len(logw) if len(logw) else float("nan")
         log({
             "proposal:acceptance": len(u) / self.config.n_region,
             "proposal:eps": eps,
-            "proposal:pool": len(pool["u"]),
+            "proposal:pool_ess": self.pool_ess(),
         })
 
     # ==================== State ====================

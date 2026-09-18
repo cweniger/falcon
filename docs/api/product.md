@@ -11,7 +11,7 @@ bijective map to a chosen latent space. It extends the abstract base class
 `Product` supports two latent-space modes:
 
 - **`"hypercube"`**: Maps to/from a bounded hypercube (used with [Flow](flow.md))
-- **`"standard_normal"`**: Maps to/from standard normal space (used with [GaussianFullCov](gaussian.md))
+- **`"standard_normal"`**: Maps to/from standard normal space (used with [GaussianFullCov](gaussian.md) and [FlowMatching](flow-matching.md))
 
 ## Supported Distributions
 

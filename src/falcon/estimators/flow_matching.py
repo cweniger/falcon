@@ -77,25 +77,41 @@ class VelocityField(nn.Module):
 
 
 @torch.no_grad()
-def copy_buffers(dst: nn.Module, src: nn.Module) -> None:
-    """Copy the buffers of ``src`` into ``dst`` by name, creating those ``dst`` lacks (lazy buffers)."""
+def copy_buffers(dst: nn.Module, src: nn.Module, skip_float: bool = False) -> None:
+    """Copy the buffers of ``src`` into ``dst`` by name, creating those ``dst`` lacks (lazy buffers).
+
+    With ``skip_float``, floating-point buffers that ``dst`` already has in the
+    same shape and dtype are left alone.
+    """
     for name, buffer in src.named_buffers():
         path, _, key = name.rpartition(".")
         module = dst.get_submodule(path) if path else dst
         current = module._buffers.get(key)
         if current is None or current.shape != buffer.shape or current.dtype != buffer.dtype:
             module._buffers[key] = buffer.detach().clone()
-        else:
+        elif not (skip_float and current.is_floating_point()):
             current.copy_(buffer)
 
 
 @torch.no_grad()
 def ema_update(ema: nn.Module, model: nn.Module, decay: float) -> None:
-    """Move the parameters of ``ema`` toward ``model``; buffers are copied."""
+    """Move the parameters and floating-point buffers of ``ema`` toward ``model``.
+
+    Buffers such as the running statistics of an embedding's normalisation
+    are averaged like the parameters: copied, they would jump to the latest
+    statistics while the averaged weights still expect the old ones. Other
+    buffers, and buffers ``ema`` does not have yet (lazy buffers), are copied.
+    """
     params = dict(model.named_parameters())
     for name, p in ema.named_parameters():
         p.mul_(decay).add_(params[name].detach(), alpha=1.0 - decay)
-    copy_buffers(ema, model)
+    current = dict(ema.named_buffers())
+    for name, buffer in model.named_buffers():
+        mine = current.get(name)
+        if (mine is not None and mine.is_floating_point() and mine.shape == buffer.shape
+                and mine.dtype == buffer.dtype):
+            mine.mul_(decay).add_(buffer.detach(), alpha=1.0 - decay)
+    copy_buffers(ema, model, skip_float=True)
 
 
 # ==================== Flow matching ====================
@@ -285,6 +301,14 @@ class FlowMatching(TorchModel):
     round in the train actor. It needs the node's conditions at the
     observation; without them (e.g. amortized runs) it stays the prior.
 
+    The defaults are the settings of the reference run that produced the O1b
+    region of the LDC MBHB study (``t7b_s4k_b8k_max64k_reject_essgate``). Its
+    buffer policy corresponds to ``discard_samples: true`` with
+    ``buffer.min_samples`` as the floor, ``buffer.max_samples`` as the cap,
+    ``buffer.simulate_when_full: false`` and ``buffer.validation_fraction:
+    0.2``; its fixed 4000 simulations per round have no exact counterpart,
+    since falcon simulates continuously.
+
     Args:
         max_epochs: Maximum epochs per round.
         lr: Learning rate; reset at the start of every round.
@@ -302,7 +326,7 @@ class FlowMatching(TorchModel):
         cache_on_device: Cache training data on the estimator device.
         max_cache_samples: Cap on cached training samples (0 = all).
         discard_samples: After accepted rounds, discard samples outside the
-            outer region.
+            outer region (oldest first, never below ``buffer.min_samples``).
         hidden: Width of the velocity-field MLP.
         layers: Hidden layers of the velocity-field MLP.
         time_dim: Number of Fourier time features (even).
@@ -339,6 +363,8 @@ class FlowMatching(TorchModel):
         n_region: Draws per pass when minting or sampling a region.
         n_mout: Draws for the mass outside the inner region.
         max_sample_passes: Maximum passes when filling a proposal request.
+        ess_factor: Extend the pool of weighted region draws until its
+            effective sample size is this many times the draws taken from it.
         readout_draws: Draws used to set the posterior truncation.
     """
 
@@ -359,7 +385,7 @@ class FlowMatching(TorchModel):
         prior_rounds: int = 0,
         cache_on_device: bool = False,
         max_cache_samples: int = 0,
-        discard_samples: bool = False,
+        discard_samples: bool = True,
         # Network
         hidden: int = 512,
         layers: int = 6,
@@ -371,7 +397,7 @@ class FlowMatching(TorchModel):
         lr_decay_factor: float = 1.0,
         lr_patience_epochs: int = 8,
         ema_decay: float = 0.995,
-        embedding_epochs: Optional[int] = None,
+        embedding_epochs: Optional[int] = 10,
         # Flow matching
         time_late_k: float = 8.0,
         time_late_mix: float = 0.5,
@@ -390,6 +416,7 @@ class FlowMatching(TorchModel):
         n_region: int = 65536,
         n_mout: int = 65536,
         max_sample_passes: int = 64,
+        ess_factor: float = 4.0,
         readout_draws: int = 65536,
     ):
         if embedding_epochs is not None and embedding_epochs < 0:
@@ -433,6 +460,7 @@ class FlowMatching(TorchModel):
         self.n_region = n_region
         self.n_mout = n_mout
         self.max_sample_passes = max_sample_passes
+        self.ess_factor = ess_factor
         self.readout_draws = readout_draws
 
     def setup(self, simulator_instance, theta_key=None, condition_keys=None):
@@ -465,7 +493,7 @@ class FlowMatching(TorchModel):
             x_sigma=self.x_sigma, delta_sigma=self.delta_sigma, min_keep_frac=self.min_keep_frac,
             vratio=self.vratio, v_min_ess=self.v_min_ess, v_max_draws=self.v_max_draws,
             chain_depth=self.chain_depth, n_region=self.n_region, n_mout=self.n_mout,
-            max_sample_passes=self.max_sample_passes,
+            max_sample_passes=self.max_sample_passes, ess_factor=self.ess_factor,
         )
         self._ladder = RegionLadder(ladder_config, self._load_region, self.param_dim, self.device)
 
@@ -706,7 +734,7 @@ class FlowMatching(TorchModel):
             load_module_state(flow, record[key], self.device)
             flow.requires_grad_(False)
             flows.append(flow)
-        s_obs = torch.as_tensor(np.asarray(record["s_obs"]), device=self.device).float()
+        s_obs = self._to_tensor(record["s_obs"], self.device).float()  # copies: Ray arrays are read-only
         return FlowPair(flows[0], flows[1], s_obs, self._sample_kw(), self._density_kw())
 
     # ==================== Sampling ====================
@@ -732,12 +760,33 @@ class FlowMatching(TorchModel):
         return result
 
     def _posterior(self, num_samples: int, conditions):
-        """Conditional-flow draws cut at the ``x_sigma`` contour of the conditional flow."""
-        if any(np.shape(v)[0] != 1 for v in conditions.values()):
-            raise ValueError(
-                "FlowMatching samples the posterior of one observation at a time; "
-                "the conditions need a leading dimension of 1"
-            )
+        """Posterior draws, one readout per distinct observation.
+
+        Rows with identical conditions share a readout: evidence derived from
+        one broadcast observation arrives as ``num_samples`` identical rows.
+        """
+        arrays = {k: np.asarray(v) for k, v in conditions.items()}
+        rows = max(len(a) for a in arrays.values())
+        if rows == 1:
+            return self._readout(num_samples, arrays)
+        if rows != num_samples:
+            raise ValueError(f"Conditions have {rows} rows for {num_samples} samples")
+        groups: Dict[bytes, list] = {}
+        for i in range(rows):
+            key = b"".join(np.ascontiguousarray(a[i if len(a) > 1 else 0]).tobytes()
+                           for _, a in sorted(arrays.items()))
+            groups.setdefault(key, []).append(i)
+        u = torch.empty(rows, self.param_dim, dtype=torch.float64, device=self.device)
+        log_prob = torch.empty(rows, dtype=torch.float64, device=self.device)
+        for idx in groups.values():
+            first = idx[0]
+            observation = {k: a[first:first + 1] if len(a) > 1 else a for k, a in arrays.items()}
+            rows_idx = torch.as_tensor(idx, device=self.device)
+            u[rows_idx], log_prob[rows_idx] = self._readout(len(idx), observation)
+        return u, log_prob
+
+    def _readout(self, num_samples: int, conditions):
+        """Conditional-flow draws cut at the ``x_sigma`` contour, for one observation."""
         tensors = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
         s = self._summary("conditional", tensors).float()
         thr = self._readout_threshold(s, conditions)

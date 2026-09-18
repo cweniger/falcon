@@ -1,0 +1,110 @@
+# =============================================================================
+# Falcon Example Configuration: 01_minimal with FlowMatching
+# -----------------------------------------------------------------------------
+# The 01_minimal model (x = z + 0.1 noise, z uniform in [-100, 100]^3) with the
+# FlowMatching estimator: conditional and marginal flow-matching velocity
+# fields in the standard-normal latent space of the prior, and a
+# truncated-prior proposal. The posterior is ~1000x narrower than the prior,
+# so the proposal region contracts over the rounds (see the [ladder] lines in
+# graph/z/train/output.log) while each round's whitener zooms in on the data.
+#
+# Structure overview:
+#   logging  – WandB project setup and output directory.
+#   paths    – Locations of user code and generated data.
+#   buffer   – Data collection and resampling behavior.
+#   graph    – Declarative model definition with simulators and estimators.
+#   sample   – Sampling parameters for posterior draws after training.
+#
+# Usage:
+#   falcon launch -c config_flow_matching -o output/fm_run
+#   falcon sample posterior -o output/fm_run
+#
+# Notes:
+#   • All outputs (simulations, trained models, logs) are written under
+#     ${run_dir}, which is set via --output or auto-generated.
+#   • ${run_dir} is referenced by graph, samples, and WandB logging paths.
+#   • Resuming: specify an existing --output directory to resume from its saved config.yml
+# =============================================================================
+
+# -----------------------------------------------------------------------------
+# Logging configuration
+# -----------------------------------------------------------------------------
+logging:
+  wandb:                                  # WandB-specific settings (optional if wandb not installed)
+    enabled: false                        # Set to false to disable wandb logging
+    project: falcon_examples              # WandB project name
+    group: 01_minimal_fm                  # Experiment group (for organizing runs)
+    dir: ${run_dir}                       # Directory for wandb files
+  local:
+    enabled: true                         # Local file-based logging
+
+# -----------------------------------------------------------------------------
+# Directory configuration
+# -----------------------------------------------------------------------------
+paths:
+  imports: ["./src"]                      # Local folder(s) with user-defined code (e.g. model.py)
+
+# -----------------------------------------------------------------------------
+# Training buffer parameters
+# -----------------------------------------------------------------------------
+# As in the reference run O1b: samples outside the proposal region are
+# discarded after accepted rounds (oldest first, never below min_samples), and
+# simulation pauses while max_samples samples are inside the region.
+buffer:
+  min_samples: 8000                     # Floor of the buffer, and samples before training starts
+  max_samples: 64000                    # Cap on the samples inside the proposal region
+  validation_fraction: 0.2              # Share of samples held out for validation only, spread evenly over the buffer
+  simulate_count: 64                    # Number of new samples generated per simulation round
+  simulate_when_full: false             # Stop simulating at max_samples
+  simulate_interval: 1                  # Seconds between simulation rounds
+  snapshot_every: 10                       # Save every Nth sample to buffer/snapshots/ (0=none, 1=all)
+
+# -----------------------------------------------------------------------------
+# Graph definition using declarative YAML
+# -----------------------------------------------------------------------------
+graph:
+  z:
+    evidence: [x]                       # Node z is inferred from observed x
+
+    simulator:                          # Prior; FlowMatching works in its standard-normal latent space
+      _target_: falcon.priors.Product
+      priors:
+        - ['uniform', -100.0, 100.0]
+        - ['uniform', -100.0, 100.0]
+        - ['uniform', -100.0, 100.0]
+
+    estimator:
+      _target_: falcon.estimators.FlowMatching
+      max_epochs: 200                   # Epoch cap per training round
+      val_every_epochs: 3               # Validation solves the density ODE: not every epoch
+      patience_epochs: 12               # End the round after N epochs without validation improvement
+      patience_rounds: 10               # Stop training after N rejected rounds in a row
+      lr: 3.0e-4
+      batch_size: 128
+      embedding:                        # Neural embedding for observation x
+        _target_: model.E
+        _input_: [x]
+      hidden: 256                       # Velocity-field MLP width and depth (reference: 512 x 6)
+      layers: 4
+      x_sigma: 3.0                      # Inner region holds the 3-sigma mass of the conditional flow
+      delta_sigma: 1.0                  # Dead band of the region ladder
+      discard_samples: true             # Drop samples outside the proposal region after accepted rounds
+
+    ray:
+      num_train_gpus: 0.5               # GPUs of the train actor z/train (0 = CPU)
+      num_sample_gpus: 0.5              # GPUs of the sample actor z
+
+  x:
+    parents: [z]                        # Node x depends on latent parameters z
+    simulator:                          # Defines forward model p(x|z)
+      _target_: model.Simulate
+      npar: 3                           # Number of parameters to sample from z
+    observed: "./data/mock_data.npz['x']"  # NPZ key extraction syntax
+
+# -----------------------------------------------------------------------------
+# Sampling configuration (posterior draws after training)
+# -----------------------------------------------------------------------------
+sample:
+  posterior:
+    n: 1000                             # Number of posterior samples to draw
+    # Output: ${run_dir}/samples/posterior/

@@ -120,9 +120,10 @@ simulator:
 
 ### `estimator`
 
-The posterior learner. Falcon provides two estimators:
+The posterior learner. Falcon provides three estimators:
 
 - [`falcon.estimators.Flow`](api/flow.md) — Flow-based posterior estimation (recommended for most cases)
+- [`falcon.estimators.FlowMatching`](api/flow-matching.md) — Flow matching with a truncated-prior proposal
 - [`falcon.estimators.GaussianFullCov`](api/gaussian.md) — Full covariance Gaussian posterior
 
 All estimator parameters are specified **flat** directly under `estimator:` — there

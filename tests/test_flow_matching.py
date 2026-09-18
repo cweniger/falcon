@@ -73,6 +73,20 @@ def test_whitener_is_an_exact_zca_refit():
     torch.testing.assert_close(whitener.W, whitener.W.T)  # symmetric root: stays in the latent frame
 
 
+def test_ema_averages_running_statistics_like_the_weights():
+    # Copied statistics would jump ahead of the averaged weights that expect them
+    from falcon.estimators.flow_matching import ema_update
+
+    model, ema = torch.nn.BatchNorm1d(2), torch.nn.BatchNorm1d(2)
+    with torch.no_grad():
+        model.weight.fill_(3.0)
+    model.running_mean.fill_(10.0)
+    ema_update(ema, model, decay=0.9)
+    torch.testing.assert_close(ema.weight, torch.full((2,), 1.2))
+    torch.testing.assert_close(ema.running_mean, torch.full((2,), 1.0))
+    assert ema.num_batches_tracked == model.num_batches_tracked  # integers are copied
+
+
 def test_copy_buffers_creates_lazily_built_buffers():
     class Lazy(torch.nn.Module):
         def __init__(self):
@@ -203,9 +217,17 @@ def test_embedding_trains_only_in_the_first_embedding_epochs():
         torch.testing.assert_close(value, ema_after_first_epoch[key])
 
 
-def test_posterior_needs_a_single_observation():
+def test_identical_condition_rows_share_one_posterior_readout():
+    # Evidence derived from one broadcast observation arrives as one row per sample
     model, _ = _trained()
-    with pytest.raises(ValueError, match="one observation"):
+    rows = {"x": np.repeat(X_OBS["x"], 40, axis=0)}
+    grouped = model.sample(np.random.default_rng(0), 40, rows, "posterior")
+    broadcast = model.sample(np.random.default_rng(0), 40, X_OBS, "posterior")
+    np.testing.assert_allclose(grouped["value"], broadcast["value"])
+
+    two = {"x": np.concatenate([np.repeat(X_OBS["x"], 20, axis=0), np.zeros((20, 2))])}
+    assert model.sample(np.random.default_rng(0), 40, two, "posterior")["value"].shape == (40, 2)
+    with pytest.raises(ValueError, match="rows"):
         model.sample(np.random.default_rng(0), 5, {"x": np.zeros((2, 2))}, "posterior")
 
 
@@ -284,6 +306,28 @@ def test_proposal_samples_the_prior_truncated_to_the_outer_region():
     # Uniform in the prior on the disc: the radius^2 follows the truncated chi^2_2
     expected = 2 - r2 * math.exp(-r2 / 2) / (1 - math.exp(-r2 / 2))
     assert float(u.pow(2).sum(1).mean()) == pytest.approx(expected, rel=0.05)
+
+
+def test_proposal_pool_keeps_its_ess_ahead_of_the_draws_taken():
+    ladder = _contracted_twice()
+    for n in (100, 3000, 2000):
+        ladder.sample(n)
+        pool = ladder._pool
+        assert ladder.pool_ess() >= ladder.config.ess_factor * pool["taken"]
+    assert pool["taken"] == 5100
+    assert len(pool["u"]) == len(pool["logw_all"]) - 5100
+
+
+def test_unreachable_ess_target_is_paid_for_once_per_region():
+    ladder = _contracted_twice()
+    ladder.config.ess_factor, ladder.config.max_sample_passes = 1e9, 2
+    fills = []
+    fill = ladder._fill
+    ladder._fill = lambda pool: (fills.append(1), fill(pool))
+    ladder.sample(100)
+    assert len(fills) == 2 and ladder._pool["gate_failed"]
+    ladder.sample(100)  # the pool still holds enough draws: no new passes
+    assert len(fills) == 2
 
 
 def test_hold_when_the_candidate_is_not_a_real_step_down():
