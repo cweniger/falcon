@@ -1,16 +1,19 @@
+import json
+import os
 import time
 import ray
-import torch
-import os
 import sys
 from pathlib import Path
 from concurrent.futures import ThreadPoolExecutor
+from typing import Dict, List, Optional, Tuple
 import numpy as np
-from omegaconf import ListConfig
 
-from falcon.core.logger import Logger, set_logger, debug, info, warning, error, log
+from falcon.core.logger import Logger, set_logger, info, warning
 
+from falcon.core.model_sampler import ModelSampler
 from falcon.core.raystore import BufferView
+from falcon.core.round_trainer import RoundTrainer
+from falcon.core.state_io import has_checkpoint
 from .utils import LazyLoader
 
 _RAY_ACTOR_KEYS = {
@@ -18,224 +21,182 @@ _RAY_ACTOR_KEYS = {
     "object_store_memory", "placement_group", "placement_group_bundle_index",
     "placement_group_capture_child_tasks", "resources", "runtime_env",
     "scheduling_strategy", "_metadata", "enable_task_events", "_labels",
-    "concurrency_groups", "lifetime", "max_concurrency", "max_restarts",
-    "max_task_retries", "max_pending_calls", "namespace", "get_if_exists",
-}
+    "lifetime", "max_restarts", "max_task_retries", "max_pending_calls",
+    "namespace", "get_if_exists",
+}  # concurrency is set by the actor classes
+TRAIN_SUFFIX = "/train"
 
 
-def _ray_options(actor_config):
-    """Filter actor_config to only valid Ray actor options."""
-    return {k: v for k, v in actor_config.items() if k in _RAY_ACTOR_KEYS}
+def train_stream_name(node_name: str) -> str:
+    """Name of a node's train actor, its log stream and its directory under graph/."""
+    return node_name + TRAIN_SUFFIX
 
 
-@ray.remote
-class MultiplexNodeWrapper:
-    def __init__(self, actor_config, node, graph, num_actors, import_dirs=None, log_config=None):
-        self.num_actors = num_actors
-        self.wrapped_node_list = [
-            NodeWrapper.options(**_ray_options(actor_config)).remote(node, graph, import_dirs, log_config)
-            for _ in range(self.num_actors)
-        ]
+def resolve_actor_options(actor_config: dict, has_estimator: bool) -> Tuple[dict, Optional[dict], List[str]]:
+    """Split a node's ``ray:`` config into sample-actor and train-actor options.
 
-    def _multiplexed_call(self, method_name, n_samples, condition_refs=None):
-        """Distribute work across actors, slicing ref lists.
+    ``num_sample_gpus`` / ``num_train_gpus`` set the GPUs of each actor, and
+    ``num_sample_cpus`` / ``num_train_cpus`` their CPUs (default: ``num_cpus``);
+    every other Ray option applies to both. The deprecated ``num_gpus`` is
+    split evenly between the two actors, so the node keeps its GPU budget.
 
-        Args:
-            method_name: Name of the method to call on each actor
-            n_samples: Total number of samples to generate
-            condition_refs: Dict[str, List[ObjectRef]] or None
+    Returns:
+        (sample_options, train_options or None, warnings)
+    """
+    cfg = dict(actor_config or {})
+    sample_gpus = cfg.pop("num_sample_gpus", None)
+    train_gpus = cfg.pop("num_train_gpus", None)
+    legacy_gpus = cfg.pop("num_gpus", None)
+    sample_cpus = cfg.pop("num_sample_cpus", None)
+    train_cpus = cfg.pop("num_train_cpus", None)
+    notes = []
 
-        Returns:
-            List[Dict[str, ObjectRef]]: Concatenated results from all actors
-        """
-        num_samples_per_node = n_samples / self.num_actors
-        index_range_list = [
-            (int(i * num_samples_per_node), int((i + 1) * num_samples_per_node))
-            for i in range(self.num_actors)
-        ]
-        index_range_list[-1] = (index_range_list[-1][0], n_samples)
-
-        futures = []
-        for i, (start, end) in enumerate(index_range_list):
-            if end - start <= 0:
-                # n_samples < num_actors leaves some actors with an empty
-                # slice; a zero-sample dispatch is rejected by _resolve_refs
-                # (explicit ValueError). Skip idle actors instead.
-                continue
-            chunk_refs = {k: v[start:end] for k, v in condition_refs.items()} if condition_refs else None
-            method = getattr(self.wrapped_node_list[i], method_name)
-            futures.append(method.remote(end - start, condition_refs=chunk_refs))
-        sample_lists = ray.get(futures)
-        result = []
-        for sample_list in sample_lists:
-            if sample_list:
-                result.extend(sample_list)
-        return result
-
-    def sample(self, n_samples, condition_refs=None):
-        return self._multiplexed_call('sample', n_samples, condition_refs)
-
-    def sample_posterior(self, n_samples, condition_refs=None):
-        return self._multiplexed_call('sample_posterior', n_samples, condition_refs)
-
-    def sample_proposal(self, n_samples, condition_refs=None):
-        return self._multiplexed_call('sample_proposal', n_samples, condition_refs)
-
-    def shutdown(self):
-        for node in self.wrapped_node_list:
-            node.shutdown.remote()
-
-    def save(self, node_dir):
-        pass  # Silently ignore, multiplexed nodes are never saved
-
-    def load(self, node_dir):
-        pass  # Silently ignore, multiplexed nodes are never saved
-
-    def wait_ready(self):
-        """Wait for all child actors to initialize."""
-        ray.get([actor.__ray_ready__.remote() for actor in self.wrapped_node_list])
-
-    def get_status(self) -> dict:
-        """Return aggregated status from all child actors."""
-        # Get status from first child (they should all be similar)
-        if self.wrapped_node_list:
-            try:
-                return ray.get(self.wrapped_node_list[0].get_status.remote(), timeout=2.0)
-            except Exception:
-                return {"status": "error", "error": "timeout"}
-        return {"status": "unknown"}
-
-    def get_output_log_tail(self, num_lines: int = 50) -> list:
-        """Return log tail from first child actor."""
-        if self.wrapped_node_list:
-            try:
-                return ray.get(
-                    self.wrapped_node_list[0].get_output_log_tail.remote(num_lines),
-                    timeout=2.0
-                )
-            except Exception:
-                return ["[Error fetching logs]"]
-        return []
-
-
-# TODO: NodeWrapper is async solely because train() uses asyncio.sleep(0) to yield.
-# This makes every ray.get inside the actor (e.g. CachedDataLoader) block the event
-# loop and trigger warnings. Consider splitting into separate training and sampling
-# actors — sampling reads best_model which is independent of training state.
-@ray.remote
-class NodeWrapper:
-    def __init__(self, node, graph, import_dirs=None, log_config=None):
-        # Suppress Ray warning about blocking ray.get in async actor.
-        # Ray emits this once per actor via a global flag. We set the flag
-        # to True before any ray.get calls to prevent the warning.
-        # NodeWrapper is async (for train's pause/resume), but sampling methods
-        # are synchronous and need blocking ray.get. This is unavoidable without
-        # splitting into separate training/sampling actors.
-        # TODO: Consider actor split to fully separate async training from sync sampling.
-        try:
-            import ray._private.worker as _ray_worker
-            _ray_worker.blocking_get_inside_async_warned = True
-        except (ImportError, AttributeError):
-            pass  # Ray internals changed, warning will appear
-
-        for p in (import_dirs or []):
-            resolved = str(Path(p).resolve())
-            if resolved not in sys.path:
-                sys.path.insert(0, resolved)
-
-        self.node = node
-        self.name = node.name
-
-        # Create logger and set as module-level logger
-        # This enables falcon.log(), falcon.info() etc. for simulators and estimators
-        if log_config:
-            self._logger = Logger(self.name, log_config, capture_exceptions=True)
-        else:
-            # Fallback: create a minimal logger config
-            self._logger = Logger(self.name, {"local": {"enabled": True, "dir": "."}}, capture_exceptions=True)
-        set_logger(self._logger)
-
-        # Status tracking for monitoring
-        self._status = "initializing"
-
-        # Live instances (from Python API) are used directly; string / class
-        # paths go through LazyLoader for deferred import + instantiation.
-        if isinstance(node.simulator_cls, (str, type)):
-            simulator_cls = LazyLoader(node.simulator_cls)
-            self.simulator_instance = simulator_cls(**node.simulator_config)
-        else:
-            self.simulator_instance = node.simulator_cls
-
-        # Condition keys for embedding (evidence + scaffolds)
-        self.condition_keys = self.node.evidence + self.node.scaffolds
-        debug(f"Condition keys: {self.condition_keys}")
-
-        if node.estimator_cls is not None:
-            from falcon.core.base_estimator import BaseEstimator as _BaseEstimator
-            if isinstance(node.estimator_cls, _BaseEstimator):
-                # Notebook path: already a configured instance (e.g. Flow(max_epochs=200))
-                self.estimator_instance = node.estimator_cls
-            elif isinstance(node.estimator_cls, (str, type)):
-                # YAML path: pass flat config dict as kwargs to __init__
-                estimator_cls = LazyLoader(node.estimator_cls)
-                self.estimator_instance = estimator_cls(**node.estimator_config)
-            else:
-                raise TypeError(
-                    f"estimator_cls must be a BaseEstimator instance, class, or "
-                    f"string; got {type(node.estimator_cls).__name__}"
-                )
-            self.estimator_instance.setup(
-                self.simulator_instance,
-                theta_key=node.name,
-                condition_keys=self.condition_keys,
+    if legacy_gpus is not None:
+        if sample_gpus is not None or train_gpus is not None:
+            raise ValueError(
+                "ray.num_gpus cannot be combined with ray.num_sample_gpus / ray.num_train_gpus; "
+                "use only the latter"
+            )
+        if has_estimator:
+            sample_gpus = train_gpus = legacy_gpus / 2
+            notes.append(
+                f"ray.num_gpus is deprecated; using num_train_gpus={train_gpus:g} and "
+                f"num_sample_gpus={sample_gpus:g}"
             )
         else:
-            self.estimator_instance = None
+            sample_gpus = legacy_gpus
+            notes.append(f"ray.num_gpus is deprecated; using num_sample_gpus={sample_gpus:g}")
 
+    if not has_estimator:
+        for key, value in (("num_train_gpus", train_gpus), ("num_train_cpus", train_cpus)):
+            if value is not None:
+                notes.append(f"ray.{key} is ignored: the node has no estimator")
+
+    unknown = sorted(set(cfg) - _RAY_ACTOR_KEYS)
+    if unknown:
+        notes.append(f"ignoring unsupported ray options {unknown}")
+    common = {k: v for k, v in cfg.items() if k in _RAY_ACTOR_KEYS}
+
+    sample = dict(common)
+    if sample_gpus is not None:
+        sample["num_gpus"] = sample_gpus
+    if sample_cpus is not None:
+        sample["num_cpus"] = sample_cpus
+    if not has_estimator:
+        return sample, None, notes
+
+    train = dict(common)
+    if train_gpus is not None:
+        train["num_gpus"] = train_gpus
+    if train_cpus is not None:
+        train["num_cpus"] = train_cpus
+    if "name" in common:
+        train["name"] = train_stream_name(common["name"])
+    return sample, train, notes
+
+
+_THREAD_ENV_VARS = ("OMP_NUM_THREADS", "MKL_NUM_THREADS", "OPENBLAS_NUM_THREADS")
+
+
+def _local_cpu_count() -> int:
+    try:
+        return len(os.sched_getaffinity(0))
+    except AttributeError:  # not available on macOS
+        return os.cpu_count() or 1
+
+
+def _init_actor(import_dirs, log_config, log_name, num_threads=None):
+    """Import paths, thread limits and module-level logger of an actor process."""
+    if num_threads is not None:
+        # Takes effect for libraries that are initialized after this point
+        for var in _THREAD_ENV_VARS:
+            os.environ[var] = str(num_threads)
+    for p in (import_dirs or []):
+        resolved = str(Path(p).resolve())
+        if resolved not in sys.path:
+            sys.path.insert(0, resolved)
+    # Enables falcon.log(), falcon.info() etc. for simulators and estimators
+    logger = Logger(log_name, log_config or {"local": {"enabled": True, "dir": "."}},
+                    capture_exceptions=True)
+    set_logger(logger)
+    return logger
+
+
+def _make_simulator(node):
+    # Live instances (from Python API) are used directly; string / class
+    # paths go through LazyLoader for deferred import + instantiation.
+    if isinstance(node.simulator_cls, (str, type)):
+        return LazyLoader(node.simulator_cls)(**node.simulator_config)
+    return node.simulator_cls
+
+
+def _make_model(node, simulator_instance, num_threads=None):
+    """Set-up estimator model of the node, or None for simulator-only nodes."""
+    if node.estimator_cls is None:
+        return None
+    from falcon.core.base_estimator import BaseEstimator
+    if isinstance(node.estimator_cls, BaseEstimator):
+        # Notebook path: already a configured instance (e.g. Flow(max_epochs=200));
+        # each actor process receives its own copy
+        model = node.estimator_cls
+    elif isinstance(node.estimator_cls, (str, type)):
+        # YAML path: pass flat config dict as kwargs to __init__
+        model = LazyLoader(node.estimator_cls)(**node.estimator_config)
+    else:
+        raise TypeError(
+            f"estimator_cls must be a BaseEstimator instance, class, or "
+            f"string; got {type(node.estimator_cls).__name__}"
+        )
+    if num_threads is not None:
+        model.set_num_threads(num_threads)
+    model.setup(simulator_instance, theta_key=node.name,
+                condition_keys=node.evidence + node.scaffolds)
+    return model
+
+
+def _artifact(node) -> dict:
+    """Targets and config needed to rebuild the node's posterior from its checkpoint.
+
+    Empty when the node uses live objects or config values JSON cannot store.
+    """
+    if not (isinstance(node.estimator_cls, str) and isinstance(node.simulator_cls, str)):
+        return {}
+    artifact = {
+        "estimator": {"_target_": node.estimator_cls, **node.estimator_config},
+        "simulator": {"_target_": node.simulator_cls, **node.simulator_config},
+    }
+    try:
+        json.dumps(artifact)
+    except TypeError:
+        return {}
+    return artifact
+
+
+@ray.remote(concurrency_groups={"control": 1})
+class SampleActor:
+    """Serves prior, proposal and posterior samples of one node.
+
+    For estimator nodes it holds the best networks, which the train actor
+    publishes through ``set_state``. Status and log calls run on their own
+    thread, so they are answered while a sampling call runs.
+    """
+
+    def __init__(self, node, import_dirs=None, log_config=None, log_name=None, num_threads=None):
+        self.node = node
+        self.name = node.name
+        self._logger = _init_actor(import_dirs, log_config, log_name or node.name, num_threads)
+        self._status = "initializing"
+
+        self.simulator_instance = _make_simulator(node)
+        self.model = _make_model(node, self.simulator_instance, num_threads)
+        self.sampler = ModelSampler(self.model) if self.model is not None else None
+        self.rng = np.random.default_rng()
         self.parents = node.parents
-        self.evidence = node.evidence
-        self.scaffolds = node.scaffolds
-        self.graph = graph
-
-        # Mark initialization complete
         self._status = "idle"
-        self._stop_requested = False
 
-    def request_stop(self):
-        """Request graceful stop after the current training step."""
-        self._stop_requested = True
-        # Signal to estimator to stop after the current step (its acceptance test still runs)
-        if self.estimator_instance is not None and hasattr(self.estimator_instance, 'interrupt'):
-            self.estimator_instance.interrupt()
-
-    async def train(self, dataset_manager, observations={}, num_trailing_samples=None):
-        self._status = "training"
-        info(f"[{self.name}] Training started")
-        debug(f"Condition keys: {self.evidence + self.scaffolds}")
-
-        # Create BufferView - estimator controls what keys it needs
-        # Use estimator's device for cache if cache_on_device is enabled
-        cache_device = None
-        if hasattr(self.estimator_instance, 'cache_on_device') and self.estimator_instance.cache_on_device:
-            cache_device = str(getattr(self.estimator_instance, 'device', 'cpu'))
-        buffer = BufferView(dataset_manager, cache_device=cache_device)
-
-        await self.estimator_instance.train(buffer)
-        self._status = "done"
-
-        # Get final loss for completion message
-        final_loss = None
-        if getattr(self.estimator_instance, 'best_val_loss', None) is not None:
-            final_loss = self.estimator_instance.best_val_loss
-        elif hasattr(self.estimator_instance, 'history'):
-            losses = self.estimator_instance.history.get('val_loss', [])
-            if losses:
-                final_loss = min(losses)
-
-        if final_loss is not None:
-            info(f"[{self.name}] Training completed (loss: {final_loss:.4f})")
-        else:
-            info(f"[{self.name}] Training completed")
+    def set_state(self, tree):
+        """Install a state published by the train actor."""
+        self.sampler.apply(tree)
 
     # ==================== Ref/Array Boundary ====================
 
@@ -274,7 +235,7 @@ class NodeWrapper:
         for name, info in slices.items():
             if info[0] == 'broadcast':
                 val = all_values[info[1]]
-                result[name] = val[np.newaxis]  # (1, ...) — compact, consumer expands
+                result[name] = np.asarray(val)[np.newaxis]  # (1, ...) — compact, consumer expands
             else:
                 result[name] = np.stack(all_values[info[1]:info[2]])
         return result
@@ -308,8 +269,8 @@ class NodeWrapper:
         # Phase 2: assemble per-sample dicts
         return [{k: refs[i] for k, refs in ref_columns.items()} for i in range(n)]
 
-    def _chunked_sample(self, n_samples, condition_refs, method):
-        """Resolve refs, chunk, call method, return refs.
+    def _chunked_sample(self, n_samples, condition_refs, mode):
+        """Resolve refs, chunk, sample, return refs.
 
         Broadcast conditions (shape[0]==1) pass through without slicing,
         letting consumers expand efficiently (GPU expand or np.broadcast_to).
@@ -317,7 +278,7 @@ class NodeWrapper:
         Args:
             n_samples: Number of samples to generate
             condition_refs: Dict[str, List[ObjectRef]] or None
-            method: Internal method (_simulate, _sample_posterior, _sample_proposal)
+            mode: "prior", "proposal" or "posterior"
 
         Returns:
             List[Dict[str, ObjectRef]]: One dict per sample
@@ -325,68 +286,34 @@ class NodeWrapper:
         conditions = self._resolve_refs(condition_refs)
         chunk_size = getattr(self.node, 'sample_chunk_size', 0) or n_samples
         result = []
-        for start in range(0, n_samples, chunk_size):
-            end = min(start + chunk_size, n_samples)
-            chunk = {
-                k: v if v.shape[0] == 1 else v[start:end]
-                for k, v in conditions.items()
-            } if conditions else None
-            output = method(end - start, chunk)
-            result.extend(self._batch_to_refs(output))
+        self._status = "sampling"
+        try:
+            for start in range(0, n_samples, chunk_size):
+                end = min(start + chunk_size, n_samples)
+                chunk = {
+                    k: v if v.shape[0] == 1 else v[start:end]
+                    for k, v in conditions.items()
+                } if conditions else None
+                output = self._sample_chunk(end - start, chunk, mode)
+                result.extend(self._batch_to_refs(output))
+        finally:
+            self._status = "idle"
         return result
 
-    # ==================== Public Sampling Methods ====================
-
-    def sample(self, n_samples, condition_refs=None):
-        """Sample and return ObjectRefs. Handles chunking internally.
-
-        Args:
-            n_samples: Number of samples to generate
-            condition_refs: Dict[str, List[ObjectRef]] from parent nodes
-
-        Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample
-        """
-        return self._chunked_sample(n_samples, condition_refs, self._simulate)
-
-    def sample_posterior(self, n_samples, condition_refs=None):
-        """Sample from posterior and return ObjectRefs.
-
-        Args:
-            n_samples: Number of samples to generate
-            condition_refs: Dict[str, List[ObjectRef]] from condition nodes
-
-        Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample
-        """
-        return self._chunked_sample(n_samples, condition_refs, self._sample_posterior)
-
-    def sample_proposal(self, n_samples, condition_refs=None):
-        """Sample from proposal and return ObjectRefs.
-
-        Args:
-            n_samples: Number of samples to generate
-            condition_refs: Dict[str, List[ObjectRef]] from condition nodes
-
-        Returns:
-            List[Dict[str, ObjectRef]]: One dict per sample
-        """
-        return self._chunked_sample(n_samples, condition_refs, self._sample_proposal)
-
-    # ==================== Internal Sampling Methods ====================
+    def _sample_chunk(self, n_samples, conditions, mode):
+        if self.sampler is None:
+            return self._simulate(n_samples, conditions)
+        return self.sampler.sample(mode, n_samples, conditions or None, self.rng)
 
     def _simulate(self, n_samples, conditions=None):
-        """Call simulator/estimator with resolved arrays.
+        """Call the simulator with resolved arrays.
 
         Expands broadcast conditions (shape[0]==1) via np.broadcast_to
         so simulators see per-sample arrays.
 
         Returns:
-            dict: {'value': ndarray} or {'value': ndarray, 'log_prob': ndarray}
+            dict: {'value': ndarray}
         """
-        if self.estimator_instance is not None:
-            return self.estimator_instance.sample_prior(n_samples, conditions=conditions or None)
-        # Expand broadcast conditions for simulators
         if conditions:
             conditions = {
                 k: np.broadcast_to(v, (n_samples,) + v.shape[1:]) if v.shape[0] == 1 else v
@@ -401,82 +328,177 @@ class NodeWrapper:
                               for i in range(n_samples)])
         return {'value': value}
 
-    def _sample_posterior(self, n_samples, conditions=None):
-        """Call estimator posterior sampling with resolved arrays.
+    # ==================== Public Sampling Methods ====================
 
-        Returns:
-            dict: {'value': ndarray, 'log_prob': ndarray}
-        """
-        if self.estimator_instance is None:
-            return self._simulate(n_samples, conditions)
-        return self.estimator_instance.sample_posterior(n_samples, conditions=conditions)
+    def sample(self, n_samples, condition_refs=None):
+        """Forward (prior) samples as one dict of ObjectRefs per sample."""
+        return self._chunked_sample(n_samples, condition_refs, "prior")
 
-    def _sample_proposal(self, n_samples, conditions=None):
-        """Call estimator proposal sampling with resolved arrays.
+    def sample_posterior(self, n_samples, condition_refs=None):
+        """Posterior samples as one dict of ObjectRefs per sample."""
+        return self._chunked_sample(n_samples, condition_refs, "posterior")
 
-        Returns:
-            dict: {'value': ndarray, 'log_prob': ndarray}
-        """
-        if self.estimator_instance is None:
-            return self._simulate(n_samples, conditions)
-        return self.estimator_instance.sample_proposal(n_samples, conditions=conditions)
-
-    def save(self, node_dir):
-        if self.estimator_instance is not None:
-            node_dir.mkdir(parents=True, exist_ok=True)
-            return self.estimator_instance.save(node_dir)
+    def sample_proposal(self, n_samples, condition_refs=None):
+        """Proposal samples as one dict of ObjectRefs per sample."""
+        return self._chunked_sample(n_samples, condition_refs, "proposal")
 
     def load(self, node_dir):
-        if self.estimator_instance is not None:
-            node_dir.mkdir(parents=True, exist_ok=True)
-            return self.estimator_instance.load(node_dir)
+        if self.sampler is None:
+            return False
+        return self.sampler.load(Path(node_dir))
 
+    # ==================== Control ====================
+
+    @ray.method(concurrency_group="control")
     def get_status(self) -> dict:
-        """Return current status for monitoring."""
-        status = {
-            "name": self.name,
-            "status": self._status,
-            "samples": 0,
-            "round": 0,
-            "rounds_accepted": 0,
-            "current_epoch": 0,
-            "total_epochs": 0,
-            "loss": None,
-            "loss_history": [],
-        }
-
-        # Get estimator state if available
-        if self.estimator_instance is not None:
-            est = self.estimator_instance
-            if hasattr(est, "history"):
-                # val_loss is NaN for epochs without a validation
-                val_losses = [v for v in est.history.get("val_loss", []) if v == v]
-                status["loss_history"] = val_losses[-20:]
-                if status["loss_history"]:
-                    status["loss"] = status["loss_history"][-1]
-            status["round"] = getattr(est, "_round", 0)
-            status["rounds_accepted"] = getattr(est, "_rounds_accepted", 0)
-            status["current_epoch"] = getattr(est, "_round_epoch", 0)
-            if hasattr(est, "max_epochs"):
-                status["total_epochs"] = est.max_epochs
-            if hasattr(est, "history") and est.history.get("n_samples"):
-                status["samples"] = est.history["n_samples"][-1]
-
+        status = {"name": self.name, "status": self._status, "samples": 0}
+        if self.sampler is not None:
+            if self._status == "idle":
+                status["status"] = self.sampler.status
+            status["round"] = self.sampler.best_round
+            status["samples"] = self.sampler.samples_served
         return status
 
+    @ray.method(concurrency_group="control")
     def get_output_log_tail(self, num_lines: int = 50) -> list:
-        """Return recent log lines from output.log."""
         return self._logger.get_output_log_tail(num_lines)
 
+    @ray.method(concurrency_group="control")
     def shutdown(self):
-        """Shutdown the node and its logger."""
-        if hasattr(self, '_logger'):
-            self._logger.shutdown()
+        self._logger.shutdown()
+
+
+@ray.remote(concurrency_groups={"control": 1})
+class TrainActor:
+    """Trains the networks of one estimator node (named ``<node>/train``).
+
+    After every promotion it publishes the best state to the node's sample
+    actors and waits until they have installed it. Stop, status and log calls
+    run on their own thread, so they are answered while training runs.
+    """
+
+    def __init__(self, node, import_dirs=None, log_config=None, num_threads=None):
+        self.node = node
+        self.name = train_stream_name(node.name)
+        self._logger = _init_actor(import_dirs, log_config, self.name, num_threads)
+        self.model = _make_model(node, _make_simulator(node), num_threads)
+        meta = {
+            "theta_key": node.name,
+            "condition_keys": list(node.evidence + node.scaffolds),
+            "artifact": _artifact(node),
+        }
+        self.trainer = RoundTrainer(self.model, publish=self._publish, meta=meta)
+        self._samplers = []
+
+    def _publish(self, tree):
+        # One copy in the object store, shared by all sample actors
+        ref = ray.put(tree)
+        ray.get([s.set_state.remote(ref) for s in self._samplers])
+
+    def train(self, dataset_manager, samplers):
+        self._samplers = list(samplers)
+        info(f"[{self.name}] Training started")
+        buffer = BufferView(dataset_manager, cache_device=self.model.cache_device)
+        self.trainer.run(buffer)
+        loss = self.trainer.best_val_loss
+        if loss is not None:
+            info(f"[{self.name}] Training completed (loss: {loss:.4f})")
+        else:
+            info(f"[{self.name}] Training completed")
+
+    def save(self, node_dir):
+        return self.trainer.save(Path(node_dir))
+
+    def load(self, node_dir):
+        return self.trainer.load(Path(node_dir))
+
+    # ==================== Control ====================
+
+    @ray.method(concurrency_group="control")
+    def request_stop(self):
+        """Stop after the current training step; the acceptance test still runs."""
+        self.trainer.request_stop()
+
+    @ray.method(concurrency_group="control")
+    def get_status(self) -> dict:
+        trainer = self.trainer
+        # val_loss is NaN for epochs without a validation
+        val_losses = [v for v in trainer.history["val_loss"][-40:] if v == v][-20:]
+        n_samples = trainer.history["n_samples"]
+        return {
+            "name": self.name,
+            "status": trainer.status,
+            "samples": n_samples[-1] if n_samples else 0,
+            "round": trainer.round,
+            "rounds_accepted": trainer.rounds_accepted,
+            "current_epoch": trainer.round_epoch,
+            "total_epochs": trainer.config.max_epochs,
+            "loss": val_losses[-1] if val_losses else None,
+            "best_loss": trainer.best_val_loss,
+            "loss_history": val_losses,
+        }
+
+    @ray.method(concurrency_group="control")
+    def get_output_log_tail(self, num_lines: int = 50) -> list:
+        return self._logger.get_output_log_tail(num_lines)
+
+    @ray.method(concurrency_group="control")
+    def shutdown(self):
+        self._logger.shutdown()
+
+
+class SamplePool:
+    """The sample actors of one node; splits sampling calls across them."""
+
+    def __init__(self, actors):
+        self.actors = list(actors)
+
+    def call(self, method_name, n_samples, condition_refs=None):
+        """Distribute a sampling call across the actors, slicing ref lists.
+
+        Args:
+            method_name: Name of the method to call on each actor
+            n_samples: Total number of samples to generate
+            condition_refs: Dict[str, List[ObjectRef]] or None
+
+        Returns:
+            List[Dict[str, ObjectRef]]: Concatenated results from all actors
+        """
+        num_actors = len(self.actors)
+        per_actor = n_samples / num_actors
+        ranges = [(int(i * per_actor), int((i + 1) * per_actor)) for i in range(num_actors)]
+        ranges[-1] = (ranges[-1][0], n_samples)
+
+        futures = []
+        for actor, (start, end) in zip(self.actors, ranges):
+            if end - start <= 0:
+                # n_samples < num_actors leaves some actors with an empty
+                # slice; a zero-sample dispatch is rejected by _resolve_refs
+                # (explicit ValueError). Skip idle actors instead.
+                continue
+            chunk_refs = {k: v[start:end] for k, v in condition_refs.items()} if condition_refs else None
+            futures.append(getattr(actor, method_name).remote(end - start, condition_refs=chunk_refs))
+        result = []
+        for sample_list in ray.get(futures):
+            result.extend(sample_list or [])
+        return result
+
+    def status_ref(self):
+        return self.actors[0].get_status.remote()
+
+    def load(self, node_dir):
+        return ray.get([a.load.remote(node_dir) for a in self.actors])
+
+    def shutdown_refs(self):
+        return [a.shutdown.remote() for a in self.actors]
 
 
 class DeployedGraph:
-    def __init__(self, graph, import_dirs=None, log_config=None):
-        """Initialize a DeployedGraph with the given conceptual graph of nodes.
+    def __init__(self, graph, import_dirs=None, log_config=None, train=True):
+        """Deploy a graph as Ray actors.
+
+        Every node gets ``num_actors`` sample actors; estimator nodes also get
+        one train actor, unless ``train`` is False (sampling only).
 
         Note: This class uses falcon.info(), falcon.warning() etc. for logging.
         These functions use the module-level logger set by cli.py via set_logger().
@@ -484,85 +506,128 @@ class DeployedGraph:
         self.graph = graph
         self.import_dirs = import_dirs or []
         self.log_config = log_config or {}
-        self.wrapped_nodes_dict = {}
+        self.train = train
+        self.samplers: Dict[str, SamplePool] = {}
+        self.trainers: Dict[str, object] = {}  # node name -> TrainActor handle
         self._dataset_manager_actor = None
 
         self.deploy_nodes()
 
-    def _check_resource_budget(self):
-        """Raise if node GPU/CPU requests exceed cluster capacity."""
+    def _actor_options(self):
+        """(sample_options, train_options) per node; train options only if training."""
+        options = {}
+        for node in self.graph.node_list:
+            sample, train, notes = resolve_actor_options(node.actor_config, node.estimator_cls is not None)
+            for note in notes:
+                warning(f"[{node.name}] {note}")
+            options[node.name] = (sample, train if self.train else None)
+        return options
+
+    def _thread_counts(self, options):
+        """CPU threads of each estimator actor: its num_cpus, or an even share of this machine.
+
+        The train and sample actors of a node compute at the same time, so
+        each one gets its own part of the cores instead of all of them.
+        Simulator-only actors are limited only when they set num_cpus.
+        """
+        heavy = 0
+        for node in self.graph.node_list:
+            if node.estimator_cls is not None:
+                heavy += node.num_actors + (options[node.name][1] is not None)
+        share = max(1, _local_cpu_count() // max(1, heavy))
+
+        def threads(opts, is_estimator):
+            if "num_cpus" in opts:
+                return max(1, int(opts["num_cpus"]))
+            return share if is_estimator else None
+
+        counts = {}
+        for node in self.graph.node_list:
+            sample, train = options[node.name]
+            is_estimator = node.estimator_cls is not None
+            counts[node.name] = (threads(sample, is_estimator),
+                                 threads(train, True) if train is not None else None)
+        return counts
+
+    def _check_resource_budget(self, options):
+        """Warn if actor GPU/CPU requests exceed cluster capacity."""
         cluster = ray.cluster_resources()
         available_gpus = cluster.get("GPU", 0)
         available_cpus = cluster.get("CPU", 0)
 
-        total_gpus = sum(
-            node.actor_config.get("num_gpus", 0) * node.num_actors
-            for node in self.graph.node_list
-        )
-        total_cpus = sum(
-            node.actor_config.get("num_cpus", 1) * node.num_actors
-            for node in self.graph.node_list
-        )
+        requests = []  # (actor name, gpus, cpus)
+        for node in self.graph.node_list:
+            sample, train = options[node.name]
+            for _ in range(node.num_actors):
+                requests.append((node.name, sample.get("num_gpus", 0), sample.get("num_cpus", 1)))
+            if train is not None:
+                requests.append((train_stream_name(node.name), train.get("num_gpus", 0), train.get("num_cpus", 1)))
 
+        total_gpus = sum(r[1] for r in requests)
+        total_cpus = sum(r[2] for r in requests)
         if total_gpus > available_gpus:
-            node_summary = ", ".join(
-                f"{n.name}: {n.actor_config.get('num_gpus', 0)} GPU"
-                for n in self.graph.node_list
-                if n.actor_config.get("num_gpus", 0) > 0
-            )
+            summary = ", ".join(f"{name}: {gpus} GPU" for name, gpus, _ in requests if gpus > 0)
             warning(
-                f"GPU over-subscription: nodes request {total_gpus:.1f} GPUs "
+                f"GPU over-subscription: actors request {total_gpus:.1f} GPUs "
                 f"but only {available_gpus:.1f} available. "
-                f"Actors may hang — reduce ray.num_gpus in your config or increase "
-                f"available GPUs. ({node_summary})"
+                f"Actors may hang — reduce ray.num_train_gpus / ray.num_sample_gpus in your "
+                f"config or increase available GPUs. ({summary})"
             )
         if total_cpus > available_cpus:
             warning(
-                f"CPU over-subscription: nodes request {total_cpus} CPUs "
+                f"CPU over-subscription: actors request {total_cpus} CPUs "
                 f"but only {available_cpus:.0f} available — actors may queue."
             )
 
     def deploy_nodes(self):
         """Deploy all nodes in the graph as Ray actors."""
         info("Spinning up graph...")
-        self._check_resource_budget()
+        options = self._actor_options()
+        self._check_resource_budget(options)
+        threads = self._thread_counts(options)
 
         # Create all actors (non-blocking)
+        ready = {}  # display name -> list of ready refs
+        labels = {}  # display name -> thread note
         for node in self.graph.node_list:
-            if node.num_actors > 1:
-                self.wrapped_nodes_dict[node.name] = MultiplexNodeWrapper.remote(
-                    node.actor_config,
-                    node,
-                    self.graph,
-                    node.num_actors,
-                    self.import_dirs,
-                    self.log_config,
+            sample_opts, train_opts = options[node.name]
+            sample_threads, train_threads = threads[node.name]
+            actors = []
+            for i in range(node.num_actors):
+                opts = dict(sample_opts)
+                log_name = node.name if i == 0 else f"{node.name}/{i}"
+                if i > 0 and "name" in opts:
+                    opts["name"] = f"{opts['name']}/{i}"
+                actors.append(SampleActor.options(**opts).remote(
+                    node, self.import_dirs, self.log_config, log_name, sample_threads
+                ))
+            self.samplers[node.name] = SamplePool(actors)
+            ready[node.name] = [a.__ray_ready__.remote() for a in actors]
+            if sample_threads is not None:
+                labels[node.name] = f" ({sample_threads} CPU threads)"
+            if train_opts is not None:
+                trainer = TrainActor.options(**train_opts).remote(
+                    node, self.import_dirs, self.log_config, train_threads
                 )
-            else:
-                self.wrapped_nodes_dict[node.name] = NodeWrapper.options(
-                    **_ray_options(node.actor_config)
-                ).remote(node, self.graph, self.import_dirs, self.log_config)
+                self.trainers[node.name] = trainer
+                ready[train_stream_name(node.name)] = [trainer.__ray_ready__.remote()]
+                labels[train_stream_name(node.name)] = f" ({train_threads} CPU threads)"
 
-        # Wait for all actors to initialize and register with monitor bridge
-        for name, actor in self.wrapped_nodes_dict.items():
+        # Wait for all actors to initialize
+        for name, refs in ready.items():
             try:
-                # MultiplexNodeWrapper has wait_ready(), NodeWrapper uses __ray_ready__
-                if hasattr(actor, 'wait_ready'):
-                    ready_ref = actor.wait_ready.remote()
-                else:
-                    ready_ref = actor.__ray_ready__.remote()
-                done, _ = ray.wait([ready_ref], timeout=60.0)
-                if not done:
+                done, _ = ray.wait(refs, num_returns=len(refs), timeout=60.0)
+                if len(done) < len(refs):
                     raise RuntimeError(
-                        f"Node '{name}' did not initialize within 60 s. "
+                        f"Actor '{name}' did not initialize within 60 s. "
                         "This usually means Ray cannot schedule the actor — "
-                        "check that ray.num_gpus/num_cpus in your config do not "
-                        "exceed available cluster resources."
+                        "check that ray.num_train_gpus / num_sample_gpus / num_cpus in your "
+                        "config do not exceed available cluster resources."
                     )
-                ray.get(done[0])  # re-raise any actor-side exception
-                info(f"  ✓ {name}")
+                ray.get(done)  # re-raise any actor-side exception
+                info(f"  ✓ {name}{labels.get(name, '')}")
             except ray.exceptions.RayActorError as e:
-                raise RuntimeError(f"Failed to initialize node '{name}': {e}") from e
+                raise RuntimeError(f"Failed to initialize actor '{name}': {e}") from e
 
     def _merge_refs(self, sample_refs, node_refs):
         """Merge node refs into sample refs list.
@@ -595,6 +660,8 @@ class DeployedGraph:
             return {}
         result = {}
         for name, arr in conditions.items():
+            # Only numpy crosses actor boundaries
+            arr = arr.detach().cpu().numpy() if hasattr(arr, "detach") else np.asarray(arr)
             if arr.shape[0] == 1:
                 ref = ray.put(arr[0])
                 result[name] = [ref] * num_samples
@@ -652,10 +719,7 @@ class DeployedGraph:
                 for evidence in self.graph.get_evidence(name):
                     node_condition_refs[evidence] = ref_trace[evidence]
 
-            remote_method = getattr(self.wrapped_nodes_dict[name], sample_method)
-            node_refs = ray.get(
-                remote_method.remote(num_samples, condition_refs=node_condition_refs)
-            )
+            node_refs = self.samplers[name].call(sample_method, num_samples, node_condition_refs)
 
             # Update trace with value refs for downstream nodes
             ref_trace[name] = [d[f'{name}.value'] for d in node_refs]
@@ -765,10 +829,14 @@ class DeployedGraph:
         return {key: np.stack(all_values[start:end]) for key, (start, end) in key_slices.items()}
 
     def get_status(self, timeout: float = 2.0) -> dict:
-        """Return aggregated status from all node actors and the dataset manager."""
-        node_refs = {name: actor.get_status.remote() for name, actor in self.wrapped_nodes_dict.items()}
+        """Status of all actors, keyed by actor name (``z``, ``z/train``), and of the buffer."""
+        refs = {}
+        for node in self.graph.node_list:
+            refs[node.name] = self.samplers[node.name].status_ref()
+            if node.name in self.trainers:
+                refs[train_stream_name(node.name)] = self.trainers[node.name].get_status.remote()
         nodes = {}
-        for name, ref in node_refs.items():
+        for name, ref in refs.items():
             try:
                 nodes[name] = ray.get(ref, timeout=timeout)
             except Exception as e:
@@ -783,7 +851,10 @@ class DeployedGraph:
 
     def shutdown(self):
         """Shut down the deployed graph and release resources."""
-        ray.get([node.shutdown.remote() for node in self.wrapped_nodes_dict.values()])
+        refs = [t.shutdown.remote() for t in self.trainers.values()]
+        for pool in self.samplers.values():
+            refs.extend(pool.shutdown_refs())
+        ray.get(refs)
 
     def launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
         """Launch training.
@@ -797,8 +868,10 @@ class DeployedGraph:
         self._launch(dataset_manager, observations, graph_path=graph_path, stop_check=stop_check)
 
     def _launch(self, dataset_manager, observations, graph_path=None, stop_check=None):
-        # Load graph if saved model files exist (not just logging directories)
-        if graph_path is not None and any(graph_path.glob("*/*.pth")):
+        # Resume if saved checkpoints exist (not just logging directories)
+        if graph_path is not None and any(
+            has_checkpoint(Path(graph_path) / name) for name in self.graph.node_dict
+        ):
             self.load(graph_path)
 
         dataset_manager = dataset_manager.dataset_manager_actor
@@ -819,17 +892,13 @@ class DeployedGraph:
         info("")
         info("Starting analysis.")
 
-        # Training - start all training nodes
+        # Training - start all train actors; each publishes to its node's sample actors
         train_futures = {}  # Map future -> node_name for completion tracking
-        for name, node in self.graph.node_dict.items():
-            if node.train:
-                wrapped_node = self.wrapped_nodes_dict[name]
-                train_future = wrapped_node.train.remote(
-                    dataset_manager, observations=observations
-                )
-                train_futures[train_future] = name
-                info(f"[{name}] Training started")
-                time.sleep(1)
+        for name, trainer in self.trainers.items():
+            train_future = trainer.train.remote(dataset_manager, self.samplers[name].actors)
+            train_futures[train_future] = name
+            info(f"[{train_stream_name(name)}] Training started")
+            time.sleep(1)
 
         simulate_interval = ray.get(dataset_manager.get_simulate_interval.remote())
 
@@ -837,6 +906,7 @@ class DeployedGraph:
         last_status_log = time.time()
         STATUS_LOG_INTERVAL = 60  # seconds
 
+        latent_nodes = {n.name for n in self.graph.node_list if n.estimator_cls is not None}
         train_future_list = list(train_futures.keys())
         stop_requested = False
         pending_append = None
@@ -845,12 +915,11 @@ class DeployedGraph:
             if not stop_requested and stop_check is not None and stop_check():
                 info("Graceful stop requested, finishing the current round's acceptance test...")
                 stop_requested = True
-                # Signal all training nodes to stop after their current step
-                for name, node in self.wrapped_nodes_dict.items():
+                for trainer in self.trainers.values():
                     try:
-                        ray.get(node.request_stop.remote(), timeout=1)
+                        ray.get(trainer.request_stop.remote(), timeout=10)
                     except Exception:
-                        pass  # Node may not support request_stop
+                        pass  # the trainer may have finished already
 
             # Short poll: the loop's own pacing comes from the time.sleep()
             # below, so a long timeout here just adds to simulate_interval.
@@ -863,15 +932,13 @@ class DeployedGraph:
                 time.sleep(simulate_interval)
                 num_new_samples = ray.get(dataset_manager.num_resims.remote())
                 if num_new_samples > 0:
-                    # sample_proposal interleaves with training via async yield points —
-                    # no pause needed. Forward simulation runs on separate actors concurrently.
+                    # Proposals come from the sample actors, which run
+                    # independently of training.
                     proposal_refs = self.sample_proposal(num_new_samples, observations)
                     condition_refs = self._extract_value_refs(proposal_refs)
                     # Only keep latent nodes (with estimators) from proposal.
                     # Deterministic intermediates and observed nodes must be
                     # re-simulated to maintain data consistency.
-                    latent_nodes = {n.name for n in self.graph.node_list
-                                    if n.estimator_cls is not None}
                     condition_refs = {k: v for k, v in condition_refs.items()
                                       if k in latent_nodes}
                     sample_refs = self._execute_graph(
@@ -903,13 +970,13 @@ class DeployedGraph:
                 ray.get(completed_task)  # Retrieve result or raise exception
                 node_name = train_futures.get(completed_task)
                 if node_name:
-                    # Get final loss from node status
-                    status = ray.get(self.wrapped_nodes_dict[node_name].get_status.remote())
-                    loss = status.get("loss")
+                    status = ray.get(self.trainers[node_name].get_status.remote())
+                    loss = status.get("best_loss")
+                    name = train_stream_name(node_name)
                     if loss is not None:
-                        info(f"[{node_name}] Training completed (loss: {loss:.4f})")
+                        info(f"[{name}] Training completed (loss: {loss:.4f})")
                     else:
-                        info(f"[{node_name}] Training completed")
+                        info(f"[{name}] Training completed")
 
         # Flush the last deferred buffer append before shutdown.
         if pending_append is not None:
@@ -923,40 +990,36 @@ class DeployedGraph:
         info("Analysis completed.")
 
     def _log_status(self, dataset_manager):
-        """Log periodic status of active training nodes and buffer (separate lines)."""
-        # Log progress for each active training node
-        for name, node in self.wrapped_nodes_dict.items():
-            status = ray.get(node.get_status.remote())
+        """Log periodic status of active train actors and buffer (separate lines)."""
+        for name, trainer in self.trainers.items():
+            status = ray.get(trainer.get_status.remote())
             if status["status"] == "training":
                 rnd = status.get("round", 0)
                 epoch = status.get("current_epoch", 0)
                 total = status.get("total_epochs", 0)
                 loss = status.get("loss")
                 loss_str = f"{loss:.2f}" if loss is not None else "?"
-                info(f"[{name}] round {rnd}, epoch {epoch}/{total}, loss {loss_str}")
+                info(f"[{train_stream_name(name)}] round {rnd}, epoch {epoch}/{total}, loss {loss_str}")
 
         # Log buffer stats (including total ever simulated)
         stats = ray.get(dataset_manager.get_store_stats.remote())
         info(f"Buffer: {stats['training']} train, {stats['validation']} val ({stats['total_length']} total)")
 
     def save(self, graph_dir):
-        """Save the deployed graph node status."""
-        graph_dir = graph_dir.expanduser().resolve()
+        """Save the checkpoints of all trained nodes."""
+        graph_dir = Path(graph_dir).expanduser().resolve()
         graph_dir.mkdir(parents=True, exist_ok=True)
-        save_futures = []
-        for name, node in self.wrapped_nodes_dict.items():
-            node_dir = graph_dir / name
-            save_future = node.save.remote(node_dir)
-            save_futures.append(save_future)
-        ray.get(save_futures)
+        ray.get([trainer.save.remote(graph_dir / name) for name, trainer in self.trainers.items()])
 
     def load(self, graph_dir):
-        """Load the deployed graph nodes status."""
+        """Load the checkpoints of all estimator nodes into their actors."""
         info(f"Loading deployed graph from: {graph_dir}")
-        load_futures = []
-        for name, node in self.wrapped_nodes_dict.items():
-            node_dir = Path(graph_dir) / name
-            load_future = node.load.remote(node_dir)
-            load_futures.append(load_future)
-        ray.get(load_futures)
-
+        refs = []
+        for node in self.graph.node_list:
+            if node.estimator_cls is None:
+                continue
+            node_dir = Path(graph_dir) / node.name
+            refs.extend(a.load.remote(node_dir) for a in self.samplers[node.name].actors)
+            if node.name in self.trainers:
+                refs.append(self.trainers[node.name].load.remote(node_dir))
+        ray.get(refs)
