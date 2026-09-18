@@ -46,19 +46,20 @@ class ModelSampler:
         return "prior" if self.round <= self.prior_rounds else "ready"
 
     def apply(self, tree: StateTree) -> None:
-        """Install a published state (round counters, and weights if present)."""
+        """Install a published state (round counters, and weights and proposal state if present)."""
         self.meta.update(tree.get("meta", {}))
-        if "groups" not in tree:
-            return
-        if not self.model.built:
-            if tree.get("init") is None:
-                raise RuntimeError("Received network weights before the init data needed to build the networks")
-            self.model.build(tree["init"])
-        for name, state in tree["groups"].items():
-            self.model.import_state(name, state)
-        if not self.has_weights:
-            info(f"Serving the best network from round {self.best_round}")
-        self.has_weights = True
+        if "groups" in tree:
+            if not self.model.built:
+                if tree.get("init") is None:
+                    raise RuntimeError("Received network weights before the init data needed to build the networks")
+                self.model.build(tree["init"])
+            for name, state in tree["groups"].items():
+                self.model.import_state(name, state)
+            if not self.has_weights:
+                info(f"Serving the best network from round {self.best_round}")
+            self.has_weights = True
+        if "proposal" in tree:
+            self.model.import_proposal(tree["proposal"])
 
     def load(self, node_dir) -> bool:
         """Install the checkpoint in ``node_dir``; False if there is none."""

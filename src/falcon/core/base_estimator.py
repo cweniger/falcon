@@ -3,7 +3,7 @@
 from abc import ABC, abstractmethod
 from dataclasses import dataclass, fields
 from pathlib import Path
-from typing import Any, Dict, List, Optional
+from typing import Any, Dict, Iterable, List, Optional
 
 import numpy as np
 
@@ -185,6 +185,50 @@ class BaseEstimator(ABC):
             Optional dict of extra metrics for the epoch summary line.
         """
         return None
+
+    def on_train_start(self, batches: Iterable) -> None:
+        """Called once per round before the first epoch, with the round's training batches.
+
+        Runs after the best network was validated on the round's data, so
+        data-dependent set-up done here (e.g. refitting a normalisation to the
+        whole training set) does not affect that baseline. The batches are
+        not shuffled.
+        """
+
+    def on_round_end(self, promoted: Dict[str, bool]) -> bool:
+        """Called after the acceptance test, with the best state of every group installed.
+
+        Args:
+            promoted: Whether each group was promoted in this round.
+
+        Returns:
+            True if the proposal state changed and must be published.
+        """
+        return False
+
+    # ==================== Proposal state ====================
+
+    def set_observations(self, conditions: Conditions) -> None:
+        """Condition values at the observation, given to the train actor before training.
+
+        Only called when every condition of the node is fixed by the
+        observations; evidence derived from them is already simulated.
+
+        Args:
+            conditions: Condition arrays (numpy) with a leading dimension of 1.
+        """
+
+    def export_proposal(self, full: bool) -> Optional[StateTree]:
+        """Proposal state that is not part of any network group; None if there is none.
+
+        Args:
+            full: Everything needed to resume training (for the checkpoint)
+                instead of only what sampling needs (for the sample actors).
+        """
+        return None
+
+    def import_proposal(self, tree: StateTree) -> None:
+        """Install a tree from ``export_proposal()``."""
 
     # ==================== Sampling ====================
 

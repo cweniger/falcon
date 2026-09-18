@@ -23,26 +23,33 @@ class RoundTrainer:
        then stays fixed for the whole round.
     2. Restore the best state and validate it once: this is the best
        network's loss on the round's validation set.
-    3. Train for up to ``max_epochs`` epochs, validating every
-       ``val_every_epochs`` epochs and at the last epoch. The round ends early
-       once the best validation loss is ``patience_epochs`` epochs old.
+    3. Hand the training set to the model (``on_train_start``), then train
+       for up to ``max_epochs`` epochs, validating every ``val_every_epochs``
+       epochs and at the last epoch. The round ends early once the best
+       validation loss is ``patience_epochs`` epochs old.
     4. Restore each network group to its best validated epoch of the round,
        validate it, and promote the groups that beat the best network. The
        round is accepted if the primary group was promoted.
-    5. Publish the new best state, then, after an accepted round, run one
-       discard sweep over the training and validation sets.
+    5. Install the best state and let the model update its proposal state
+       (``on_round_end``).
+    6. Publish the new best state and proposal state, then, after an
+       accepted round, run one discard sweep over the training and
+       validation sets.
 
     Training stops after ``patience_rounds`` rejected rounds in a row, after
     ``max_rounds`` rounds, or on ``request_stop()``.
 
     The trainer owns everything that is not network state: round counters,
-    the best state (as numpy trees), history and the checkpoint.
+    the best state (as numpy trees), history and the checkpoint. A model's
+    proposal state (``export_proposal``) belongs to the model; the trainer
+    only publishes and saves it.
 
     Args:
         model: The model to train (``BaseEstimator``).
         publish: Callable(tree) that hands a state to the samplers and returns
             once they have installed it. Called with the round counters at the
-            start of every round and with the full state after a promotion.
+            start of every round, with the full state after a promotion, and
+            with the proposal state whenever it changed.
         meta: Extra entries for the published ``meta`` (e.g. node keys).
     """
 
@@ -118,22 +125,28 @@ class RoundTrainer:
             "total_epochs": self.total_epochs,
         }
 
-    def state(self, include_init: bool = True) -> StateTree:
-        """The best state in the published format."""
+    def state(self) -> StateTree:
+        """The best state in the checkpoint format."""
         tree: StateTree = {"meta": self.meta()}
         if self.has_best:
             tree["groups"] = dict(self.best)
-            if include_init:
-                tree["init"] = self.init
+            tree["init"] = self.init
+        proposal = self.model.export_proposal(full=True)
+        if proposal is not None:
+            tree["proposal"] = proposal
         return tree
 
-    def _publish(self, weights: bool) -> None:
-        if not weights:
-            self.publish({"meta": self.meta()})
-            return
-        # The samplers build their networks once, so init is sent only the first time
-        self.publish(self.state(include_init=not self._init_published))
-        self._init_published = True
+    def _publish(self, weights: bool, proposal: bool = False) -> None:
+        tree: StateTree = {"meta": self.meta()}
+        if weights:
+            tree["groups"] = dict(self.best)
+            # The samplers build their networks once, so init is sent only the first time
+            if not self._init_published:
+                tree["init"] = self.init
+            self._init_published = True
+        if proposal:
+            tree["proposal"] = self.model.export_proposal(full=False)
+        self.publish(tree)
 
     # ==================== Training loop ====================
 
@@ -184,14 +197,18 @@ class RoundTrainer:
                 if baseline is None:
                     break  # stopped before training
 
+            self.model.on_train_start(train_cache.iter_batches(cfg.batch_size))
             epochs = self._train_epochs(train_cache, val_cache, t0)
             if epochs == 0:
                 break  # interrupted before the first validation: nothing to test
 
             accepted, promoted, record = self._accept_round(val_cache, baseline)
             record.update(epochs=epochs, n_train=train_cache.count, n_val=val_cache.count)
-            if promoted:
-                self._publish(weights=True)
+            proposal = False
+            if not self.stopped:  # graceful stop: the proposal is not moved
+                proposal = self._end_round(record)
+            if promoted or proposal:
+                self._publish(weights=promoted, proposal=proposal)
 
             if accepted:
                 self.stall = 0
@@ -224,6 +241,13 @@ class RoundTrainer:
         for name, tree in self.best.items():
             self.model.import_state(name, tree)
         self.model.on_round_start()
+
+    def _end_round(self, record) -> bool:
+        """Install the best state and let the model update its proposal; True if it changed."""
+        for name, tree in self.best.items():
+            self.model.import_state(name, tree)
+        promoted = {name: g["promoted"] for name, g in record["groups"].items()}
+        return bool(self.model.on_round_end(promoted))
 
     def _train_epochs(self, train_cache, val_cache, t0) -> int:
         """Train the current networks for one round.
@@ -466,6 +490,8 @@ class RoundTrainer:
             self.model.build(self.init)
         for name, state in self.best.items():
             self.model.import_state(name, state)
+        if "proposal" in tree:
+            self.model.import_proposal(tree["proposal"])
         return True
 
     def _save_history(self, path: Path) -> None:
