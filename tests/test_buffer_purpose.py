@@ -17,6 +17,8 @@ def _make_actor(min_samples=64, max_samples=128, validation_fraction=0.15,
     actor.max_samples = max_samples
     actor.simulate_count = simulate_count
     actor.simulate_when_full = simulate_when_full
+    actor.simulate_per_round = 0
+    actor._sim_budget = 0
     actor.snapshot_every = 0
     actor.snapshots_path = None
     actor._sample_counter = 0
@@ -163,3 +165,14 @@ def test_rejects_invalid_fraction(fraction):
 def test_rejects_tiny_min_samples():
     with pytest.raises(ValueError):
         _make_actor(min_samples=1)
+
+
+def test_round_synchronous_simulation_waits_for_a_grant():
+    actor = _make_actor(min_samples=64, max_samples=100, simulate_count=32, simulate_when_full=False)
+    actor.simulate_per_round = 48
+    assert actor.num_resims() == 0           # nothing until a round grants its quota
+    assert actor.grant_simulations() == 48   # buffer total to wait for
+    assert [actor.num_resims() for _ in range(3)] == [32, 16, 0]
+    actor.simulate_per_round = 0
+    assert actor.grant_simulations() is None
+

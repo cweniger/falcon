@@ -41,3 +41,6 @@ class FakeBuffer:
 
     def get_stats(self):
         return {"total_length": 15}
+
+    def grant_simulations(self):
+        return None  # continuous simulation

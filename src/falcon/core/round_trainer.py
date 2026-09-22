@@ -167,7 +167,15 @@ class RoundTrainer:
 
         self.status = "training"
         t0 = time.perf_counter()
+        sims_target = None  # round-synchronous simulation: buffer size to wait for
         while not self.stopped:
+            if sims_target is not None:
+                self.status = "waiting for simulations"
+                while not self.stopped and buffer.get_stats()["total_length"] < sims_target:
+                    time.sleep(0.5)
+                self.status = "training"
+                if self.stopped:
+                    break
             train_cache.refresh()
             val_cache.refresh()
             if self.stopped:
@@ -182,7 +190,7 @@ class RoundTrainer:
 
             self.round += 1
             train_batches = max(1, train_cache.count // cfg.batch_size)
-            val_batches = -(-val_cache.count // cfg.batch_size)
+            val_batches = -(-val_cache.count // self._val_batch_size)
             info(
                 f"Round {self.round} starting | n_train={train_cache.count} "
                 f"({train_batches} batches of {cfg.batch_size}) | "
@@ -219,6 +227,9 @@ class RoundTrainer:
             else:
                 self.stall += 1
             self._log_round(record, buffer)
+            if not self.stopped:
+                # After the proposal is published and the sweep has made room
+                sims_target = buffer.grant_simulations()
 
             if self.stopped:
                 break
@@ -315,10 +326,15 @@ class RoundTrainer:
                 return None
         return {k: v / num_batches for k, v in sums.items()}
 
+    @property
+    def _val_batch_size(self) -> int:
+        """Batch size of passes that do not train: validation and the discard sweep."""
+        return self.config.val_batch_size or self.config.batch_size
+
     def _validate(self, val_cache, interruptible: bool = True):
         """One full pass over the validation set; None if interrupted."""
         sums, num_samples = {}, 0
-        for batch in val_cache.iter_batches(self.config.batch_size):
+        for batch in val_cache.iter_batches(self._val_batch_size):
             self._record_ids("val_ids", batch)
             metrics = self.model.evaluate(batch)
             for k, v in metrics.items():
@@ -371,7 +387,7 @@ class RoundTrainer:
         """Run the discard test once over every training and validation sample."""
         counts, flagged = {"n_discarded_train": 0, "n_discarded_val": 0}, []
         for name, cache in (("train", train_cache), ("val", val_cache)):
-            for batch in cache.iter_batches(self.config.batch_size):
+            for batch in cache.iter_batches(self._val_batch_size):
                 mask = np.asarray(self.model.discard_mask(batch)).astype(bool)
                 ids = batch._ids[mask]
                 flagged.append(ids)

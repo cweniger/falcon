@@ -105,6 +105,20 @@ conditions at the observation for this; evidence derived from observed nodes
 is simulated once at launch. The proposal state is published whenever it
 changes and is saved in `best_state.npz`.
 
+### Round-synchronous simulation
+
+By default simulation runs all the time, so the samples simulated while round
+*k* trains come from the proposal of round *k − 1*. With
+`buffer.simulate_per_round: N` the buffer simulates only between rounds: after
+a round has published its proposal and the discard sweep has made room, `N`
+samples are drawn from that proposal (fewer if `max_samples` leaves less room
+with `simulate_when_full: false`), and the next round starts once they are in
+the buffer. Set `simulate_count` to `N` so that the quota is one proposal
+request, and `simulate_interval` small. This is the schedule of sequential
+methods with a fixed simulation budget per round; it costs the time the GPU
+idles while waiting, and saves the samples that a contracting proposal would
+otherwise discard again one round later.
+
 ### Discarding samples
 
 With `discard_samples: true`, every accepted round ends with one discard sweep:
@@ -148,6 +162,7 @@ All parameters are flat keyword arguments of the estimator (see
 | `prior_rounds` | 0 | Rounds that simulate from the prior before switching to the learned proposal |
 | `discard_samples` | `true` (Flow) | Run the discard sweep after accepted rounds |
 | `batch_size` | 128 | Samples per step |
+| `val_batch_size` | `null` | Samples per batch in validation and in the discard sweep (`null` = `batch_size`) |
 
 Patience is checked only when validating, so with `val_every_epochs: 3` and
 `patience_epochs: 12` a round ends at the fourth validation without improvement.
