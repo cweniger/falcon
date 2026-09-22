@@ -110,8 +110,10 @@ changes and is saved in `best_state.npz`.
 With continuous simulation, the samples simulated while round *k* trains
 come from the proposal of round *k − 1*. `wait_for_sims: N` on the estimator
 makes the next round wait until `N` samples have been simulated after the
-round published its proposal; simulation itself runs on as before, so only
-the rounds pause, not the buffer. It is set per node, and a node's wait does
+round published its proposal. Simulation itself runs on as before, so only
+the rounds pause, not the buffer; with `buffer.simulate_while_training:
+false` it pauses too while every node trains, so no samples are drawn from
+proposals that are about to be replaced. It is set per node, and a node's wait does
 not affect the other nodes' rounds. This is the schedule of sequential
 methods with a fixed simulation budget per round.
 

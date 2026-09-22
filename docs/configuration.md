@@ -66,6 +66,7 @@ buffer:
 | `validation_fraction` | float | `0.15` | Share of samples held out for validation only (early stopping, LR schedule, best checkpoint). Assigned by insertion order and spread evenly over the buffer; a sample's role never changes, and validation samples age out and are discarded under the same rules as training samples. Must lie in (0, 0.5] |
 | `simulate_count` | int | `64` | Number of new samples generated per simulation round. For simulators taking >1s per sample, keep this small (4–16) to avoid long delays between buffer updates; for fast simulators, increase to reduce Ray overhead. |
 | `simulate_interval` | float | `1` | Seconds between simulation rounds |
+| `simulate_while_training` | bool | `true` | If `false`, simulation pauses while every estimator node is inside a training round, and runs while at least one node waits for simulations (`wait_for_sims`) or has finished. With one node and `wait_for_sims: N`, each round then trains on exactly `N` new samples from the proposal the previous round published |
 | `simulate_when_full` | bool | `true` | If `true`, simulation continues after `max_samples` is reached and old samples are replaced; if `false`, simulation stops once the buffer is full |
 | `snapshot_every` | int | `0` | Save every Nth sample to `{paths.buffer}/snapshots/` for inspection (0 = disabled, 1 = all, 10 = every 10th sample) |
 | `simulate_chunk_size` | int | `0` | Max samples per individual simulation call (0 = full `simulate_count` in one call) |

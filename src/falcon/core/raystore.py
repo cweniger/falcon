@@ -33,6 +33,7 @@ class BufferConfig:
     simulate_interval: float = 1.0
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
+    simulate_while_training: bool = True  # False: pause while every train actor is in a round
     initial_samples_path: Optional[str] = None
     snapshot_every: int = 0
 
@@ -160,6 +161,7 @@ class DatasetManagerActor:
         initial_samples_path,
         simulate_when_full,
         snapshot_every,
+        simulate_while_training=True,
         log_config=None,
         snapshots_path=None,
     ):
@@ -168,6 +170,7 @@ class DatasetManagerActor:
         self._set_validation_fraction(validation_fraction)
         self.simulate_count = simulate_count
         self.simulate_when_full = simulate_when_full
+        self.simulate_while_training = simulate_while_training
         self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
@@ -233,6 +236,9 @@ class DatasetManagerActor:
 
     def get_simulate_interval(self):
         return self.simulate_interval
+
+    def get_simulate_while_training(self):
+        return self.simulate_while_training
 
     def get_simulate_chunk_size(self):
         return self.simulate_chunk_size
