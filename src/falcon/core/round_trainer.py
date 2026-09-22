@@ -167,7 +167,7 @@ class RoundTrainer:
 
         self.status = "training"
         t0 = time.perf_counter()
-        sims_target = None  # round-synchronous simulation: buffer size to wait for
+        sims_target = None  # wait_for_sims: buffer size the next round waits for
         while not self.stopped:
             if sims_target is not None:
                 self.status = "waiting for simulations"
@@ -227,9 +227,10 @@ class RoundTrainer:
             else:
                 self.stall += 1
             self._log_round(record, buffer)
-            if not self.stopped:
-                # After the proposal is published and the sweep has made room
-                sims_target = buffer.grant_simulations()
+            if cfg.wait_for_sims and not self.stopped:
+                # The proposal is published: the next round waits for this many
+                # samples drawn from it
+                sims_target = buffer.get_stats()["total_length"] + cfg.wait_for_sims
 
             if self.stopped:
                 break

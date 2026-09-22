@@ -33,7 +33,6 @@ class BufferConfig:
     simulate_interval: float = 1.0
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
-    simulate_per_round: int = 0  # > 0: simulate only between training rounds, this many per round
     initial_samples_path: Optional[str] = None
     snapshot_every: int = 0
 
@@ -161,7 +160,6 @@ class DatasetManagerActor:
         initial_samples_path,
         simulate_when_full,
         snapshot_every,
-        simulate_per_round=0,
         log_config=None,
         snapshots_path=None,
     ):
@@ -170,11 +168,6 @@ class DatasetManagerActor:
         self._set_validation_fraction(validation_fraction)
         self.simulate_count = simulate_count
         self.simulate_when_full = simulate_when_full
-        # Round-synchronous simulation: nothing is simulated until a trainer grants a
-        # round's quota (see grant_simulations), so every new sample comes from the
-        # proposal that the round just published
-        self.simulate_per_round = max(0, int(simulate_per_round))
-        self._sim_budget = 0
         self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
@@ -229,31 +222,14 @@ class DatasetManagerActor:
     def num_initial_samples(self):
         return self.min_samples
 
-    def _room(self):
-        """Samples that still fit under max_samples (unbounded when simulate_when_full)."""
+    def num_resims(self):
         if self.simulate_when_full:
             return self.simulate_count
-        return max(0, self.max_samples - int((self.status == SampleStatus.ACTIVE).sum()))
-
-    def num_resims(self):
-        n = min(self.simulate_count, self._room())
-        if self.simulate_per_round:
-            n = min(n, self._sim_budget)
-            self._sim_budget -= n
-        return n
-
-    def grant_simulations(self):
-        """Grant one round's quota of new simulations.
-
-        Returns:
-            Total number of samples the buffer will have held once the quota is
-            simulated, or None if simulation is not round-synchronous.
-        """
-        if not self.simulate_per_round:
-            return None
-        room = self.simulate_per_round if self.simulate_when_full else self._room()
-        self._sim_budget = min(self.simulate_per_round, room)
-        return len(self.ray_store) + self._sim_budget
+        else:
+            num_active_samples = int((self.status == SampleStatus.ACTIVE).sum())
+            return min(
+                self.simulate_count, self.max_samples - num_active_samples
+            )
 
     def get_simulate_interval(self):
         return self.simulate_interval
@@ -750,10 +726,6 @@ class BufferView:
     def get_stats(self):
         """Get buffer statistics (total samples, etc.)."""
         return ray.get(self._dataset_manager.get_store_stats.remote())
-
-    def grant_simulations(self):
-        """Grant one round's simulations; the total to wait for, or None if simulation is continuous."""
-        return ray.get(self._dataset_manager.grant_simulations.remote())
 
 
 def get_ray_dataset_manager(

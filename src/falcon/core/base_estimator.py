@@ -25,6 +25,7 @@ class RoundConfig:
     prior_rounds: int = 0
     batch_size: int = 128
     val_batch_size: Optional[int] = None  # validation and discard sweep; None = batch_size
+    wait_for_sims: int = 0  # after a round, wait until this many new samples were simulated
     max_cache_samples: int = 0
     cache_on_device: bool = False
     discard_samples: bool = False

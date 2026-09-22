@@ -341,7 +341,7 @@ class FlowMatching(TorchModel):
     ``buffer.min_samples`` as the floor, ``buffer.max_samples`` as the cap,
     ``buffer.simulate_when_full: false`` and ``buffer.validation_fraction:
     0.2``; its 4000 simulations per round, drawn from the new outer region,
-    correspond to ``buffer.simulate_per_round: 4000``.
+    correspond to ``wait_for_sims: 4000``.
 
     Args:
         max_epochs: Maximum epochs per round.
@@ -353,6 +353,10 @@ class FlowMatching(TorchModel):
             (``None`` = ``batch_size``). The density ODE costs about the same
             for 128 rows as for thousands, so large batches make it cheap.
         embed_chunk: Rows per forward pass of the embedding outside training steps.
+        wait_for_sims: After each round, wait until this many samples have
+            been simulated since the round published its proposal, so the
+            next round trains on data from the new proposal region (0 = start
+            the next round at once).
         patience_epochs: End the round once the best validation loss is this
             many epochs old (checked at validations).
         val_every_epochs: Validate after every N-th epoch (and at the last
@@ -418,6 +422,7 @@ class FlowMatching(TorchModel):
         batch_size: int = 128,
         val_batch_size: Optional[int] = 16384,
         embed_chunk: int = 512,
+        wait_for_sims: int = 0,
         patience_epochs: int = 12,
         val_every_epochs: int = 3,
         max_rounds: Optional[int] = None,
@@ -468,6 +473,7 @@ class FlowMatching(TorchModel):
         self.batch_size = batch_size
         self.val_batch_size = val_batch_size
         self.embed_chunk = embed_chunk
+        self.wait_for_sims = wait_for_sims
         self.patience_epochs = patience_epochs
         self.val_every_epochs = val_every_epochs
         self.max_rounds = max_rounds
