@@ -454,6 +454,7 @@ class TrainActor:
         """Whether a round is in progress (not waiting for simulations, idle or done)."""
         return self.trainer.status == "training"
 
+    @ray.method(concurrency_group="control")
     def request_stop(self):
         """Stop after the current training step; the acceptance test still runs."""
         self.trainer.request_stop()

@@ -171,7 +171,10 @@ class RoundTrainer:
         while not self.stopped:
             if sims_target is not None:
                 self.status = "waiting for simulations"
-                while not self.stopped and buffer.get_stats()["total_length"] < sims_target:
+                # A full buffer (max_samples reached, simulate_when_full off) cannot
+                # grow until a discard sweep makes room, so the wait ends there
+                while (not self.stopped and buffer.get_stats()["total_length"] < sims_target
+                       and buffer.can_grow()):
                     time.sleep(0.5)
                 self.status = "training"
                 if self.stopped:

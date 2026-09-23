@@ -733,6 +733,10 @@ class BufferView:
         """Get buffer statistics (total samples, etc.)."""
         return ray.get(self._dataset_manager.get_store_stats.remote())
 
+    def can_grow(self) -> bool:
+        """Whether the buffer would accept new simulations now (False at max_samples with simulate_when_full off)."""
+        return ray.get(self._dataset_manager.num_resims.remote()) > 0
+
 
 def get_ray_dataset_manager(
     config: BufferConfig,
