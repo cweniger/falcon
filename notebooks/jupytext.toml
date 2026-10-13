@@ -1,0 +1,4 @@
+# Pair every notebook in this directory with a py:percent script.
+# The .py file is the version-controlled source of truth; the .ipynb is
+# what GitHub renders and Colab opens.
+formats = "ipynb,py:percent"
