@@ -25,8 +25,9 @@ Methods, grouped by who calls them:
 | Called by | Methods |
 |-----------|---------|
 | both | `setup`, `groups`, `built`, `build`, `import_state` |
-| train actor | `init_from_batch`, `train_step`, `evaluate`, `discard_mask`, `on_round_start`, `on_validation_end`, `snapshot`, `restore`, `export_state` |
+| train actor | `init_from_batch`, `train_step`, `evaluate`, `discard_mask`, `on_round_start`, `on_train_start`, `on_validation_end`, `on_round_end`, `set_observations`, `snapshot`, `restore`, `export_state`, `export_proposal` |
 | sample actor | `sample_prior`, `sample` |
+| both, optional | `import_proposal` |
 
 Rules that let any framework implement the contract:
 
@@ -35,9 +36,24 @@ Rules that let any framework implement the contract:
   references to the model's own arrays;
 - sampling draws its randomness from the `rng` argument.
 
+A model whose proposal is more than its networks keeps a *proposal state*.
+`FlowMatching`, for example, keeps its region ladder there. The optional
+hooks for it are all no-ops by default:
+
+- `on_train_start(batches)` receives the round's training set after the
+  best network's baseline validation, before the first epoch;
+- `on_round_end(promoted)` runs after the acceptance test, with the best
+  state installed, and returns True when the proposal state changed;
+- `set_observations(conditions)` gives the train actor the node's conditions
+  at the observation;
+- `export_proposal(full)` / `import_proposal(tree)` move the proposal state
+  as a state tree. The trainer publishes the sampling subset
+  (`full=False`) whenever it changes and saves the full state in
+  `best_state.npz`.
+
 Torch estimators derive from `falcon.estimators.TorchModel`, which implements
-the state handling for `nn.Module` network groups; `Flow` and
-`GaussianFullCov` are examples.
+the state handling for `nn.Module` network groups; `Flow`, `FlowMatching`
+and `GaussianFullCov` are examples.
 
 ## Writing a JAX estimator
 

@@ -28,6 +28,13 @@ EXAMPLE_CONFIGS = [
         ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2"],
         id="01_minimal/legacy_num_gpus",
     ),
+    # 01_minimal with FlowMatching: small networks and region draws for CPU runners
+    ("01_minimal", "config_flow_matching.yml",
+     ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2",
+      "graph.z.estimator.val_every_epochs=1", "graph.z.estimator.hidden=32", "graph.z.estimator.layers=2",
+      "graph.z.estimator.n_region=1024", "graph.z.estimator.n_mout=1024",
+      "graph.z.estimator.v_max_draws=4096", "graph.z.estimator.readout_draws=1024",
+      "graph.z.ray.num_train_gpus=0", "graph.z.ray.num_sample_gpus=0"]),
     # 02_bimodal: single estimator 'z', using config_regular (needs GPU override)
     ("02_bimodal", "config_regular.yml", ["graph.z.estimator.max_epochs=2", "graph.z.estimator.max_rounds=2",
                                           "graph.z.ray.num_train_gpus=0", "graph.z.ray.num_sample_gpus=0"]),

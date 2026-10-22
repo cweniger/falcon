@@ -15,6 +15,8 @@ falcon/
 │   └── state_io        # State trees and best_state.npz checkpoints
 ├── estimators/        # Posterior estimation
 │   ├── flow            # Flow-based posterior estimation
+│   ├── flow_matching   # Flow matching with a truncated-prior proposal
+│   ├── region_ladder   # Truncated-prior proposal regions (used by FlowMatching)
 │   ├── gaussian_fullcov  # Gaussian posterior estimation
 │   ├── flow_density    # Normalizing flow networks (internal, used by Flow)
 │   ├── torch_model     # Base class of torch estimators
@@ -42,6 +44,7 @@ falcon/
 | Class | Description |
 |-------|-------------|
 | [`Flow`](flow.md) | Flow-based posterior estimation (normalizing flows) |
+| [`FlowMatching`](flow-matching.md) | Flow matching with a truncated-prior proposal |
 | [`GaussianFullCov`](gaussian.md) | Full covariance Gaussian posterior |
 | [`FlowDensity`](flow-density.md) | Normalizing flow `nn.Module` (internal) |
 
@@ -69,7 +72,7 @@ import falcon
 from falcon import Graph, Node, CompositeNode, DeployedGraph
 
 # Estimators
-from falcon.estimators import Flow, GaussianFullCov
+from falcon.estimators import Flow, FlowMatching, GaussianFullCov
 
 # Priors
 from falcon.priors import Product

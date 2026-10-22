@@ -32,6 +32,39 @@ def train_stream_name(node_name: str) -> str:
     return node_name + TRAIN_SUFFIX
 
 
+def observation_nodes(graph, name: str, observed) -> Optional[List[str]]:
+    """Nodes to simulate, in order, to get a node's conditions at the observation.
+
+    During proposal sampling a node is conditioned on its parents and
+    evidence. Observed nodes take their values from the observations; nodes
+    derived from them are simulated from their parents, in the same order
+    proposal sampling uses.
+
+    Args:
+        graph: The ``Graph``.
+        name: Estimator node whose conditions are wanted.
+        observed: Names of the nodes with an observed value.
+
+    Returns:
+        Derived nodes in execution order (empty if every condition is
+        observed), or None if a condition depends on a node that is neither
+        observed nor derived from observed nodes, such as a latent node.
+    """
+    needed = set()
+    stack = list(graph.get_parents(name)) + list(graph.get_evidence(name))
+    while stack:
+        key = stack.pop()
+        if key in observed or key in needed:
+            continue
+        node = graph.node_dict.get(key)
+        if (node is None or node.observed or node.estimator_cls is not None
+                or key not in graph.backward_deps):
+            return None
+        needed.add(key)
+        stack.extend(graph.backward_deps[key])
+    return [n for n in graph.backward_order if n in needed]
+
+
 def resolve_actor_options(actor_config: dict, has_estimator: bool) -> Tuple[dict, Optional[dict], List[str]]:
     """Split a node's ``ray:`` config into sample-actor and train-actor options.
 
@@ -395,8 +428,10 @@ class TrainActor:
         ref = ray.put(tree)
         ray.get([s.set_state.remote(ref) for s in self._samplers])
 
-    def train(self, dataset_manager, samplers):
+    def train(self, dataset_manager, samplers, observed_conditions=None):
         self._samplers = list(samplers)
+        if observed_conditions is not None:
+            self.model.set_observations(observed_conditions)
         info(f"[{self.name}] Training started")
         buffer = BufferView(dataset_manager, cache_device=self.model.cache_device)
         self.trainer.run(buffer)
@@ -810,6 +845,35 @@ class DeployedGraph:
             merged[i].update(fwd_dict)
         return merged
 
+    def _observed_conditions(self, name, observations):
+        """A node's conditions at the observation, or None if they are not fixed by it.
+
+        Derived evidence is simulated once from the observations, as proposal
+        sampling does; a stochastic derived node therefore contributes one
+        realisation.
+        """
+        if not observations:
+            return None
+        observed = {
+            k: v.detach().cpu().numpy() if hasattr(v, "detach") else np.asarray(v)
+            for k, v in observations.items()
+        }
+        order = observation_nodes(self.graph, name, observed)
+        if order is None:
+            return None
+        values = dict(observed)
+        if order:
+            try:
+                refs = self._execute_graph(1, order, self._arrays_to_condition_refs(observed, 1),
+                                           "sample_proposal")
+                derived = self._refs_to_arrays(refs)
+            except Exception as e:
+                warning(f"[{train_stream_name(name)}] Could not compute the conditions at the observation: {e}")
+                return None
+            values.update({k: derived[f"{k}.value"] for k in order})
+        keys = list(self.graph.get_parents(name)) + list(self.graph.get_evidence(name))
+        return {k: values[k] for k in keys}
+
     def _refs_to_arrays(self, sample_refs):
         """Convert List[Dict[str, ObjectRef]] to Dict[str, ndarray].
 
@@ -895,7 +959,10 @@ class DeployedGraph:
         # Training - start all train actors; each publishes to its node's sample actors
         train_futures = {}  # Map future -> node_name for completion tracking
         for name, trainer in self.trainers.items():
-            train_future = trainer.train.remote(dataset_manager, self.samplers[name].actors)
+            train_future = trainer.train.remote(
+                dataset_manager, self.samplers[name].actors,
+                self._observed_conditions(name, observations),
+            )
             train_futures[train_future] = name
             info(f"[{train_stream_name(name)}] Training started")
             time.sleep(1)

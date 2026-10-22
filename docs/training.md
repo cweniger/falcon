@@ -1,6 +1,6 @@
 # Training Loop
 
-Falcon's estimators (`Flow`, `GaussianFullCov`) train in **rounds**. Each round
+Falcon's estimators (`Flow`, `FlowMatching`, `GaussianFullCov`) train in **rounds**. Each round
 trains on a fixed snapshot of the simulation buffer until it converges, then
 tests the result against the best network so far on the same validation data.
 Only a network that wins replaces the best one, so the best network can only
@@ -53,6 +53,7 @@ separate tabs in the interactive display.
 refresh training and validation data from the buffer      (fixed for the round)
 copy best network -> current network, reset learning rate
 validate the current network: the best network's loss on this round's data
+hand the training set to the model (e.g. to refit a normalisation)
 
 epoch 1, 2, ..., max_epochs:
     one shuffled pass over the training set (one step per batch)
@@ -63,7 +64,8 @@ epoch 1, 2, ..., max_epochs:
 restore the current network to its best validated epoch
 validate it and compare with the best network's loss from the start of the round
 promote every network group whose validation loss improved
-if any group was promoted: send the new best network to the sample actor
+install the best network and let the model update its proposal state
+if any group was promoted or the proposal changed: send them to the sample actor
 if the primary group was promoted (round accepted):
     run the discard test once over all training and validation samples
 ```
@@ -83,6 +85,10 @@ Networks that belong together are compared and promoted together:
   judged on `loss`), and the marginal flow (judged on `loss_aux`). Each is
   promoted independently; the round counts as accepted when the conditional
   flow improves.
+- **`FlowMatching`**: the conditional flow together with its embedding
+  (primary group, judged on its validation NLL `nll`), and the marginal flow
+  (judged on `nll_aux`). Early stopping watches `loss`, the conditional NLL
+  without the rare rows whose ODE ran away.
 - **`GaussianFullCov`**: the Gaussian posterior together with its embedding.
 
 ### Proposals during training
@@ -91,6 +97,13 @@ Simulation runs while the estimator trains. Proposals always come from the
 best network in the sample actor, which only changes when a group is promoted.
 Until the first round has completed, and for the first `prior_rounds` rounds,
 proposals come from the prior.
+
+An estimator can also keep a proposal state that is not a network. For
+`FlowMatching` this is its region ladder, which moves once per round, after
+the acceptance test, in the train actor. The train actor gets the node's
+conditions at the observation for this; evidence derived from observed nodes
+is simulated once at launch. The proposal state is published whenever it
+changes and is saved in `best_state.npz`.
 
 ### Discarding samples
 
@@ -120,7 +133,8 @@ written to `graph/<node>/training_history.npz`.
 ## Parameters
 
 All parameters are flat keyword arguments of the estimator (see
-[Flow](api/flow.md) and [GaussianFullCov](api/gaussian.md)).
+[Flow](api/flow.md), [FlowMatching](api/flow-matching.md) and
+[GaussianFullCov](api/gaussian.md)).
 
 | Parameter | Default | Meaning |
 |-----------|---------|---------|
