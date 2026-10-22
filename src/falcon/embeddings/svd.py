@@ -2,8 +2,10 @@ import torch
 import numpy as np
 from typing import Optional, List
 
+from falcon.embeddings.lazy import LazyBuffersMixin
 
-class DynamicSVD(torch.nn.Module):
+
+class DynamicSVD(LazyBuffersMixin, torch.nn.Module):
     """
     Streaming SVD with Procrustes-stabilized output and optional whitening.
 
@@ -66,7 +68,13 @@ class DynamicSVD(torch.nn.Module):
     fit_on_signal=True.  Fitting on x instead gives λ ≈ λ_signal + σ², so the
     gain becomes (λ_s+σ²)/(λ_s+2σ²) >= 1/2 and a noise-only direction is passed
     through at half amplitude rather than suppressed.
+
+    The fitted basis (V, Λ, R) and the noise estimate are buffers created by
+    the first update, so they move with ``.to()`` and are part of
+    ``state_dict()``.  The batches collected for the next update are not.
     """
+
+    _lazy_buffers = ("components", "eigenvalues", "_R", "_noise_var")
 
     def __init__(
         self,
@@ -88,15 +96,20 @@ class DynamicSVD(torch.nn.Module):
         self.buffer: List[torch.Tensor] = []
         self.buffer_counter: int = 0
 
-        self.components: Optional[torch.Tensor] = None   # (k, D)
-        self.eigenvalues: Optional[torch.Tensor] = None  # (k,)
-        self._R: Optional[torch.Tensor] = None           # (k, k)
+        self.register_buffer("components", None)   # (k, D)
+        self.register_buffer("eigenvalues", None)  # (k,)
+        self.register_buffer("_R", None)           # (k, k)
 
         # Scalar noise variance used in the Wiener denominator.  None means
         # "assume 1", which is correct when a whitener is attached (it
         # normalizes the noise) and is the fallback when nothing better is
         # known.  Estimated from `signal` in update() otherwise.
-        self._noise_var: Optional[torch.Tensor] = None
+        self.register_buffer("_noise_var", None)
+
+    @property
+    def initialized(self) -> bool:
+        """Whether the basis has been fitted; the noise estimate may stay None."""
+        return self.components is not None
 
     def update(self, x: torch.Tensor, signal: Optional[torch.Tensor] = None) -> None:
         """Accumulate a batch; trigger SVD update when buffer is full.
@@ -230,21 +243,16 @@ class DynamicSVD(torch.nn.Module):
         """
         return 1.0 if self._noise_var is None else self._noise_var
 
-    def get_extra_state(self):
-        return {
-            'components': self.components,
-            'eigenvalues': self.eigenvalues,
-            '_R': self._R,
-            '_noise_var': self._noise_var,
-        }
-
-    def set_extra_state(self, state):
-        self.components = state['components']
-        self.eigenvalues = state['eigenvalues']
-        self._R = state['_R']
-        # .get(): checkpoints written before the noise estimate existed have no
-        # such key, and None restores the previous "assume 1" behaviour.
-        self._noise_var = state.get('_noise_var')
+    def _load_from_state_dict(self, state_dict, prefix, *args):
+        # Checkpoints written before these were buffers keep them in _extra_state.
+        # Those written before the noise estimate existed have no '_noise_var',
+        # and None restores the previous "assume 1" behaviour.
+        legacy = state_dict.pop(prefix + "_extra_state", None)
+        if legacy is not None:
+            for name in self._lazy_buffers:
+                if legacy.get(name) is not None:
+                    state_dict.setdefault(prefix + name, legacy[name])
+        super()._load_from_state_dict(state_dict, prefix, *args)
 
     def reconstruct(self, x: torch.Tensor) -> torch.Tensor:
         """Wiener-filter and reconstruct in whitened D-dimensional space."""

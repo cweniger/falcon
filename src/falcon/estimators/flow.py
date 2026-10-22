@@ -1,9 +1,7 @@
 """Flow-based posterior estimation (was SNPE_A)."""
 
-import copy
-import time
 from pathlib import Path
-from typing import Dict, List, Optional
+from typing import Dict, Optional
 
 import numpy as np
 import torch
@@ -12,14 +10,14 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.core.logger import log, debug
 from falcon.estimators.flow_density import FlowDensity
-from falcon.estimators.stepwise_base import NetworkGroup, StepwiseEstimator
+from falcon.estimators.torch_model import NetworkGroup, TorchModel, to_numpy_tree
 from falcon.embeddings import instantiate_embedding
 
 
-class Flow(StepwiseEstimator):
+class Flow(TorchModel):
     """Flow-based posterior estimation using a conditional + marginal flow pair.
 
-    Training runs in rounds of epochs on fixed data; see ``StepwiseEstimator``.
+    Training runs in rounds of epochs on fixed data; see ``RoundTrainer``.
     The conditional flow (with the embedding) and the marginal flow are
     promoted to best networks independently; a round is accepted when the
     conditional flow improves.
@@ -135,54 +133,53 @@ class Flow(StepwiseEstimator):
 
     def setup(self, simulator_instance, theta_key=None, condition_keys=None):
         super().setup(simulator_instance, theta_key, condition_keys)
+        self.param_dim = simulator_instance.param_dim
 
-        if self.device:
-            self.device = torch.device(self.device)
-        else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            debug(f"Auto-detected device: {self.device}")
-
-        self._embedding = instantiate_embedding(self.embedding).to(self.device)
-
+        self._embedding = None
         self._conditional_flow = None
         self._marginal_flow = None
-        self._best_conditional_flow = None
-        self._best_marginal_flow = None
-        self._best_embedding = None
-        self._init_parameters = None
-
         self._optimizer = None
         self._scheduler = None
 
-        self.history.update({"theta_mins": [], "theta_maxs": []})
+        self._history = {"theta_mins": [], "theta_maxs": []}
 
-    # ==================== Network Initialization ====================
+    @property
+    def history(self):
+        return self._history
 
-    def _initialize_networks(self, theta: torch.Tensor, conditions: Dict) -> None:
+    # ==================== Networks ====================
+
+    def init_from_batch(self, batch):
+        theta = self._to_tensor(batch[f"{self.theta_key}.value"])
+        conditions = {
+            k: self._to_array(batch[f"{k}.value"])
+            for k in self.condition_keys if f"{k}.value" in batch
+        }
+        u = self.simulator_instance.inverse(theta)
+        return {"theta": self._to_array(u), "conditions": conditions}
+
+    def build(self, init_tree) -> None:
         debug("Initializing networks...")
-        self._init_parameters = [theta, conditions]
+        theta = self._to_tensor(init_tree["theta"], self.device)
+        conditions = {k: self._to_tensor(v, self.device) for k, v in init_tree["conditions"].items()}
 
-        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
+        self._embedding = instantiate_embedding(self.embedding).to(self.device)
         self._embedding.eval()
-        s = self._embedding(conditions_device).detach()
-        theta_device = theta.to(self.device)
+        with torch.no_grad():
+            s = self._embedding(conditions).detach()
 
-        self._conditional_flow = self._create_flow(theta_device, s, is_conditional=True)
-        self._conditional_flow.to(self.device)
+        self._conditional_flow = self._create_flow(theta, s, is_conditional=True).to(self.device)
+        self._marginal_flow = self._create_flow(theta, s, is_conditional=False).to(self.device)
+        self._set_groups({
+            "conditional": NetworkGroup(
+                {"flow": self._conditional_flow, "embedding": self._embedding}, "loss",
+                embedding=self._embedding,
+            ),
+            "marginal": NetworkGroup({"flow": self._marginal_flow}, "loss_aux"),
+        })
+        debug("Networks initialized.")
 
-        self._marginal_flow = self._create_flow(theta_device, s, is_conditional=False)
-        self._marginal_flow.to(self.device)
-
-        self._best_conditional_flow = self._create_flow(theta_device, s, is_conditional=True)
-        self._best_conditional_flow.to(self.device)
-        self._best_conditional_flow.load_state_dict(self._conditional_flow.state_dict())
-
-        self._best_marginal_flow = self._create_flow(theta_device, s, is_conditional=False)
-        self._best_marginal_flow.to(self.device)
-        self._best_marginal_flow.load_state_dict(self._marginal_flow.state_dict())
-
-        self._best_embedding = copy.deepcopy(self._embedding)
-
+    def _build_optimizer(self) -> None:
         parameters = (
             list(self._conditional_flow.parameters())
             + list(self._marginal_flow.parameters())
@@ -191,9 +188,6 @@ class Flow(StepwiseEstimator):
         self._optimizer = AdamW(parameters, lr=self.lr, betas=self.betas)
         self._build_scheduler()
 
-        self.networks_initialized = True
-        debug("Networks initialized.")
-
     def _build_scheduler(self) -> None:
         # Stepped once per validation, so the patience is converted from epochs
         self._scheduler = (
@@ -201,19 +195,10 @@ class Flow(StepwiseEstimator):
                 self._optimizer,
                 mode="min",
                 factor=self.lr_decay_factor,
-                patience=self._epochs_to_validations(self.lr_patience_epochs),
+                patience=-(-self.lr_patience_epochs // self.val_every_epochs),
             )
             if self.lr_decay_factor < 1.0 else None
         )
-
-    def _network_groups(self):
-        return {
-            "conditional": NetworkGroup(
-                self._conditional_flow, self._best_conditional_flow, "loss",
-                self._embedding, self._best_embedding,
-            ),
-            "marginal": NetworkGroup(self._marginal_flow, self._best_marginal_flow, "loss_aux"),
-        }
 
     def _create_flow(self, theta, s, is_conditional=True):
         return FlowDensity(
@@ -229,65 +214,51 @@ class Flow(StepwiseEstimator):
     # ==================== Train/Val Steps ====================
 
     def _unpack_batch(self, batch, phase: str):
-        ids = batch._ids
         theta = self._to_tensor(batch[f"{self.theta_key}.value"])
         theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
-            k: self._to_tensor(batch[f"{k}.value"])
+            k: self._to_tensor(batch[f"{k}.value"], self.device)
             for k in self.condition_keys if f"{k}.value" in batch
         }
-
-        ts = time.time()
-        self.history[f"{phase}_ids"].extend((ts, id) for id in ids.tolist())
 
         log({f"{phase}:theta_logprob_min": theta_logprob.min().item()})
         log({f"{phase}:theta_logprob_max": theta_logprob.max().item()})
 
-        u = self.simulator_instance.inverse(theta)
-        conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-        u_device = u.to(self.device)
+        u = self.simulator_instance.inverse(theta).to(self.device)
+        return theta, theta_logprob, u, conditions
 
-        return ids, theta, theta_logprob, conditions, u, u_device, conditions_device
+    def _compute_flow_losses(self, u, s, train: bool):
+        self._conditional_flow.train(train)
+        self._marginal_flow.train(train)
 
-    def _compute_flow_losses(self, u_device, s, train: bool, use_best: bool = False):
-        conditional_flow = self._best_conditional_flow if use_best else self._conditional_flow
-        marginal_flow = self._best_marginal_flow if use_best else self._marginal_flow
-        conditional_flow.train(train)
-        marginal_flow.train(train)
-
-        loss_cond = conditional_flow.loss(u_device, s).mean()
+        loss_cond = self._conditional_flow.loss(u, s).mean()
         s_marginal = s.detach() * 0 if train else s * 0
-        loss_marg = marginal_flow.loss(u_device, s_marginal).mean()
+        loss_marg = self._marginal_flow.loss(u, s_marginal).mean()
 
         return loss_cond, loss_marg
 
     def train_step(self, batch) -> Dict[str, float]:
-        ids, theta, theta_logprob, conditions, u, u_device, conditions_device = \
-            self._unpack_batch(batch, "train")
+        theta, _, u, conditions = self._unpack_batch(batch, "train")
+        if self._optimizer is None:
+            self._build_optimizer()
 
-        if not self.networks_initialized:
-            self._initialize_networks(u, conditions)
-
-        s = self._summary(batch, "conditional", conditions_device, train=True)
+        s = self._summary("conditional", conditions, train=True)
 
         with torch.no_grad():
-            self.history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
-            self.history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
+            self._history["theta_mins"].append(theta.min(dim=0).values.cpu().numpy())
+            self._history["theta_maxs"].append(theta.max(dim=0).values.cpu().numpy())
 
         self._optimizer.zero_grad()
-        loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=True)
+        loss_cond, loss_marg = self._compute_flow_losses(u, s, train=True)
         (loss_cond + loss_marg).backward()
         self._optimizer.step()
 
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
-    def val_step(self, batch, use_best: bool = False) -> Dict[str, float]:
-        _, theta, theta_logprob, conditions, u, u_device, conditions_device = \
-            self._unpack_batch(batch, "val")
-
-        s = self._summary(batch, "conditional", conditions_device, use_best=use_best)
-        loss_cond, loss_marg = self._compute_flow_losses(u_device, s, train=False, use_best=use_best)
-
+    def val_step(self, batch) -> Dict[str, float]:
+        _, _, u, conditions = self._unpack_batch(batch, "val")
+        s = self._summary("conditional", conditions)
+        loss_cond, loss_marg = self._compute_flow_losses(u, s, train=False)
         return {"loss": loss_cond.item(), "loss_aux": loss_marg.item()}
 
     def on_validation_end(self, epoch: int, val_metrics: Dict[str, float]) -> Optional[Dict[str, float]]:
@@ -299,11 +270,13 @@ class Flow(StepwiseEstimator):
         return {"lr": lr}
 
     def on_round_start(self) -> None:
+        if self._optimizer is None:
+            return
         for group in self._optimizer.param_groups:
             group["lr"] = self.lr
         self._build_scheduler()
 
-    def discard_mask(self, batch):
+    def discard_test(self, batch):
         theta = self._to_tensor(batch[f"{self.theta_key}.value"])
         theta_logprob = self._to_tensor(batch[f"{self.theta_key}.log_prob"])
         conditions = {
@@ -311,34 +284,22 @@ class Flow(StepwiseEstimator):
             for k in self.condition_keys if f"{k}.value" in batch
         }
         u = self.simulator_instance.inverse(theta).to(self.device)
-        s = self._summary(batch, "conditional", conditions, use_best=True)
+        s = self._summary("conditional", conditions)
 
-        self._best_conditional_flow.eval()
-        log_prob = self._best_conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
+        self._conditional_flow.eval()
+        log_prob = self._conditional_flow.log_prob(u.unsqueeze(0), s).squeeze(0).cpu()
         log_ratio = log_prob - theta_logprob.cpu()
         return log_ratio < self.log_ratio_threshold
 
     # ==================== Sampling ====================
 
-    def sample_prior(self, num_samples: int, conditions=None) -> dict:
-        if conditions:
-            raise ValueError("Conditions are not supported for sample_prior.")
+    def _sample_prior(self, num_samples: int) -> dict:
         samples = self.simulator_instance.simulate_batch(num_samples)
         log_prob = np.ones(num_samples) * (-np.log(2 * self.hypercube_bound) ** self.param_dim)
         return {'value': samples, 'log_prob': log_prob}
 
-    def sample_posterior(self, num_samples: int, conditions=None) -> dict:
-        if not self._has_best:
-            return self.sample_prior(num_samples)
-        samples, logprob = self._importance_sample(num_samples, mode="posterior", conditions=conditions or {})
-        return {'value': samples.numpy(), 'log_prob': logprob.numpy()}
-
-    def sample_proposal(self, num_samples: int, conditions=None) -> dict:
-        if self._use_prior_proposal():
-            return self.sample_prior(num_samples)
-
-        conditions = conditions or {}
-        if self.sample_reference_posterior:
+    def _sample(self, num_samples: int, conditions, mode: str) -> dict:
+        if mode == "proposal" and self.sample_reference_posterior:
             post_samples, _ = self._importance_sample(
                 self.reference_samples, mode="posterior", conditions=conditions
             )
@@ -346,25 +307,24 @@ class Flow(StepwiseEstimator):
             log({f"sample_proposal:posterior_mean_{i}": mean[i].item() for i in range(len(mean))})
             log({f"sample_proposal:posterior_std_{i}": std[i].item() for i in range(len(std))})
 
-        samples, logprob = self._importance_sample(num_samples, mode="proposal", conditions=conditions)
-        log({
-            "sample_proposal:mean": samples.mean().item(),
-            "sample_proposal:std": samples.std().item(),
-            "sample_proposal:logprob": logprob.mean().item(),
-        })
+        samples, logprob = self._importance_sample(num_samples, mode=mode, conditions=conditions)
+        if mode == "proposal":
+            log({
+                "sample_proposal:mean": samples.mean().item(),
+                "sample_proposal:std": samples.std().item(),
+                "sample_proposal:logprob": logprob.mean().item(),
+            })
         return {'value': samples.numpy(), 'log_prob': logprob.numpy()}
 
     def _importance_sample(self, num_samples: int, mode: str = "posterior", conditions: Dict = {}):
         assert conditions, "Conditions must be provided."
         conditions = {k: self._to_tensor(v, self.device) for k, v in conditions.items()}
 
-        # Sampling always draws from the best networks: the ones the acceptance
-        # test promoted and save() writes out. Callers return prior samples while
-        # there is no best network yet.
-        conditional_net = self._best_conditional_flow
-        marginal_net = self._best_marginal_flow
-        self._best_embedding.eval()
-        s = self._best_embedding(conditions)
+        # Sampling runs in the sample actor, whose networks are the best networks
+        conditional_net = self._conditional_flow
+        marginal_net = self._marginal_flow
+        self._embedding.eval()
+        s = self._embedding(conditions)
 
         s = s.expand(num_samples, *s.shape[1:])
 
@@ -446,47 +406,24 @@ class Flow(StepwiseEstimator):
 
         return samples, logprob.detach()
 
-    # ==================== Save/Load ====================
+    # ==================== Legacy checkpoints ====================
 
-    def save(self, node_dir: Path) -> None:
-        debug(f"Saving: {node_dir}")
-        if not self.networks_initialized:
-            raise RuntimeError("Networks not initialized.")
-
-        torch.save(self._best_conditional_flow.state_dict(), node_dir / "conditional_flow.pth")
-        torch.save(self._best_marginal_flow.state_dict(), node_dir / "marginal_flow.pth")
-        torch.save(self._init_parameters, node_dir / "init_parameters.pth")
-        torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
-
-        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
-        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
-        torch.save(self.history["theta_mins"], node_dir / "theta_mins_batches.pth")
-        torch.save(self.history["theta_maxs"], node_dir / "theta_maxs_batches.pth")
-        torch.save(self.history["epochs"], node_dir / "epochs.pth")
-        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
-        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
-        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
-        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
-
-        if self._best_embedding is not None:
-            torch.save(self._best_embedding.state_dict(), node_dir / "embedding.pth")
-        self._save_round_state(node_dir)
-
-    def load(self, node_dir: Path) -> None:
-        debug(f"Loading: {node_dir}")
-        init_parameters = torch.load(node_dir / "init_parameters.pth")
-        self._initialize_networks(init_parameters[0], init_parameters[1])
-
-        self._best_conditional_flow.load_state_dict(torch.load(node_dir / "conditional_flow.pth"))
-        self._best_marginal_flow.load_state_dict(torch.load(node_dir / "marginal_flow.pth"))
-
-        if (node_dir / "embedding.pth").exists() and self._best_embedding is not None:
-            self._best_embedding.load_state_dict(torch.load(node_dir / "embedding.pth"))
-
-        # A resumed run starts from the best networks
-        for group in self._network_groups().values():
-            self._copy_modules(group.best_modules(), group.current_modules())
-
-        _tep = node_dir / "total_epochs_trained.pth"
-        self._total_epochs_trained = torch.load(_tep) if _tep.exists() else 0
-        self._load_round_state(node_dir)
+    def load_legacy(self, node_dir: Path):
+        """Checkpoint files written before ``best_state.npz`` existed."""
+        if not (node_dir / "conditional_flow.pth").exists():
+            return None
+        load = self._legacy_load
+        theta, conditions = load(node_dir / "init_parameters.pth")
+        conditional = {"flow": to_numpy_tree(load(node_dir / "conditional_flow.pth"))}
+        if (node_dir / "embedding.pth").exists():
+            conditional["embedding"] = to_numpy_tree(load(node_dir / "embedding.pth"))
+        else:  # the embedding has no state
+            conditional["embedding"] = {}
+        return {
+            "meta": self._legacy_meta(node_dir),
+            "init": {"theta": self._to_array(theta), "conditions": to_numpy_tree(conditions)},
+            "groups": {
+                "conditional": conditional,
+                "marginal": {"flow": to_numpy_tree(load(node_dir / "marginal_flow.pth"))},
+            },
+        }

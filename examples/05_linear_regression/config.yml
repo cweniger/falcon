@@ -128,7 +128,8 @@ graph:
 
     sample_chunk_size: 128
     ray:
-      num_gpus: 1
+      num_train_gpus: 0.5
+      num_sample_gpus: 0.5
 
   mu:
     parents: [theta]
@@ -137,7 +138,7 @@ graph:
       n_bins: 1000
     sample_chunk_size: 128
     ray:
-      num_gpus: 0
+      num_sample_gpus: 0
 
   x:
     parents: [mu]
@@ -147,7 +148,7 @@ graph:
     observed: "./data/mock_data.npz['x']"
     sample_chunk_size: 128
     ray:
-      num_gpus: 0
+      num_sample_gpus: 0
 
 # -----------------------------------------------------------------------------
 # Sampling configuration

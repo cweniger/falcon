@@ -14,6 +14,22 @@ from pathlib import Path
 from typing import Optional
 
 
+STATUS_COLORS = {
+    # Train actors
+    "training": "\x1b[33m",  # Yellow
+    "done": "\x1b[32m",      # Green
+    # Sample actors
+    "sampling": "\x1b[36m",  # Cyan
+    "waiting": "\x1b[90m",   # Gray: no best network yet, samples come from the prior
+    "prior": "\x1b[35m",     # Magenta: proposals still come from the prior
+    "ready": "\x1b[32m",     # Green: serving the best network
+    # Both
+    "idle": "\x1b[90m",      # Gray
+    "active": "\x1b[36m",    # Cyan
+    "error": "\x1b[31m",     # Red
+}
+
+
 @dataclass
 class NodeStatus:
     """Status information for a single node."""
@@ -40,6 +56,8 @@ class InteractiveState:
 
 class InteractiveDisplay:
     """Interactive terminal display with scrolling driver logs and node log tail footer.
+
+    Each actor has its own tab: ``z`` (sampling) and ``z/train`` (training).
 
     Layout:
         ┌─────────────────────────────────────────────────────┐
@@ -256,15 +274,7 @@ class InteractiveDisplay:
                 node = self.state.nodes[name]
                 is_selected = i == self.state.selected_node_idx
 
-                # Status indicator
-                status_colors = {
-                    "training": "\x1b[33m",  # Yellow
-                    "idle": "\x1b[90m",      # Gray
-                    "done": "\x1b[32m",      # Green
-                    "error": "\x1b[31m",     # Red
-                    "active": "\x1b[36m",    # Cyan
-                }
-                color = status_colors.get(node.status, "")
+                color = STATUS_COLORS.get(node.status, "")
                 reset = "\x1b[0m"
 
                 if is_selected:
@@ -281,21 +291,21 @@ class InteractiveDisplay:
                 details = []
                 details.append(f"\x1b[1m{selected_name}\x1b[0m")
 
-                status_colors = {
-                    "training": "\x1b[33m",
-                    "idle": "\x1b[90m",
-                    "done": "\x1b[32m",
-                    "error": "\x1b[31m",
-                }
-                color = status_colors.get(node.status, "")
+                color = STATUS_COLORS.get(node.status, "")
                 details.append(f"{color}{node.status}\x1b[0m")
 
                 if node.total_epochs > 0:
                     details.append(f"round {node.current_round} · {node.current_epoch}/{node.total_epochs}")
                 if node.loss is not None:
                     details.append(f"loss: {node.loss:.2e}")
-                if node.samples > 0:
-                    details.append(f"{node.samples} sims")
+                if node.total_epochs > 0:
+                    if node.samples > 0:
+                        details.append(f"{node.samples} sims")
+                else:  # sample actor
+                    if node.current_round > 0:
+                        details.append(f"best of round {node.current_round}")
+                    if node.samples > 0:
+                        details.append(f"{node.samples} sampled")
 
                 # Buffer stats
                 buf = self.state.buffer_stats

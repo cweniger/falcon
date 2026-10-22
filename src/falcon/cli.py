@@ -348,6 +348,7 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
         else:
             suffix = f"(per-node, {n} nodes)"
         lines.append(f"         {graph_path / '<node>' / 'output.log'}  {suffix}")
+        lines.append(f"         {graph_path / '<node>' / 'train' / 'output.log'}  (training)")
     if start_time is not None:
         lines.append(f"Started: {datetime.fromtimestamp(start_time):%Y-%m-%d %H:%M:%S}")
     if end_time is not None:
@@ -385,7 +386,8 @@ def _build_run_summary(status, output_dir, cfg, deployed_graph, start_time=None,
                         parts.append(f"loss={loss:.4g}")
                     sims = ns.get("samples", 0)
                     if sims:
-                        parts.append(f"{sims} sims")
+                        # Train actors report simulations, sample actors samples served
+                        parts.append(f"{sims} sims" if total_epochs else f"{sims} sampled")
                     lines.append(f"  {name}: {' | '.join(parts)}")
             buf = status_dict.get("buffer", {})
             if isinstance(buf, dict):
@@ -703,7 +705,9 @@ def launch_mode(cfg, interactive: bool = False, log_lines: int = 16, auto_sample
         logging_cfg = OmegaConf.to_container(cfg.get("logging", {}), resolve=True)
         ray_init_args = cfg.get("ray", {}).get("init", {})
         console_level = logging_cfg.get("console", {}).get("level", None)
-        ray_init_args.setdefault("log_to_driver", console_level is not None)
+        # The interactive display tails each node's output.log itself; Ray's
+        # forwarded actor stdout would bypass it and scroll over the screen.
+        ray_init_args.setdefault("log_to_driver", console_level is not None and display is None)
         ray_init_args.setdefault("namespace", "falcon")
         ray_init_args.setdefault("logging_level", "ERROR")
         ray.init(**ray_init_args)
@@ -855,11 +859,12 @@ def sample_mode(cfg, sample_type: str) -> None:
     info(f"Generating {num_samples} samples using {sample_type} sampling...")
     info(str(graph))
 
-    # Deploy graph for sampling
+    # Deploy graph for sampling (sample actors only)
     deployed_graph = falcon.DeployedGraph(
         graph,
         import_dirs=path_cfg["imports"],
         log_config=logging_cfg,
+        train=False,
     )
 
     if sample_type == "prior":

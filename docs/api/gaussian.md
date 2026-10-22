@@ -105,7 +105,8 @@ graph:
       log_ratio_threshold: -20.0
 
     ray:
-      num_gpus: 1
+      num_train_gpus: 0.5
+      num_sample_gpus: 0.5
 
   x:
     parents: [z]
@@ -126,10 +127,7 @@ sample:
       show_source: true
       members:
         - __init__
+        - build
         - train_step
         - val_step
-        - sample_prior
-        - sample_posterior
-        - sample_proposal
-        - save
-        - load
+        - discard_test

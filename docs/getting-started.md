@@ -114,6 +114,15 @@ falcon launch -o output/run_01
 falcon sample posterior -o output/run_01
 ```
 
+Or, in Python, load the best posterior of a node directly from its checkpoint:
+
+```python
+import falcon
+
+post = falcon.load_posterior("output/run_01/graph/theta", import_dirs=["src"])
+samples = post.sample(1000, {"x": obs})["value"]   # obs has a leading batch dimension of 1
+```
+
 ## CLI Commands
 
 | Command | Description |

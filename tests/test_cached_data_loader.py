@@ -1,6 +1,5 @@
-"""Tests for CachedDataLoader's full-pass iteration and awaitable refresh (no Ray)."""
+"""Tests for CachedDataLoader's full-pass iteration and refresh (no Ray)."""
 
-import asyncio
 from unittest.mock import MagicMock
 
 import numpy as np
@@ -86,7 +85,7 @@ def test_iter_batches_empty_cache_yields_nothing():
     assert list(loader.iter_batches(batch_size=4)) == []
 
 
-def test_refresh_awaits_fetch_and_applies_it():
+def test_refresh_fetches_only_new_samples_and_applies_them():
     loader = _make_loader()
     snapshots = []
 
@@ -96,9 +95,9 @@ def test_refresh_awaits_fetch_and_applies_it():
 
     loader._checkout_and_fetch = fake_fetch
 
-    asyncio.run(loader.refresh())
+    loader.refresh()
     assert loader.count == 6
 
-    asyncio.run(loader.refresh())
+    loader.refresh()
     assert loader.count == 6
     assert list(snapshots[1]) == list(range(6))  # second refresh only asks for new samples

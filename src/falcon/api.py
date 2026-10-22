@@ -95,6 +95,114 @@ def shutdown() -> None:
 
 
 # ---------------------------------------------------------------------------
+# Posterior from a checkpoint
+# ---------------------------------------------------------------------------
+
+
+class Posterior:
+    """Best posterior of one node, loaded from its checkpoint (see :func:`load_posterior`)."""
+
+    def __init__(self, sampler):
+        self._sampler = sampler
+
+    @property
+    def model(self):
+        """The estimator model holding the best networks."""
+        return self._sampler.model
+
+    @property
+    def node(self) -> str:
+        return self._sampler.model.theta_key
+
+    @property
+    def condition_keys(self) -> List[str]:
+        return list(self._sampler.model.condition_keys)
+
+    @property
+    def round(self) -> int:
+        """Round in which the loaded networks were last promoted."""
+        return self._sampler.best_round
+
+    def sample(self, n: int, conditions=None, mode: str = "posterior", seed=None) -> dict:
+        """Draw samples.
+
+        Args:
+            n: Number of samples.
+            conditions: Dict mapping condition node names to arrays with a
+                leading batch dimension of 1 (broadcast) or ``n``.
+            mode: ``"posterior"``, ``"proposal"`` or ``"prior"``.
+            seed: Seed or ``numpy.random.Generator`` for reproducible draws.
+
+        Returns:
+            ``{"value": ndarray, "log_prob": ndarray}``
+        """
+        import numpy as np
+
+        rng = seed if isinstance(seed, np.random.Generator) else np.random.default_rng(seed)
+        conditions = {k: np.asarray(v) for k, v in (conditions or {}).items()} or None
+        return self._sampler.sample(mode, n, conditions, rng)
+
+    def __repr__(self) -> str:
+        return f"<Posterior({self.node} | {', '.join(self.condition_keys)}; round {self.round})>"
+
+
+def load_posterior(path, device: Optional[str] = None, import_dirs: Optional[List[str]] = None) -> Posterior:
+    """Load a node's best posterior from its checkpoint, without Ray.
+
+    The checkpoint records the estimator and simulator targets and their config
+    when the run was configured with import paths (YAML runs). Runs built from
+    live Python objects cannot be rebuilt this way; build the estimator
+    yourself and use :class:`falcon.core.model_sampler.ModelSampler`.
+
+    Args:
+        path: ``<run>/graph/<node>`` or its ``best_state.npz``.
+        device: Device for the networks (default: the estimator's setting).
+        import_dirs: Directories to add to ``sys.path`` for user modules
+            (the run's ``paths.imports``).
+
+    Example::
+
+        post = falcon.load_posterior("output/run_01/graph/z", import_dirs=["src"])
+        samples = post.sample(1000, {"x": x_obs[None]})["value"]
+    """
+    import sys
+    from falcon.core.model_sampler import ModelSampler
+    from falcon.core.state_io import CHECKPOINT_NAME, load_state
+    from falcon.core.utils import LazyLoader
+
+    path = Path(path)
+    if path.is_dir():
+        path = path / CHECKPOINT_NAME
+    if not path.exists():
+        raise FileNotFoundError(f"No checkpoint at {path}")
+    tree = load_state(path)
+    meta = tree.get("meta", {})
+    artifact = meta.get("artifact") or {}
+    if not artifact:
+        raise ValueError(
+            f"{path} does not record how to rebuild its estimator (the run used live "
+            "Python objects); build the estimator yourself and use ModelSampler"
+        )
+
+    for d in reversed(import_dirs or []):
+        resolved = str(Path(d).resolve())
+        if resolved not in sys.path:
+            sys.path.insert(0, resolved)
+
+    def build(spec, **overrides):
+        kwargs = {k: v for k, v in spec.items() if k != "_target_"}
+        kwargs.update(overrides)
+        return LazyLoader(spec["_target_"])(**kwargs)
+
+    simulator = build(artifact["simulator"])
+    model = build(artifact["estimator"], **({"device": device} if device else {}))
+    model.setup(simulator, theta_key=meta["theta_key"], condition_keys=meta["condition_keys"])
+    sampler = ModelSampler(model)
+    sampler.apply(tree)
+    return Posterior(sampler)
+
+
+# ---------------------------------------------------------------------------
 # Default config for programmatic Graph-based runs
 # ---------------------------------------------------------------------------
 

@@ -68,7 +68,8 @@ graph:
       log_ratio_threshold: -20
       sample_reference_posterior: false
     ray:
-      num_gpus: 0.5
+      num_train_gpus: 0.25
+      num_sample_gpus: 0.25
 
   z2:
     evidence: [x]
@@ -104,7 +105,8 @@ graph:
       log_ratio_threshold: -20
       sample_reference_posterior: false
     ray:
-      num_gpus: 0.5
+      num_train_gpus: 0.25
+      num_sample_gpus: 0.25
 
   img1:
     parents: [z1]

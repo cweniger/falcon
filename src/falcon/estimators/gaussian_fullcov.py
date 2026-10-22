@@ -1,7 +1,5 @@
 """Full-covariance Gaussian estimator for TransformedPrior simulators."""
 
-import copy
-import time
 from pathlib import Path
 from typing import Dict, List, Optional
 
@@ -13,7 +11,7 @@ from torch.optim.lr_scheduler import ReduceLROnPlateau
 
 from falcon.priors.product import TransformedPrior
 from falcon.estimators.networks import build_mlp
-from falcon.estimators.stepwise_base import NetworkGroup, StepwiseEstimator
+from falcon.estimators.torch_model import NetworkGroup, TorchModel, to_numpy_tree
 from falcon.core.logger import log, debug
 
 
@@ -211,12 +209,12 @@ class _GaussianPosterior(nn.Module):
         self._residual_eigvecs = eigvecs
 
 
-class GaussianFullCov(StepwiseEstimator):
+class GaussianFullCov(TorchModel):
     """Full-covariance Gaussian posterior estimator for TransformedPrior simulators.
 
     Works in the standard-normal latent space; samples are mapped back to
     parameter space after generation. Training runs in rounds of epochs on
-    fixed data; see ``StepwiseEstimator``.
+    fixed data; see ``RoundTrainer``.
 
     Args:
         max_epochs: Maximum epochs per round.
@@ -316,12 +314,6 @@ class GaussianFullCov(StepwiseEstimator):
 
         super().setup(simulator_instance, theta_key, condition_keys)
 
-        if self.device:
-            self.device = torch.device(self.device)
-        else:
-            self.device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
-            debug(f"Auto-detected device: {self.device}")
-
         self._proposal_gamma = self.gamma
         self._posterior_gamma = (
             (1.0 + self.gamma) / self.gamma
@@ -329,9 +321,6 @@ class GaussianFullCov(StepwiseEstimator):
         )
 
         self._model: Optional[nn.Module] = None
-        self._best_model: Optional[nn.Module] = None
-        self._init_theta: Optional[torch.Tensor] = None
-        self._init_conditions: Optional[Dict[str, torch.Tensor]] = None
         self._optimizer = None
         self._scheduler = None
 
@@ -347,42 +336,34 @@ class GaussianFullCov(StepwiseEstimator):
             ReduceLROnPlateau(
                 self._optimizer, mode="min",
                 factor=self.lr_decay_factor,
-                patience=self._epochs_to_validations(self.lr_patience_epochs),
+                patience=-(-self.lr_patience_epochs // self.val_every_epochs),
             )
             if self.lr_decay_factor < 1.0 else None
         )
 
-    def _network_groups(self):
-        return {
-            "model": NetworkGroup(
-                self._model.posterior, self._best_model.posterior, "loss",
-                self._model.embedding, self._best_model.embedding,
-            ),
-        }
-
     # ==================== Model Building ====================
 
-    def _build_model(self, batch) -> nn.Module:
-        theta = self._to_tensor(batch[f"{self.theta_key}.value"])
-        conditions = {
-            k: self._to_tensor(batch[f"{k}.value"])
-            for k in self.condition_keys if f"{k}.value" in batch
+    def init_from_batch(self, batch):
+        return {
+            "theta": self._to_array(batch[f"{self.theta_key}.value"]),
+            "conditions": {
+                k: self._to_array(batch[f"{k}.value"])
+                for k in self.condition_keys if f"{k}.value" in batch
+            },
         }
-        self._init_theta = theta
-        self._init_conditions = conditions
-        return self._create_model(theta, conditions)
 
-    def _create_model(self, theta: torch.Tensor, conditions: Dict[str, torch.Tensor]) -> nn.Module:
+    def build(self, init_tree) -> None:
         from falcon.estimators.embedded_posterior import EmbeddedPosterior
         from falcon.embeddings import instantiate_embedding
 
+        theta = self._to_tensor(init_tree["theta"])
+        conditions = {k: self._to_tensor(v, self.device) for k, v in init_tree["conditions"].items()}
         theta_latent = self.simulator_instance.inverse(theta, mode="standard_normal")
 
         embedding = instantiate_embedding(self.embedding).to(self.device)
         embedding.eval()
         with torch.no_grad():
-            conditions_device = {k: v.to(self.device) for k, v in conditions.items()}
-            embedded = embedding(conditions_device)
+            embedded = embedding(conditions)
 
         posterior = _GaussianPosterior(
             param_dim=theta_latent.shape[1],
@@ -394,16 +375,11 @@ class GaussianFullCov(StepwiseEstimator):
             eig_update_freq=self.eig_update_freq,
         ).to(self.device)
 
+        self._model = EmbeddedPosterior(embedding, posterior)
+        self._set_groups({
+            "model": NetworkGroup({"model": self._model}, "loss", embedding=self._model.embedding),
+        })
         debug(f"GaussianFullCov model built: param_dim={theta_latent.shape[1]}")
-        return EmbeddedPosterior(embedding, posterior)
-
-    def _initialize_model(self, batch) -> None:
-        self._model = self._build_model(batch)
-        self._best_model = copy.deepcopy(self._model)
-
-        self._build_optimizer()
-        self.networks_initialized = True
-        debug("GaussianFullCov initialised.")
 
     # ==================== Loss ====================
 
@@ -417,43 +393,38 @@ class GaussianFullCov(StepwiseEstimator):
         theta_latent = self.simulator_instance.inverse(theta, mode="standard_normal")
         return theta_latent, theta_logprob, conditions
 
-    def _compute_loss(self, batch, train: bool, use_best: bool = False):
+    def _compute_loss(self, batch, train: bool):
         theta_latent, _, conditions = self._unpack_batch(batch)
-
-        ts = time.time()
-        self.history["train_ids" if train else "val_ids"].extend((ts, id) for id in batch._ids.tolist())
-
-        model = self._best_model if use_best else self._model
-        model.train(train)
-        s = self._summary(batch, "model", conditions, use_best=use_best, train=train)
-        loss = model.posterior.loss(theta_latent, s)
-
+        self._model.train(train)
+        s = self._summary("model", conditions, train=train)
+        loss = self._model.posterior.loss(theta_latent, s)
         return loss, {"loss": loss.item()}
 
-    # ==================== StepwiseEstimator abstract methods ====================
+    # ==================== Training ====================
 
     def train_step(self, batch) -> Dict[str, float]:
-        if not self.networks_initialized:
-            self._initialize_model(batch)
-
+        if self._optimizer is None:
+            self._build_optimizer()
         self._optimizer.zero_grad()
         loss, metrics = self._compute_loss(batch, train=True)
         loss.backward()
         self._optimizer.step()
         return metrics
 
-    def val_step(self, batch, use_best: bool = False) -> Dict[str, float]:
-        _, metrics = self._compute_loss(batch, train=False, use_best=use_best)
+    def val_step(self, batch) -> Dict[str, float]:
+        _, metrics = self._compute_loss(batch, train=False)
         return metrics
 
-    def discard_mask(self, batch):
+    def discard_test(self, batch):
         theta_latent, theta_logprob, conditions = self._unpack_batch(batch)
-        self._best_model.eval()
-        s = self._summary(batch, "model", conditions, use_best=True)
-        log_prob = self._best_model.posterior.log_prob(theta_latent, s).cpu()
+        self._model.eval()
+        s = self._summary("model", conditions)
+        log_prob = self._model.posterior.log_prob(theta_latent, s).cpu()
         return (log_prob - theta_logprob.cpu()) < self.log_ratio_threshold
 
     def on_round_start(self) -> None:
+        if self._optimizer is None:
+            return
         for group in self._optimizer.param_groups:
             group["lr"] = self.lr
         self._build_scheduler()
@@ -476,84 +447,43 @@ class GaussianFullCov(StepwiseEstimator):
 
     # ==================== Sampling ====================
 
-    def sample_prior(self, num_samples: int, conditions=None) -> dict:
-        if conditions:
-            raise ValueError("Conditions are not supported for sample_prior.")
+    def _sample_prior(self, num_samples: int) -> dict:
         samples = self.simulator_instance.simulate_batch(num_samples)
         return {"value": samples, "log_prob": np.zeros(num_samples)}
 
-    def _sample(self, num_samples: int, conditions, gamma) -> dict:
-        if not self._has_best:
-            return self.sample_prior(num_samples)
-
-        assert conditions, "Conditions must be provided for sampling."
-
+    def _sample(self, num_samples: int, conditions, mode: str) -> dict:
+        gamma = self._proposal_gamma if mode == "proposal" else self._posterior_gamma
         conditions_device = {
             k: self._to_tensor(v, self.device).expand(num_samples, *v.shape[1:])
             for k, v in conditions.items()
         }
 
-        with torch.no_grad():
-            self._best_model.eval()
-            samples_latent = self._best_model.sample(conditions_device, gamma=gamma)
-            log_prob = self._best_model.log_prob(samples_latent, conditions_device)
-            samples = self.simulator_instance.forward(samples_latent, mode="standard_normal")
+        self._model.eval()
+        samples_latent = self._model.sample(conditions_device, gamma=gamma)
+        log_prob = self._model.log_prob(samples_latent, conditions_device)
+        samples = self.simulator_instance.forward(samples_latent, mode="standard_normal")
+        result = {"value": samples.cpu().numpy(), "log_prob": log_prob.cpu().numpy()}
 
-        return {"value": samples.cpu().numpy(), "log_prob": log_prob.cpu().numpy()}
-
-    def sample_posterior(self, num_samples: int, conditions=None) -> dict:
-        return self._sample(num_samples, conditions, gamma=self._posterior_gamma)
-
-    def sample_proposal(self, num_samples: int, conditions=None) -> dict:
-        if self._use_prior_proposal():
-            return self.sample_prior(num_samples)
-        result = self._sample(num_samples, conditions, gamma=self._proposal_gamma)
-        log({
-            "sample_proposal:mean": result["value"].mean(),
-            "sample_proposal:std": result["value"].std(),
-            "sample_proposal:logprob": result["log_prob"].mean(),
-        })
+        if mode == "proposal":
+            log({
+                "sample_proposal:mean": result["value"].mean(),
+                "sample_proposal:std": result["value"].std(),
+                "sample_proposal:logprob": result["log_prob"].mean(),
+            })
         return result
 
-    # ==================== Save / Load ====================
+    # ==================== Legacy checkpoints ====================
 
-    def save(self, node_dir) -> None:
-        node_dir = Path(node_dir)
-        if not self.networks_initialized:
-            raise RuntimeError("Cannot save: model not initialised.")
-
-        torch.save(self._best_model.state_dict(), node_dir / "model.pth")
-        torch.save(
-            {"theta": self._init_theta, "conditions": self._init_conditions},
-            node_dir / "init_tensors.pth",
-        )
-        torch.save(self._total_epochs_trained, node_dir / "total_epochs_trained.pth")
-
-        torch.save(self.history["train_ids"], node_dir / "train_id_history.pth")
-        torch.save(self.history["val_ids"], node_dir / "validation_id_history.pth")
-        torch.save(self.history["epochs"], node_dir / "epochs.pth")
-        torch.save(self.history["train_loss"], node_dir / "loss_train_posterior.pth")
-        torch.save(self.history["val_loss"], node_dir / "loss_val_posterior.pth")
-        torch.save(self.history["n_samples"], node_dir / "n_samples_total.pth")
-        torch.save(self.history["elapsed_min"], node_dir / "elapsed_minutes.pth")
-        self._save_round_state(node_dir)
-
-    def load(self, node_dir) -> None:
-        node_dir = Path(node_dir)
-
-        data = torch.load(node_dir / "init_tensors.pth")
-        self._init_theta = data["theta"]
-        self._init_conditions = data["conditions"]
-        self._model = self._create_model(self._init_theta, self._init_conditions)
-        self._best_model = self._create_model(self._init_theta, self._init_conditions)
-
-        saved_state = torch.load(node_dir / "model.pth")
-        self._best_model.load_state_dict(saved_state)
-        self._model.load_state_dict(saved_state)
-
-        self._build_optimizer()
-        self.networks_initialized = True
-
-        tep = node_dir / "total_epochs_trained.pth"
-        self._total_epochs_trained = torch.load(tep) if tep.exists() else 0
-        self._load_round_state(node_dir)
+    def load_legacy(self, node_dir: Path):
+        """Checkpoint files written before ``best_state.npz`` existed."""
+        if not (node_dir / "model.pth").exists():
+            return None
+        init = self._legacy_load(node_dir / "init_tensors.pth")
+        return {
+            "meta": self._legacy_meta(node_dir),
+            "init": {
+                "theta": self._to_array(init["theta"]),
+                "conditions": to_numpy_tree(init["conditions"]),
+            },
+            "groups": {"model": {"model": to_numpy_tree(self._legacy_load(node_dir / "model.pth"))}},
+        }

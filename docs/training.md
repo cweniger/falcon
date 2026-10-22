@@ -4,8 +4,8 @@ Falcon's estimators (`Flow`, `GaussianFullCov`) train in **rounds**. Each round
 trains on a fixed snapshot of the simulation buffer until it converges, then
 tests the result against the best network so far on the same validation data.
 Only a network that wins replaces the best one, so the best network can only
-get better. Simulation keeps running in the background, using the best network
-as the proposal.
+get better. Simulation keeps running at the same time in a separate actor,
+using the best network as the proposal.
 
 ## Terminology
 
@@ -19,7 +19,7 @@ metric names.
 | **validation** | One full pass over the round's validation set, producing the `val:*` metrics |
 | **round** | Refresh data → train epochs → acceptance test → if accepted: promote and run the discard sweep |
 | **current network** | The network being trained in this round |
-| **best network** | The network used for proposals, posterior sampling and saving |
+| **best network** | The network used for proposals, posterior sampling and saving; it lives in the sample actor |
 | **accepted / rejected round** | The current network beat / did not beat the best network on the round's validation set |
 
 Two rules keep the parameters unambiguous:
@@ -29,11 +29,30 @@ Two rules keep the parameters unambiguous:
    training, not how long it waits for improvement.
 2. All `*_epochs` counts are per round: they reset when a new round starts.
 
+## Two actors per estimator node
+
+Each estimator node runs in two Ray actors:
+
+- **`z/train`** holds the current network, runs the rounds described below,
+  and keeps a copy of the best network's weights in host memory.
+- **`z`** holds the best network and serves proposal, posterior and prior
+  samples. It never waits for training.
+
+Whenever a network group is promoted, the train actor sends the new best
+weights to `z` and waits until `z` has installed them. Proposals therefore
+switch to the new best network before the discard sweep runs. The weights
+travel as numpy arrays, the same data that is written to the checkpoint.
+
+The two actors have separate log streams: `graph/z/output.log` and
+`graph/z/train/output.log`, each with its own `metrics/` directory, and
+separate tabs in the interactive display.
+
 ## One round
 
 ```text
 refresh training and validation data from the buffer      (fixed for the round)
 copy best network -> current network, reset learning rate
+validate the current network: the best network's loss on this round's data
 
 epoch 1, 2, ..., max_epochs:
     one shuffled pass over the training set (one step per batch)
@@ -42,11 +61,16 @@ epoch 1, 2, ..., max_epochs:
         stop the round if the best epoch is patience_epochs epochs old
 
 restore the current network to its best validated epoch
-validate current and best network on the same validation set
+validate it and compare with the best network's loss from the start of the round
 promote every network group whose validation loss improved
+if any group was promoted: send the new best network to the sample actor
 if the primary group was promoted (round accepted):
     run the discard test once over all training and validation samples
 ```
+
+Because each round starts from the best network and its data does not change,
+the validation at the start of the round measures the best network on exactly
+the data the round's result is judged on.
 
 Training ends after `patience_rounds` rejected rounds in a row, after
 `max_rounds` rounds, or on a graceful stop.
@@ -63,24 +87,35 @@ Networks that belong together are compared and promoted together:
 
 ### Proposals during training
 
-Simulation runs asynchronously while the estimator trains, and proposal sampling
-is served between any two training steps. Proposals always come from the best
-network, which only changes when a round is accepted. Until the first round has
-been accepted, and for the first `prior_rounds` rounds, proposals come from the
-prior.
+Simulation runs while the estimator trains. Proposals always come from the
+best network in the sample actor, which only changes when a group is promoted.
+Until the first round has completed, and for the first `prior_rounds` rounds,
+proposals come from the prior.
 
 ### Discarding samples
 
 With `discard_samples: true`, every accepted round ends with one discard sweep:
 each training and validation sample is tested once with the new best network,
-and samples that fail are marked for eviction from the buffer.
+and samples that fail are marked for eviction from the buffer. The sweep runs
+in the train actor, whose current network equals the best network at that
+point.
 
 ### Graceful stop
 
 A graceful stop (Ctrl+C in the interactive display, or `--timeout`) takes effect
 after the current training step. Progress since the last validation is dropped,
 the round's acceptance test still runs, and the discard sweep is skipped. The
-saved networks are the best networks.
+best networks are still sent to the sample actor, so posterior samples drawn
+after training use them, and they are what is saved.
+
+## Checkpoints
+
+At the end of training the train actor writes `graph/<node>/best_state.npz`:
+the best network's weights, the data needed to rebuild the networks, and the
+round counters. `falcon sample` and resumed runs read it; runs saved before
+this format existed are read from their `.pth` files. A resumed run continues
+the round counts and starts from the best network. The loop's history is
+written to `graph/<node>/training_history.npz`.
 
 ## Parameters
 
@@ -138,6 +173,9 @@ Each round prints its decision:
 ```text
 Round 1 ACCEPTED | epochs=271 | n_train=3481 n_val=615 | n_sims=32128 | conditional: -1.405e+01 vs best none promoted | marginal: 4.209e+00 vs best none promoted
 ```
+
+These lines and the metrics below are written to the train actor's stream,
+`graph/<node>/train/`; read them with `load_run(path).metrics["z/train"]`.
 
 | Metric | Description |
 |--------|-------------|

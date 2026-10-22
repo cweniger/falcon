@@ -83,7 +83,8 @@ graph:
       log_ratio_threshold: -20.0
 
     ray:
-      num_gpus: 1
+      num_train_gpus: 0.5
+      num_sample_gpus: 0.5
 
   x:
     parents: [z]

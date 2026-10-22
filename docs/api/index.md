@@ -8,13 +8,16 @@ This section documents Falcon's Python API.
 falcon/
 ├── core/              # Core framework
 │   ├── graph           # Graph and Node definitions
-│   ├── deployed_graph  # Runtime execution
-│   └── base_estimator  # Estimator interface
+│   ├── deployed_graph  # Runtime execution: sample and train actors
+│   ├── base_estimator  # Model contract of all estimators
+│   ├── round_trainer   # Round-based training loop (train actor)
+│   ├── model_sampler   # Sampling from the best state (sample actor)
+│   └── state_io        # State trees and best_state.npz checkpoints
 ├── estimators/        # Posterior estimation
 │   ├── flow            # Flow-based posterior estimation
 │   ├── gaussian_fullcov  # Gaussian posterior estimation
 │   ├── flow_density    # Normalizing flow networks (internal, used by Flow)
-│   ├── stepwise_base   # Epoch-based training base class (internal)
+│   ├── torch_model     # Base class of torch estimators
 │   ├── networks        # MLP builder utility (internal)
 │   └── embedded_posterior  # Embedding + posterior wrapper (internal)
 ├── priors/            # Prior distributions
@@ -32,7 +35,7 @@ falcon/
 | [`Graph`](graph.md) | Container for computational graph nodes |
 | [`Node`](graph.md#falcon.core.graph.Node) | Single random variable in the graph |
 | [`DeployedGraph`](deployed-graph.md) | Runtime orchestration with Ray |
-| [`BaseEstimator`](base-estimator.md) | Abstract interface for estimators |
+| [`BaseEstimator`](base-estimator.md) | Model contract of all estimators |
 
 ## Estimators
 

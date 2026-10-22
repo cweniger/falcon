@@ -99,7 +99,8 @@ graph:
       gamma: 0.5
 
     ray:                          # Ray actor configuration
-      num_gpus: 0
+      num_train_gpus: 0.5         # GPUs of the train actor (estimator nodes only)
+      num_sample_gpus: 0.5        # GPUs of the sample actor
       num_cpus: 1
 ```
 
@@ -152,13 +153,41 @@ estimator:
 
 ### `ray`
 
-Per-node Ray resource allocation:
+Per-node Ray resource allocation. Every node has a **sample actor** (named
+after the node, e.g. `z`) that serves prior, proposal and posterior samples.
+Nodes with an estimator also have a **train actor** (`z/train`) that trains
+the networks and sends each new best network to the sample actor, so sampling
+and training run at the same time (see [Training Loop](training.md#two-actors-per-estimator-node)).
 
 ```yaml
 ray:
-  num_gpus: 1
+  num_train_gpus: 0.5
+  num_sample_gpus: 0.5
   num_cpus: 2
 ```
+
+| Key | Default | Description |
+|-----|---------|-------------|
+| `num_train_gpus` | `0` | GPUs of the train actor; ignored for nodes without an estimator |
+| `num_sample_gpus` | `0` | GPUs of each sample actor |
+| `num_gpus` | — | Deprecated. On estimator nodes it is split evenly between the two actors (`num_gpus: 1` = 0.5 + 0.5); otherwise it sets `num_sample_gpus`. Cannot be combined with the keys above |
+| `num_train_cpus` | `num_cpus` | CPUs of the train actor; also its number of CPU threads |
+| `num_sample_cpus` | `num_cpus` | CPUs of each sample actor; also its number of CPU threads |
+| other Ray actor options | — | `num_cpus`, `memory`, `resources`, `runtime_env`, … apply to each actor of the node |
+
+Training and sampling compute at the same time, so they must not both use all
+CPU cores. An actor with CPUs set uses that many threads. Otherwise the
+estimator actors split this machine's cores evenly (with one estimator node:
+half each for training and sampling); nodes without an estimator keep their
+library defaults. The thread counts are shown when the graph starts.
+
+Both actors may share one GPU with fractional values. Ray does not limit the
+memory of fractional GPUs, so leave headroom for two processes. Leave the
+estimator's `device` unset so that each actor picks its own device; an
+explicit `device: cuda` fails in an actor without a GPU.
+
+`num_actors: N` on a node starts N sample actors that share the sampling work;
+an estimator node still has a single train actor, which updates all of them.
 
 ## Global Ray Configuration
 
