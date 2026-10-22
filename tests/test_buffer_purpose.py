@@ -163,3 +163,4 @@ def test_rejects_invalid_fraction(fraction):
 def test_rejects_tiny_min_samples():
     with pytest.raises(ValueError):
         _make_actor(min_samples=1)
+

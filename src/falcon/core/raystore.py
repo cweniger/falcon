@@ -33,6 +33,7 @@ class BufferConfig:
     simulate_interval: float = 1.0
     simulate_chunk_size: int = 0
     simulate_when_full: bool = True
+    simulate_while_training: bool = True  # False: pause while every train actor is in a round
     initial_samples_path: Optional[str] = None
     snapshot_every: int = 0
 
@@ -160,6 +161,7 @@ class DatasetManagerActor:
         initial_samples_path,
         simulate_when_full,
         snapshot_every,
+        simulate_while_training=True,
         log_config=None,
         snapshots_path=None,
     ):
@@ -168,6 +170,7 @@ class DatasetManagerActor:
         self._set_validation_fraction(validation_fraction)
         self.simulate_count = simulate_count
         self.simulate_when_full = simulate_when_full
+        self.simulate_while_training = simulate_while_training
         self.simulate_interval = simulate_interval
         self.simulate_chunk_size = simulate_chunk_size
         self.initial_samples_path = initial_samples_path
@@ -233,6 +236,9 @@ class DatasetManagerActor:
 
     def get_simulate_interval(self):
         return self.simulate_interval
+
+    def get_simulate_while_training(self):
+        return self.simulate_while_training
 
     def get_simulate_chunk_size(self):
         return self.simulate_chunk_size
@@ -492,6 +498,36 @@ class DatasetManagerActor:
         return 0
 
 
+class _LazyRows:
+    """The rows of a batch, gathered from the cache on first access.
+
+    An estimator that keeps per-sample results (see ``Batch._ids``) often does
+    not touch the large arrays of a batch at all.
+    """
+
+    def __init__(self, arrays, rows):
+        self._arrays = arrays
+        self._rows = rows
+        self._gathered = {}
+
+    def __getitem__(self, key):
+        if key not in self._gathered:
+            self._gathered[key] = self._arrays[key][self._rows]
+        return self._gathered[key]
+
+    def __contains__(self, key):
+        return key in self._arrays
+
+    def __iter__(self):
+        return iter(self._arrays)
+
+    def __len__(self):
+        return len(self._arrays)
+
+    def keys(self):
+        return self._arrays.keys()
+
+
 class CachedDataLoader:
     """Cached dataloader with pre-stacked torch tensors for fast batch sampling.
 
@@ -619,8 +655,7 @@ class CachedDataLoader:
     def _batch(self, rows):
         """Batch object for the given row indices of the stacked arrays."""
         ids = self._stacked_ids[rows.cpu().numpy()]
-        data = {key: arr[rows] for key, arr in self._arrays.items()}
-        return Batch(ids, data, self.dataset_manager)
+        return Batch(ids, _LazyRows(self._arrays, rows), self.dataset_manager)
 
     def sample_batch(self, batch_size):
         """Random mini-batch as a Batch object."""
@@ -697,6 +732,10 @@ class BufferView:
     def get_stats(self):
         """Get buffer statistics (total samples, etc.)."""
         return ray.get(self._dataset_manager.get_store_stats.remote())
+
+    def can_grow(self) -> bool:
+        """Whether the buffer would accept new simulations now (False at max_samples with simulate_when_full off)."""
+        return ray.get(self._dataset_manager.num_resims.remote()) > 0
 
 
 def get_ray_dataset_manager(

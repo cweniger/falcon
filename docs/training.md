@@ -105,6 +105,18 @@ conditions at the observation for this; evidence derived from observed nodes
 is simulated once at launch. The proposal state is published whenever it
 changes and is saved in `best_state.npz`.
 
+### Waiting for simulations
+
+With continuous simulation, the samples simulated while round *k* trains
+come from the proposal of round *k − 1*. `wait_for_sims: N` on the estimator
+makes the next round wait until `N` samples have been simulated after the
+round published its proposal. Simulation itself runs on as before, so only
+the rounds pause, not the buffer; with `buffer.simulate_while_training:
+false` it pauses too while every node trains, so no samples are drawn from
+proposals that are about to be replaced. It is set per node, and a node's wait does
+not affect the other nodes' rounds. This is the schedule of sequential
+methods with a fixed simulation budget per round.
+
 ### Discarding samples
 
 With `discard_samples: true`, every accepted round ends with one discard sweep:
@@ -148,6 +160,8 @@ All parameters are flat keyword arguments of the estimator (see
 | `prior_rounds` | 0 | Rounds that simulate from the prior before switching to the learned proposal |
 | `discard_samples` | `true` (Flow) | Run the discard sweep after accepted rounds |
 | `batch_size` | 128 | Samples per step |
+| `val_batch_size` | `null` | Samples per batch in validation and in the discard sweep (`null` = `batch_size`) |
+| `wait_for_sims` | 0 | After a round, wait until this many new samples were simulated (from the proposal the round just published) before the next round starts |
 
 Patience is checked only when validating, so with `val_every_epochs: 3` and
 `patience_epochs: 12` a round ends at the fourth validation without improvement.

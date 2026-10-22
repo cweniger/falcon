@@ -450,6 +450,11 @@ class TrainActor:
     # ==================== Control ====================
 
     @ray.method(concurrency_group="control")
+    def is_training(self):
+        """Whether a round is in progress (not waiting for simulations, idle or done)."""
+        return self.trainer.status == "training"
+
+    @ray.method(concurrency_group="control")
     def request_stop(self):
         """Stop after the current training step; the acceptance test still runs."""
         self.trainer.request_stop()
@@ -968,6 +973,10 @@ class DeployedGraph:
             time.sleep(1)
 
         simulate_interval = ray.get(dataset_manager.get_simulate_interval.remote())
+        # buffer.simulate_while_training: false -- simulate only while some train
+        # actor is between rounds (waiting for simulations), so that samples are
+        # drawn from published proposals and the fits keep the GPU to themselves
+        pause_while_training = not ray.get(dataset_manager.get_simulate_while_training.remote())
 
         # Track last status log time for periodic updates
         last_status_log = time.time()
@@ -998,6 +1007,9 @@ class DeployedGraph:
             if not stop_requested:
                 time.sleep(simulate_interval)
                 num_new_samples = ray.get(dataset_manager.num_resims.remote())
+                if num_new_samples > 0 and pause_while_training and self.trainers and all(
+                        ray.get([t.is_training.remote() for t in self.trainers.values()])):
+                    num_new_samples = 0
                 if num_new_samples > 0:
                     # Proposals come from the sample actors, which run
                     # independently of training.

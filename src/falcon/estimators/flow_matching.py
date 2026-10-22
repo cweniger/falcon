@@ -276,6 +276,40 @@ def _robust_nll(log_prob: torch.Tensor, margin: float = 50.0) -> float:
     return float(-log_prob[ok].mean()) if ok.any() else math.inf
 
 
+class RowCache:
+    """Rows of a per-sample quantity on the device, keyed by buffer sample id."""
+
+    def __init__(self):
+        self.rows = None
+        self.have = None
+
+    def clear(self) -> None:
+        if self.have is not None:
+            self.have.zero_()
+
+    def get(self, ids: torch.Tensor, compute) -> torch.Tensor:
+        """Rows for ``ids``; ``compute(missing)`` returns the rows of the boolean mask ``missing``."""
+        size = int(ids.max()) + 1
+        if self.have is None or size > len(self.have):
+            size = max(size, 2 * (0 if self.have is None else len(self.have)))
+            have = torch.zeros(size, dtype=torch.bool, device=ids.device)
+            if self.have is not None:
+                have[: len(self.have)] = self.have
+            self.have = have
+            if self.rows is not None:
+                rows = self.rows.new_zeros(size, *self.rows.shape[1:])
+                rows[: len(self.rows)] = self.rows
+                self.rows = rows
+        missing = ~self.have[ids]
+        if bool(missing.any()):
+            values = compute(missing)
+            if self.rows is None:
+                self.rows = values.new_zeros(len(self.have), *values.shape[1:])
+            self.rows[ids[missing]] = values
+            self.have[ids[missing]] = True
+        return self.rows[ids]
+
+
 # ==================== Estimator ====================
 
 
@@ -306,8 +340,8 @@ class FlowMatching(TorchModel):
     buffer policy corresponds to ``discard_samples: true`` with
     ``buffer.min_samples`` as the floor, ``buffer.max_samples`` as the cap,
     ``buffer.simulate_when_full: false`` and ``buffer.validation_fraction:
-    0.2``; its fixed 4000 simulations per round have no exact counterpart,
-    since falcon simulates continuously.
+    0.2``; its 4000 simulations per round, drawn from the new outer region,
+    correspond to ``wait_for_sims: 4000``.
 
     Args:
         max_epochs: Maximum epochs per round.
@@ -315,6 +349,14 @@ class FlowMatching(TorchModel):
         embedding: Embedding config dict (with ``_target_`` etc.).
         device: Device string (e.g. ``"cuda:0"``); auto-detected if ``None``.
         batch_size: Mini-batch size.
+        val_batch_size: Batch size of validation and of the discard sweep
+            (``None`` = ``batch_size``). The density ODE costs about the same
+            for 128 rows as for thousands, so large batches make it cheap.
+        embed_chunk: Rows per forward pass of the embedding outside training steps.
+        wait_for_sims: After each round, wait until this many samples have
+            been simulated since the round published its proposal, so the
+            next round trains on data from the new proposal region (0 = start
+            the next round at once).
         patience_epochs: End the round once the best validation loss is this
             many epochs old (checked at validations).
         val_every_epochs: Validate after every N-th epoch (and at the last
@@ -378,6 +420,9 @@ class FlowMatching(TorchModel):
         device: Optional[str] = None,
         # Training loop
         batch_size: int = 128,
+        val_batch_size: Optional[int] = 16384,
+        embed_chunk: int = 512,
+        wait_for_sims: int = 0,
         patience_epochs: int = 12,
         val_every_epochs: int = 3,
         max_rounds: Optional[int] = None,
@@ -426,6 +471,9 @@ class FlowMatching(TorchModel):
         self.embedding = embedding
         self.device = device
         self.batch_size = batch_size
+        self.val_batch_size = val_batch_size
+        self.embed_chunk = embed_chunk
+        self.wait_for_sims = wait_for_sims
         self.patience_epochs = patience_epochs
         self.val_every_epochs = val_every_epochs
         self.max_rounds = max_rounds
@@ -488,6 +536,11 @@ class FlowMatching(TorchModel):
         self._warned_no_observation = False
         self._state_version = 0
         self._readout_thresholds: Dict[tuple, float] = {}
+        # Per-sample rows kept between steps: the latent parameters never change;
+        # the summaries hold while the (averaged) embedding does not move
+        self._latent_rows = RowCache()
+        self._summary_rows = RowCache()
+        self._summary_stale = True
 
         ladder_config = LadderConfig(
             x_sigma=self.x_sigma, delta_sigma=self.delta_sigma, min_keep_frac=self.min_keep_frac,
@@ -541,6 +594,11 @@ class FlowMatching(TorchModel):
         super().import_state(group, tree)
         self._state_version += 1
         self._readout_thresholds.clear()
+        self._summary_stale = True
+
+    def restore(self, group: str, handle) -> None:
+        super().restore(group, handle)
+        self._summary_stale = True
 
     # ==================== Training ====================
 
@@ -578,9 +636,40 @@ class FlowMatching(TorchModel):
             if self.lr_decay_factor < 1.0 else None
         )
 
+    def _ids(self, batch) -> Optional[torch.Tensor]:
+        ids = getattr(batch, "_ids", None)
+        if ids is None or len(ids) == 0:
+            return None
+        return torch.as_tensor(np.asarray(ids), dtype=torch.long, device=self.device)
+
     def _latent(self, batch) -> torch.Tensor:
-        theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
-        return self.simulator_instance.inverse(theta, mode="standard_normal").double()
+        def compute(rows=None):
+            theta = self._to_tensor(batch[f"{self.theta_key}.value"], self.device)
+            theta = theta if rows is None else theta[rows]
+            return self.simulator_instance.inverse(theta, mode="standard_normal").double()
+
+        ids = self._ids(batch)
+        return compute() if ids is None else self._latent_rows.get(ids, compute)
+
+    def _fixed_summary(self, batch) -> torch.Tensor:
+        """Summaries of the best-so-far (averaged) embedding, kept per sample while it does not move."""
+        def compute(rows=None):
+            conditions = self._conditions(batch)  # gathers the batch's arrays: only when needed
+            n = len(batch) if rows is None else int(rows.sum())
+            chunks = []
+            for i in range(0, n, self.embed_chunk):
+                part = {k: (v if rows is None else v[rows])[i:i + self.embed_chunk]
+                        for k, v in conditions.items()}
+                chunks.append(self._summary("conditional", part).float())
+            return torch.cat(chunks)
+
+        ids = self._ids(batch)
+        if ids is None:
+            return compute()
+        if self._summary_stale:
+            self._summary_rows.clear()
+            self._summary_stale = False
+        return self._summary_rows.get(ids, compute)
 
     def _conditions(self, batch) -> Dict[str, torch.Tensor]:
         return {
@@ -630,17 +719,16 @@ class FlowMatching(TorchModel):
         self._ensure_training()
         nets = self._train_nets
         u = self._latent(batch)
-        conditions = self._conditions(batch)
         w_c = self._flow_c.whitener.whiten(u).float()
         w_m = self._flow_m.whitener.whiten(u).float()
 
         joint = self._embedding_trains()
         if joint:
             nets["embedding"].train(True)
-            s = nets["embedding"](conditions).float()
+            s = nets["embedding"](self._conditions(batch)).float()
         else:
             with torch.no_grad():
-                s = self._summary("conditional", conditions).float()
+                s = self._fixed_summary(batch)
 
         loss_c = fm_loss_late(nets["velocity_c"], w_c, s, self.time_late_k, self.time_late_mix)
         loss_m = fm_loss_late(nets["velocity_m"], w_m, torch.zeros_like(s), self.time_late_k, self.time_late_mix)
@@ -655,12 +743,13 @@ class FlowMatching(TorchModel):
         ema_update(self._flow_m.velocity, nets["velocity_m"], self.ema_decay)
         if joint:
             ema_update(self._embedding, nets["embedding"], self.ema_decay)
+            self._summary_stale = True
         self._steps += 1
         return {"loss": loss_c.item(), "loss_aux": loss_m.item()}
 
     def val_step(self, batch) -> Dict[str, float]:
         u = self._latent(batch)
-        s = self._summary("conditional", self._conditions(batch)).float()
+        s = self._fixed_summary(batch)
         zeros = torch.zeros_like(s)
         kw = self._density_kw(exact=True)
         log_prob_c = self._flow_c.log_prob(u, s, **kw)

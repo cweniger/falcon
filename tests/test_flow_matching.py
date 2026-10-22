@@ -3,6 +3,8 @@
 import math
 from unittest.mock import MagicMock
 
+import itertools
+
 import numpy as np
 import pytest
 import torch
@@ -118,11 +120,16 @@ def _model(device="cpu", embedding=None, **overrides):
     return model
 
 
+_BATCH_COUNTER = itertools.count()
+
+
 def _batch(n=128, seed=0, shift=0.0, scale=1.0, dtype=torch.float64):
     g = torch.Generator().manual_seed(seed)
     theta = torch.randn(n, 2, generator=g, dtype=torch.float64) * scale + shift
     x = (theta + SIGMA * torch.randn(n, 2, generator=g, dtype=torch.float64)).to(dtype)
-    return Batch(np.arange(n), {"z.value": theta, "z.log_prob": torch.zeros(n, dtype=torch.float64),
+    # Sample ids identify samples: FlowMatching keeps per-sample results under them
+    ids = np.arange(n) + n * next(_BATCH_COUNTER)
+    return Batch(ids, {"z.value": theta, "z.log_prob": torch.zeros(n, dtype=torch.float64),
                                 "x.value": x}, None)
 
 

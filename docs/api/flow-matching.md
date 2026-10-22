@@ -85,7 +85,7 @@ onto falcon's buffer as follows:
 | drop samples outside the new outer region, oldest first, down to a floor of 8000 | `discard_samples: true` (default) with `buffer.min_samples: 8000` |
 | stop generating while 64000 samples are inside the region | `buffer.max_samples: 64000`, `buffer.simulate_when_full: false` |
 | 20% validation, handled like the training set | `buffer.validation_fraction: 0.2` |
-| 4000 new simulations per round | no exact counterpart: falcon simulates `simulate_count` every `simulate_interval` seconds |
+| 4000 new simulations per round, drawn from the new outer region | `wait_for_sims: 4000` (see [Training Loop](../training.md#waiting-for-simulations)) |
 
 Keeping the buffer inside the outer region matters: the whitener can only
 zoom in as far as the training data has contracted.
@@ -128,6 +128,9 @@ See `examples/01_minimal/config_flow_matching.yml` for a complete example.
 | `density_steps` | int | 32 | ODE steps per density |
 | `div_probes` | int | 4 | Hutchinson probes for proposal and posterior densities (0 = exact trace; validation is always exact) |
 | `eval_chunk` | int | 16384 | Rows per forward pass when sampling or evaluating densities |
+| `wait_for_sims` | int | 0 | After a round, wait until this many samples were simulated from the proposal it published before the next round |
+| `val_batch_size` | int | 16384 | Batch size of validation and of the discard sweep. The density ODE is bound by its number of small steps, not by the rows, so one large batch costs about as much as one of 128 |
+| `embed_chunk` | int | 512 | Rows per forward pass of the embedding outside training steps |
 
 ### Region ladder
 
@@ -165,6 +168,12 @@ accepted rounds discard samples outside the outer region.
   away. The training loss is the flow-matching loss, so the `train_loss` and
   `val_loss` in the log are on different scales; `val_fm` is the validation
   flow-matching loss.
+- **Per-sample results.** The latent parameters of a sample never change, and
+  its summary only changes while the embedding trains. Both are kept on the
+  device under the sample's buffer id, so after `embedding_epochs` a training
+  step no longer runs the embedding or touches the data arrays, and validation
+  runs the embedding only for samples it has not seen since the embedding last
+  moved.
 - **Whitener frames.** Every round refits each flow's whitener to the round's
   training data before the first epoch. A flow that was not promoted in the
   previous round keeps the frame of the best network it resumes from. Once
